@@ -1,3 +1,4 @@
+import hashlib
 import io
 
 import pandas as pd
@@ -12,6 +13,16 @@ st.set_page_config(
 
 
 REQUIRED_COLUMNS = ["compound", "smiles"]
+INPUT_CACHE_KEYS = (
+    "admet_input_bytes",
+    "admet_input_name",
+    "admet_input_signature",
+)
+
+
+def clear_cached_input():
+    for key in INPUT_CACHE_KEYS:
+        st.session_state.pop(key, None)
 
 
 def make_template_file():
@@ -83,12 +94,26 @@ with right_col:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-if uploaded_file is None:
+if uploaded_file is not None:
+    uploaded_bytes = uploaded_file.getvalue()
+    st.session_state["admet_input_bytes"] = uploaded_bytes
+    st.session_state["admet_input_name"] = uploaded_file.name
+    st.session_state["admet_input_signature"] = hashlib.sha256(uploaded_bytes).hexdigest()
+
+cached_input_bytes = st.session_state.get("admet_input_bytes")
+cached_input_name = st.session_state.get("admet_input_name")
+
+if cached_input_bytes is None:
     st.info("请先上传包含 compound 和 smiles 的 Excel 文件。")
     st.stop()
 
+st.success(f"已加载输入文件：{cached_input_name}")
+if st.button("清空当前数据", key="admet_clear_cached_input"):
+    clear_cached_input()
+    st.rerun()
+
 try:
-    input_df = pd.read_excel(uploaded_file)
+    input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
     input_df = normalize_input_columns(input_df)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")

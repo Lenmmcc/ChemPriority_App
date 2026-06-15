@@ -1,3 +1,5 @@
+import hashlib
+import io
 import os
 import sys
 
@@ -23,6 +25,31 @@ from src.episuite_io import (  # noqa: E402
     run_epi_web_batch,
     validate_input,
 )
+
+
+INPUT_CACHE_KEYS = (
+    "epi_input_bytes",
+    "epi_input_name",
+    "epi_input_signature",
+)
+RESULT_CACHE_KEYS = (
+    "epi_web_results",
+    "epi_web_errors",
+    "epi_merged_results",
+    "epi_parsed_results",
+    "epi_parse_warnings",
+)
+
+
+def clear_result_cache():
+    for key in RESULT_CACHE_KEYS:
+        st.session_state.pop(key, None)
+
+
+def clear_cached_input():
+    for key in INPUT_CACHE_KEYS:
+        st.session_state.pop(key, None)
+    clear_result_cache()
 
 
 st.set_page_config(
@@ -58,12 +85,29 @@ with right_col:
 st.subheader("目标环境归趋指标")
 st.dataframe(pd.DataFrame(FATE_ENDPOINTS), use_container_width=True)
 
-if uploaded_file is None:
+if uploaded_file is not None:
+    uploaded_bytes = uploaded_file.getvalue()
+    input_signature = hashlib.sha256(uploaded_bytes).hexdigest()
+    if st.session_state.get("epi_input_signature") != input_signature:
+        clear_result_cache()
+    st.session_state["epi_input_bytes"] = uploaded_bytes
+    st.session_state["epi_input_name"] = uploaded_file.name
+    st.session_state["epi_input_signature"] = input_signature
+
+cached_input_bytes = st.session_state.get("epi_input_bytes")
+cached_input_name = st.session_state.get("epi_input_name")
+
+if cached_input_bytes is None:
     st.info("请先上传包含 compound 和 smiles 的 Excel 文件。")
     st.stop()
 
+st.success(f"已加载输入文件：{cached_input_name}")
+if st.button("清空当前数据", key="epi_clear_cached_input"):
+    clear_cached_input()
+    st.rerun()
+
 try:
-    input_df = pd.read_excel(uploaded_file)
+    input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
     input_df = normalize_input_columns(input_df)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")

@@ -54,6 +54,37 @@ def show_dataframe(df):
         st.dataframe(df, use_container_width=True)
 
 
+INPUT_CACHE_KEYS = (
+    "use_query_input_bytes",
+    "use_query_input_name",
+)
+QUERY_RESULT_KEYS = (
+    "identifier_input_signature",
+    "identifier_completed_input_df",
+    "identifier_completed_df",
+    "identifier_warnings_df",
+    "identifier_completion_notice",
+    "comptox_use_summary",
+    "comptox_use_candidates",
+    "comptox_use_errors",
+    "echa_use_summary",
+    "echa_use_candidates",
+    "echa_use_dossiers",
+    "echa_use_errors",
+)
+
+
+def clear_query_results():
+    for key in QUERY_RESULT_KEYS:
+        st.session_state.pop(key, None)
+
+
+def clear_cached_query_input():
+    for key in INPUT_CACHE_KEYS:
+        st.session_state.pop(key, None)
+    clear_query_results()
+
+
 st.set_page_config(
     page_title="化合物用途查询 - ChemPriority",
     page_icon="🔎",
@@ -101,33 +132,32 @@ st.info(
     "再用 EPA/ECHA 补全用途查询所需的 DTXSID、CAS、EC 和 ECHA ID。"
 )
 
-if uploaded_file is None:
+if uploaded_file is not None:
+    uploaded_bytes = uploaded_file.getvalue()
+    st.session_state["use_query_input_bytes"] = uploaded_bytes
+    st.session_state["use_query_input_name"] = uploaded_file.name
+
+cached_input_bytes = st.session_state.get("use_query_input_bytes")
+cached_input_name = st.session_state.get("use_query_input_name")
+
+if cached_input_bytes is None:
     st.info("请先上传包含 compound、cas、smiles、dtxsid、ec 或 echa_id 的 Excel 文件。")
     st.stop()
-else:
-    try:
-        uploaded_bytes = uploaded_file.getvalue()
-        input_signature = hashlib.sha256(uploaded_bytes).hexdigest()
-        raw_input_df = pd.read_excel(io.BytesIO(uploaded_bytes))
-    except Exception as exc:
-        st.error(f"Excel 读取失败：{exc}")
-        st.stop()
+
+st.success(f"已加载输入文件：{cached_input_name}")
+if st.button("清空当前数据", key="use_clear_cached_query_input"):
+    clear_cached_query_input()
+    st.rerun()
+
+try:
+    input_signature = hashlib.sha256(cached_input_bytes).hexdigest()
+    raw_input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
+except Exception as exc:
+    st.error(f"Excel 读取失败：{exc}")
+    st.stop()
 
 if st.session_state.get("identifier_input_signature") != input_signature:
-    for key in (
-        "identifier_completed_input_df",
-        "identifier_completed_df",
-        "identifier_warnings_df",
-        "identifier_completion_notice",
-        "comptox_use_summary",
-        "comptox_use_candidates",
-        "comptox_use_errors",
-        "echa_use_summary",
-        "echa_use_candidates",
-        "echa_use_dossiers",
-        "echa_use_errors",
-    ):
-        st.session_state.pop(key, None)
+    clear_query_results()
     st.session_state["identifier_input_signature"] = input_signature
 
 resolver_input_df = normalize_resolver_input_columns(raw_input_df)

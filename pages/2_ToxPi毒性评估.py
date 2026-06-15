@@ -26,7 +26,6 @@ from src.toxpi_calc import (  # noqa: E402
 
 st.set_page_config(
     page_title="ToxPi 毒性评估系统 - ChemPriority",
-    page_icon="🧬",
     layout="wide",
 )
 
@@ -124,7 +123,7 @@ def combine_seed_summaries(seed_results, top_k):
     return combined.sort_values(by="toxpi", ascending=False).reset_index(drop=True)
 
 
-st.title("🧬 ToxPi 毒性评估与排序稳健性分析")
+st.title("ToxPi 毒性评估与排序稳健性分析")
 st.caption("上传 Excel 后在线计算、预览图表，并通过下载按钮获取 PDF 或 Excel 结果。")
 st.markdown("---")
 
