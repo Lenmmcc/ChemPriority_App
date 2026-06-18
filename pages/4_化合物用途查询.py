@@ -3,6 +3,10 @@ import io
 import os
 import sys
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -44,6 +48,12 @@ from src.identifier_resolver import (  # noqa: E402
     normalize_input_columns as normalize_resolver_input_columns,
     run_identifier_completion_batch,
     validate_input as validate_resolver_input,
+)
+from src.use_rose_plot import (  # noqa: E402
+    extract_use_rose_data,
+    figure_to_pdf_bytes,
+    figure_to_png_bytes,
+    generate_use_rose_plot,
 )
 
 
@@ -197,8 +207,8 @@ if echa_valid:
 else:
     st.warning(f"ECHA 输入检查未通过：{echa_message}")
 
-tab_input, tab_resolver, tab_epa, tab_echa, tab_output, tab_notes = st.tabs(
-    ["输入数据", "标识符补全", "EPA CompTox 查询", "ECHA 查询", "结果下载", "字段说明"]
+tab_input, tab_resolver, tab_epa, tab_echa, tab_rose, tab_output, tab_notes = st.tabs(
+    ["输入数据", "标识符补全", "EPA CompTox 查询", "ECHA 查询", "用途图谱", "结果下载", "字段说明"]
 )
 
 with tab_input:
@@ -553,8 +563,88 @@ with tab_echa:
         with st.expander("查看 ECHA 提示和失败记录", expanded=False):
             show_dataframe(echa_errors_df)
 
+with tab_rose:
+    st.subheader("5. 用途风玫瑰图")
+    st.write(
+        "根据 EPA 或 ECHA 的 Top 用途结果绘图。每个化合物一个极坐标子图，"
+        "每个用途扇区的角度按该用途证据数量占当前化合物 Top 用途证据总量的比例计算。"
+    )
+
+    rose_sources = {}
+    comptox_summary_df = st.session_state.get("comptox_use_summary")
+    if isinstance(comptox_summary_df, pd.DataFrame) and not comptox_summary_df.empty:
+        rose_sources["EPA CompTox"] = {
+            "source_label": "EPA",
+            "summary_df": comptox_summary_df,
+            "title": "EPA CompTox 用途风玫瑰图",
+            "file_prefix": "EPA_Use_Rose_Plot",
+        }
+
+    echa_summary_df = st.session_state.get("echa_use_summary")
+    if isinstance(echa_summary_df, pd.DataFrame) and not echa_summary_df.empty:
+        rose_sources["ECHA REACH"] = {
+            "source_label": "ECHA",
+            "summary_df": echa_summary_df,
+            "title": "ECHA REACH 用途风玫瑰图",
+            "file_prefix": "ECHA_Use_Rose_Plot",
+        }
+
+    if not rose_sources:
+        st.info("请先完成 EPA CompTox 查询或 ECHA 查询。查询完成后，这里会显示用途风玫瑰图。")
+    else:
+        selected_source = st.radio(
+            "选择图表数据来源",
+            options=list(rose_sources.keys()),
+            horizontal=True,
+            key="use_rose_source",
+        )
+        source_config = rose_sources[selected_source]
+        rose_df = extract_use_rose_data(
+            source_config["summary_df"],
+            source_label=source_config["source_label"],
+        )
+
+        if rose_df.empty:
+            st.warning("当前结果中没有可用于绘图的用途数据。")
+        else:
+            if rose_df["angle_basis"].eq("equal_fallback").any():
+                fallback_compounds = "、".join(
+                    sorted(rose_df.loc[rose_df["angle_basis"].eq("equal_fallback"), "compound"].unique())
+                )
+                st.warning(
+                    f"以下化合物缺少有效证据数量或证据总量为 0，已按用途数量等角度绘制：{fallback_compounds}"
+                )
+
+            with st.expander("查看图表数据", expanded=False):
+                show_dataframe(rose_df)
+
+            fig = generate_use_rose_plot(rose_df, source_config["title"])
+            st.pyplot(fig)
+
+            png_buffer = figure_to_png_bytes(fig)
+            pdf_buffer = figure_to_pdf_bytes(fig)
+            plt.close(fig)
+
+            col_png, col_pdf = st.columns(2)
+            with col_png:
+                st.download_button(
+                    label="下载 PNG",
+                    data=png_buffer,
+                    file_name=f"{source_config['file_prefix']}.png",
+                    mime="image/png",
+                    key=f"rose_download_png_{source_config['source_label']}",
+                )
+            with col_pdf:
+                st.download_button(
+                    label="下载 PDF",
+                    data=pdf_buffer,
+                    file_name=f"{source_config['file_prefix']}.pdf",
+                    mime="application/pdf",
+                    key=f"rose_download_pdf_{source_config['source_label']}",
+                )
+
 with tab_output:
-    st.subheader("5. 下载结果工作簿")
+    st.subheader("6. 下载结果工作簿")
     completed_df = st.session_state.get("identifier_completed_df")
     identifier_warnings_df = st.session_state.get("identifier_warnings_df")
 
