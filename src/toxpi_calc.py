@@ -1,11 +1,15 @@
+import re
+import unicodedata
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from scipy.stats import spearmanr
 
 
-plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial"]
+# Result figures must export consistently on hosts that do not have CJK fonts.
+plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams["pdf.fonttype"] = 42
 
@@ -286,9 +290,9 @@ def run_sensitivity_analysis(toxpi_agg, custom_weights=None, n_iter=1000, seed=1
     mean_val = stats["mean"]
     ax.axvline(mean_val, color="red", linestyle="--", linewidth=1.2, zorder=4)
 
-    ax.set_title(f"权重随机扰动下排序一致性分布 (seed={seed})", fontsize=12, pad=15, color="#111111")
-    ax.set_xlabel("Spearman 相关系数（与原始排序）", fontsize=11, labelpad=8, color="#111111")
-    ax.set_ylabel("频次", fontsize=11, labelpad=8, color="#111111")
+    ax.set_title(f"Rank Stability under Random Weight Perturbations (seed={seed})", fontsize=12, pad=15, color="#111111")
+    ax.set_xlabel("Spearman correlation (vs. original ranking)", fontsize=11, labelpad=8, color="#111111")
+    ax.set_ylabel("Frequency", fontsize=11, labelpad=8, color="#111111")
 
     ax.set_ylim(0, 1000)
 
@@ -300,7 +304,7 @@ def run_sensitivity_analysis(toxpi_agg, custom_weights=None, n_iter=1000, seed=1
     ax.tick_params(axis="both", which="both", length=0, labelsize=10, colors="#333333")
 
     offset_x = 0.01 if mean_val < 0.95 else -0.06
-    ax.text(mean_val + offset_x, 800, f"均值 = {mean_val:.3f}", color="red", fontsize=11)
+    ax.text(mean_val + offset_x, 800, f"Mean = {mean_val:.3f}", color="red", fontsize=11)
 
     return summary_df, stats, fig_cor, actual_top_k
 
@@ -365,7 +369,16 @@ def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, tox
         ax.set_ylim(0, 1.2)
         ax.axis("off")
 
-        ax.text(0.5, -0.15, name, fontsize=14, fontweight="bold", ha="center", va="top", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            -0.15,
+            _portable_label(name, f"Compound {idx + 1}"),
+            fontsize=14,
+            fontweight="bold",
+            ha="center",
+            va="top",
+            transform=ax.transAxes,
+        )
         ax.text(0.5, -0.35, f"ToxPi: {score:.2f}", fontsize=11, color="black", ha="center", va="top",
                 transform=ax.transAxes)
 
@@ -377,7 +390,13 @@ def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, tox
         ha="center",
     )
 
-    legend_elements = [Patch(facecolor=metric_colors[col], label=col) for col in toxic_cols]
+    legend_elements = [
+        Patch(
+            facecolor=metric_colors[col],
+            label=_portable_label(col, f"Toxicity factor {idx + 1}"),
+        )
+        for idx, col in enumerate(toxic_cols)
+    ]
     legend_cols = min(5, max(1, len(toxic_cols)))
     fig.legend(
         handles=legend_elements,
@@ -402,6 +421,10 @@ def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, tox
 
 def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
     compounds = toxpi_agg["compound"].values
+    compound_labels = [
+        _portable_label(compound, f"Compound {idx + 1}")
+        for idx, compound in enumerate(compounds)
+    ]
     scores = toxpi_agg["toxpi"].values
 
     colors_list = []
@@ -414,7 +437,7 @@ def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
     fig, ax = plt.subplots(figsize=(6.5, 4.6))
 
     bars = ax.bar(
-        compounds,
+        compound_labels,
         scores,
         color=colors_list,
         edgecolor="black",
@@ -424,7 +447,7 @@ def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
         zorder=3,
     )
 
-    ax.set_title("各污染物 ToxPi 综合毒性得分对比图", fontsize=12, pad=15, fontweight="bold", color="#000000")
+    ax.set_title("ToxPi Score Comparison Across Pollutants", fontsize=12, pad=15, fontweight="bold", color="#000000")
     ax.set_ylabel("ToxPi Score", fontsize=11, labelpad=8, color="#000000")
 
     ax.set_ymargin(0.15)
@@ -501,6 +524,17 @@ def _metric_colors(toxic_cols):
                 int(rgba[2] * 255),
             )
     return colors
+
+
+def _portable_label(value, fallback):
+    """Return an ASCII-only figure label that works without CJK fonts."""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "<na>"}:
+        return fallback
+
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    ascii_text = re.sub(r"\s+", " ", ascii_text).strip()
+    return ascii_text or fallback
 
 
 def _to_numeric_series(series):
