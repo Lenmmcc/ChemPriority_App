@@ -576,7 +576,7 @@ with tab_rose:
         rose_sources["EPA CompTox"] = {
             "source_label": "EPA",
             "summary_df": comptox_summary_df,
-            "title": "EPA CompTox 用途风玫瑰图",
+            "title": "EPA CompTox Use Rose Plot",
             "file_prefix": "EPA_Use_Rose_Plot",
         }
 
@@ -585,7 +585,7 @@ with tab_rose:
         rose_sources["ECHA REACH"] = {
             "source_label": "ECHA",
             "summary_df": echa_summary_df,
-            "title": "ECHA REACH 用途风玫瑰图",
+            "title": "ECHA REACH Use Rose Plot",
             "file_prefix": "ECHA_Use_Rose_Plot",
         }
 
@@ -616,7 +616,19 @@ with tab_rose:
                 )
 
             with st.expander("查看图表数据", expanded=False):
-                show_dataframe(rose_df)
+                show_dataframe(
+                    rose_df[
+                        [
+                            "source",
+                            "compound_label",
+                            "rank",
+                            "use_label",
+                            "evidence_count",
+                            "angle_fraction",
+                            "angle_basis",
+                        ]
+                    ]
+                )
 
             fig = generate_use_rose_plot(rose_df, source_config["title"])
             st.pyplot(fig)

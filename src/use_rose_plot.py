@@ -1,6 +1,7 @@
 import io
 import math
 import re
+import unicodedata
 
 import matplotlib
 
@@ -11,7 +12,9 @@ import pandas as pd
 from matplotlib.patches import Patch
 
 
-plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial"]
+# The rose plot is exported on hosts that may not include Chinese fonts. Keep
+# all plot text ASCII and use Matplotlib's bundled cross-platform sans-serif.
+plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams["pdf.fonttype"] = 42
 
@@ -31,8 +34,10 @@ def extract_use_rose_data(summary_df, source_label):
             columns=[
                 "source",
                 "compound",
+                "compound_label",
                 "rank",
                 "use_cn",
+                "use_label",
                 "evidence_count",
                 "angle_fraction",
                 "angle_basis",
@@ -41,15 +46,24 @@ def extract_use_rose_data(summary_df, source_label):
 
     use_ranks = _find_use_ranks(summary_df.columns)
     rows = []
-    for _, row in summary_df.iterrows():
+    for compound_index, (_, row) in enumerate(summary_df.iterrows(), start=1):
         compound = _clean_text(row.get("compound")) or "未命名化合物"
+        compound_label = _ascii_label(compound, f"Compound {compound_index}")
         entries = []
         for rank in use_ranks:
             use_cn = _clean_text(row.get(f"用途{rank}"))
             if not use_cn:
                 continue
+            use_en = _clean_text(row.get(f"用途{rank}_英文证据"))
             evidence = _to_number(row.get(f"用途{rank}_证据数量"))
-            entries.append({"rank": rank, "use_cn": use_cn, "evidence_count": evidence})
+            entries.append(
+                {
+                    "rank": rank,
+                    "use_cn": use_cn,
+                    "use_label": _ascii_label(use_en, f"Use category {rank}"),
+                    "evidence_count": evidence,
+                }
+            )
 
         if not entries:
             continue
@@ -64,8 +78,10 @@ def extract_use_rose_data(summary_df, source_label):
                     {
                         "source": source_label,
                         "compound": compound,
+                        "compound_label": compound_label,
                         "rank": item["rank"],
                         "use_cn": item["use_cn"],
+                        "use_label": item["use_label"],
                         "evidence_count": item["evidence_count"],
                         "angle_fraction": angle_fraction,
                         "angle_basis": angle_basis,
@@ -78,8 +94,10 @@ def extract_use_rose_data(summary_df, source_label):
                     {
                         "source": source_label,
                         "compound": compound,
+                        "compound_label": compound_label,
                         "rank": item["rank"],
                         "use_cn": item["use_cn"],
+                        "use_label": item["use_label"],
                         "evidence_count": item["evidence_count"],
                         "angle_fraction": equal_fraction,
                         "angle_basis": "equal_fallback",
@@ -91,8 +109,9 @@ def extract_use_rose_data(summary_df, source_label):
 
 def generate_use_rose_plot(rose_df, title):
     if rose_df is None or rose_df.empty:
-        raise ValueError("没有可用于绘制用途风玫瑰图的数据。")
+        raise ValueError("No use data is available for the rose plot.")
 
+    rose_df = _prepare_plot_labels(rose_df)
     compounds = list(rose_df["compound"].drop_duplicates())
     use_colors = _build_use_color_map(rose_df["use_cn"].dropna().drop_duplicates())
     n_compounds = len(compounds)
@@ -138,12 +157,23 @@ def generate_use_rose_plot(rose_df, title):
         ax.set_xticklabels([])
         ax.grid(False)
         ax.spines["polar"].set_visible(False)
-        ax.set_title(str(compound), fontsize=12, fontweight="bold", pad=12)
+        ax.set_title(
+            _ascii_label(compound, f"Compound {ax_idx + 1}"),
+            fontsize=12,
+            fontweight="bold",
+            pad=12,
+        )
 
-    fig.suptitle(title, fontsize=16, fontweight="bold", y=0.95)
+    fig.suptitle(
+        _ascii_label(title, "Use Rose Plot"),
+        fontsize=16,
+        fontweight="bold",
+        y=0.95,
+    )
+    legend_data = rose_df[["use_cn", "use_label"]].drop_duplicates("use_cn")
     legend_items = [
-        Patch(facecolor=color, label=label)
-        for label, color in sorted(use_colors.items(), key=lambda item: item[0])
+        Patch(facecolor=use_colors[row.use_cn], label=row.use_label)
+        for row in legend_data.sort_values("use_label").itertuples(index=False)
     ]
     legend_cols = min(4, max(1, len(legend_items)))
     fig.legend(
@@ -153,7 +183,7 @@ def generate_use_rose_plot(rose_df, title):
         ncol=legend_cols,
         frameon=False,
         fontsize=10,
-        title="用途类别",
+        title="Use category",
         title_fontsize=11,
         handletextpad=0.5,
         columnspacing=1.2,
@@ -161,7 +191,7 @@ def generate_use_rose_plot(rose_df, title):
     fig.text(
         0.98,
         0.01,
-        "扇区角度 = 该用途证据数量 / 当前化合物 Top 用途证据总量；半径固定为 1",
+        "Sector angle = use evidence count / total Top-use evidence for this compound; radius = 1",
         ha="right",
         va="bottom",
         fontsize=9,
@@ -191,6 +221,31 @@ def _find_use_ranks(columns):
         if match:
             ranks.append(int(match.group(1)))
     return sorted(ranks)
+
+
+def _prepare_plot_labels(rose_df):
+    """Add ASCII-only legend labels for callers that pass legacy rose data."""
+    prepared = rose_df.copy()
+    if "use_label" in prepared.columns:
+        prepared["use_label"] = [
+            _ascii_label(value, f"Use category {rank}")
+            for value, rank in zip(prepared["use_label"], prepared["rank"])
+        ]
+        return prepared
+
+    prepared["use_label"] = [
+        _ascii_label(value, f"Use category {rank}")
+        for value, rank in zip(prepared["use_cn"], prepared["rank"])
+    ]
+    return prepared
+
+
+def _ascii_label(value, fallback):
+    """Return a portable label that does not require a host-provided CJK font."""
+    text = _clean_text(value).split("|", maxsplit=1)[0].strip()
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    ascii_text = re.sub(r"\s+", " ", ascii_text).strip()
+    return ascii_text or fallback
 
 
 def _build_use_color_map(use_labels):
