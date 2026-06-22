@@ -281,14 +281,17 @@ with tab_resolver:
 
     with st.expander("补全接口设置", expanded=False):
         resolver_api_base = st.text_input(
-            "EPA CompTox API 地址（补全用）",
+            "自定义 EPA CompTox API 地址（补全用，可选）",
             value=COMPTOX_DEFAULT_API_BASE,
+            placeholder="留空，使用 CompTox Dashboard 匹配",
+            help="EPA 旧直连 API 已下线。留空时会使用可访问的 CompTox Dashboard 进行 DTXSID 匹配。",
             key="resolver_epa_api_base",
         )
         resolver_api_key = st.text_input(
             "EPA API Key（补全用，可选）",
             value="",
             type="password",
+            help="仅用于上方配置的自定义 EPA API。",
             key="resolver_epa_api_key",
         )
         resolver_echa_base = st.text_input(
@@ -369,17 +372,23 @@ with tab_epa:
     if not comptox_valid:
         st.error(comptox_message)
 
-    api_base = st.text_input(
-        "EPA CompTox API 地址",
-        value=COMPTOX_DEFAULT_API_BASE,
-        help="默认使用 CompTox Dashboard 当前公开 API 地址。",
+    st.info(
+        "默认直接查询 CompTox Dashboard 的产品用途类别和化学功能用途。"
+        "EPA 旧直连 API 已下线，因此默认结果不包含产品用途关键词。"
     )
-    api_key = st.text_input(
-        "EPA API Key（可选）",
-        value="",
-        type="password",
-        help="留空时使用 Dashboard 前端公开 Key；如部署环境有自己的配置，可在这里填写或设置 COMPTOX_API_KEY。",
-    )
+    with st.expander("可选：配置自定义 EPA API", expanded=False):
+        api_base = st.text_input(
+            "自定义 EPA CompTox API 地址",
+            value=COMPTOX_DEFAULT_API_BASE,
+            placeholder="留空，使用 Dashboard 查询",
+            help="仅在你已取得当前可用的 EPA API 地址时填写。留空不会请求旧 API 域名。",
+        )
+        api_key = st.text_input(
+            "EPA API Key（可选）",
+            value="",
+            type="password",
+            help="仅用于上方配置的自定义 API。",
+        )
 
     col_timeout, col_delay, col_top = st.columns(3)
     with col_timeout:
@@ -389,11 +398,7 @@ with tab_epa:
     with col_top:
         top_n = st.number_input("保留用途数量", min_value=1, max_value=10, value=COMPTOX_TOP_N_DEFAULT, step=1)
 
-    dashboard_fallback = st.checkbox(
-        "API 失败时使用 Dashboard 页面备用解析",
-        value=True,
-        help="备用解析需要访问 CompTox Dashboard 页面，适合 API 暂时不可用但页面可访问的情况。",
-    )
+    dashboard_fallback = True
 
     if st.button("开始查询用途", type="primary", disabled=not comptox_valid):
         progress_bar = st.progress(0)
@@ -428,7 +433,7 @@ with tab_epa:
             st.success("CompTox 用途查询完成。")
         elif all_queries_completed:
             st.success("CompTox 用途查询完成。")
-            st.info(f"有 {len(errors_df)} 条接口提示，通常表示 EPA API 不通，系统已使用 Dashboard 页面备用解析。")
+            st.info(f"有 {len(errors_df)} 条查询提示，请查看失败记录后按需重试。")
         else:
             st.warning(f"查询完成，但有 {len(errors_df)} 条提示或失败记录。")
 
