@@ -13,8 +13,19 @@ import pandas as pd
 
 REQUIRED_IDENTIFIER_COLUMNS = ["compound", "cas", "smiles", "dtxsid"]
 
-DEFAULT_API_BASE = "https://api-ccte.epa.gov/"
+# EPA's former public API hostname (api-ccte.epa.gov) no longer has a public
+# DNS record.  Keep an explicit override for deployments that have a supported
+# private/current API endpoint, but use the publicly reachable Dashboard by
+# default.
+DEFAULT_API_BASE = os.environ.get("COMPTOX_API_BASE", "").strip()
 DEFAULT_DASHBOARD_BASE = "https://comptox.epa.gov/dashboard/"
+DASHBOARD_REQUEST_ATTEMPTS = 3
+DASHBOARD_RETRY_DELAY_SECONDS = 1.0
+
+DASHBOARD_ONLY_QUERY_NOTE = (
+    "未配置可用的 EPA API：结果来自 CompTox Dashboard 的产品用途类别和化学功能用途；"
+    "不包含产品用途关键词。"
+)
 
 # This key is published in the CompTox Dashboard frontend bundle. Deployments can
 # override it with COMPTOX_API_KEY if EPA changes access requirements.
@@ -169,6 +180,7 @@ def run_comptox_use_batch(
     candidate_rows = []
     error_rows = []
     total = len(clean_df)
+    query_note = _query_scope_note(api_base, dashboard_fallback)
 
     for pos, (_, row) in enumerate(clean_df.iterrows(), start=1):
         compound = _display_compound(row)
@@ -182,7 +194,14 @@ def run_comptox_use_batch(
             dtxsid = resolution.get("dtxsid")
             if _is_missing(dtxsid) or not _clean_cell(dtxsid):
                 summary_rows.append(
-                    _summary_row(row, resolution, [], top_n, "未解析到 DTXSID")
+                    _summary_row(
+                        row,
+                        resolution,
+                        [],
+                        top_n,
+                        "未解析到 DTXSID",
+                        query_note=query_note,
+                    )
                 )
                 error_rows.append(
                     {
@@ -204,7 +223,16 @@ def run_comptox_use_batch(
                 )
                 ranked = rank_use_candidates(candidates, top_n=top_n)
                 status = "查询完成" if ranked else "未查到用途数据"
-                summary_rows.append(_summary_row(row, resolution, ranked, top_n, status))
+                summary_rows.append(
+                    _summary_row(
+                        row,
+                        resolution,
+                        ranked,
+                        top_n,
+                        status,
+                        query_note=query_note,
+                    )
+                )
 
                 for candidate in candidates:
                     candidate_row = {
@@ -283,28 +311,30 @@ def resolve_dtxsid(row, api_base=DEFAULT_API_BASE, api_key=None, timeout=45):
         ("smiles", _clean_cell(row.get("smiles"))),
     ]
     failures = []
+    api_enabled = _api_is_configured(api_base)
     for term_type, term in search_terms:
         if not term:
             continue
-        try:
-            data = _api_get_json(
-                CHEMICAL_SEARCH_ENDPOINT + urllib.parse.quote(term, safe=""),
-                api_base=api_base,
-                api_key=api_key,
-                timeout=timeout,
-            )
-            candidates = _extract_chemical_candidates(data)
-            chosen = _choose_best_identifier_match(candidates, term, term_type)
-            if chosen:
-                return {
-                    "dtxsid": _get_any(chosen, ["dtxsid", "dsstoxSubstanceId"]),
-                    "matched_name": _get_any(chosen, ["preferredName", "name", "label"]),
-                    "matched_cas": _get_any(chosen, ["casrn", "cas", "casNumber"]),
-                    "status": f"通过 {term_type} 匹配",
-                    "message": "",
-                }
-        except Exception as exc:
-            failures.append(f"{term_type}: {exc}")
+        if api_enabled:
+            try:
+                data = _api_get_json(
+                    CHEMICAL_SEARCH_ENDPOINT + urllib.parse.quote(term, safe=""),
+                    api_base=api_base,
+                    api_key=api_key,
+                    timeout=timeout,
+                )
+                candidates = _extract_chemical_candidates(data)
+                chosen = _choose_best_identifier_match(candidates, term, term_type)
+                if chosen:
+                    return {
+                        "dtxsid": _get_any(chosen, ["dtxsid", "dsstoxSubstanceId"]),
+                        "matched_name": _get_any(chosen, ["preferredName", "name", "label"]),
+                        "matched_cas": _get_any(chosen, ["casrn", "cas", "casNumber"]),
+                        "status": f"通过 {term_type} 匹配",
+                        "message": "",
+                    }
+            except Exception as exc:
+                failures.append(f"{term_type}: {exc}")
 
         try:
             candidates = _dashboard_search_chemical_candidates(term, timeout=timeout)
@@ -358,23 +388,24 @@ def fetch_use_candidates(
         ),
     ]
 
-    for source_type, endpoint, extractor in api_calls:
-        try:
-            data = _api_get_json(
-                endpoint,
-                params={"id": dtxsid},
-                api_base=api_base,
-                api_key=api_key,
-                timeout=timeout,
-            )
-            candidates.extend(extractor(data, source=f"api:{source_type}"))
-        except Exception as exc:
-            warnings.append(
-                {
-                    "stage": f"api:{source_type}",
-                    "message": str(exc),
-                }
-            )
+    if _api_is_configured(api_base):
+        for source_type, endpoint, extractor in api_calls:
+            try:
+                data = _api_get_json(
+                    endpoint,
+                    params={"id": dtxsid},
+                    api_base=api_base,
+                    api_key=api_key,
+                    timeout=timeout,
+                )
+                candidates.extend(extractor(data, source=f"api:{source_type}"))
+            except Exception as exc:
+                warnings.append(
+                    {
+                        "stage": f"api:{source_type}",
+                        "message": str(exc),
+                    }
+                )
 
     if dashboard_fallback:
         if not any(item["source_type"] == "product_category" for item in candidates):
@@ -517,7 +548,7 @@ def build_empty_summary_template(input_df, top_n=TOP_N_DEFAULT):
     )
 
 
-def _summary_row(row, resolution, ranked, top_n, status):
+def _summary_row(row, resolution, ranked, top_n, status, query_note=""):
     output = {
         "compound": _display_compound(row),
         "cas": _clean_cell(row.get("cas")),
@@ -528,6 +559,7 @@ def _summary_row(row, resolution, ranked, top_n, status):
         "matched_cas": resolution.get("matched_cas", pd.NA),
         "match_status": resolution.get("status", pd.NA),
         "query_status": status,
+        "query_notes": query_note,
     }
 
     for idx in range(1, top_n + 1):
@@ -760,7 +792,10 @@ def _is_generic_use(label):
 
 
 def _api_get_json(path, params=None, api_base=DEFAULT_API_BASE, api_key=None, timeout=45):
-    base = api_base if api_base.endswith("/") else api_base + "/"
+    base = _clean_cell(api_base)
+    if not base:
+        raise ValueError("未配置 EPA CompTox API 地址。")
+    base = base if base.endswith("/") else base + "/"
     url = urllib.parse.urljoin(base, path)
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
@@ -796,14 +831,36 @@ def _dashboard_get_html(path, timeout=45):
             "User-Agent": "ChemPriority CompTox dashboard fallback",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}: {url}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"连接失败: {exc.reason}") from exc
-    return raw.decode("utf-8", errors="replace")
+    retryable_http_statuses = {429, 500, 502, 503, 504}
+    last_error = None
+    for attempt in range(1, DASHBOARD_REQUEST_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+            return raw.decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in retryable_http_statuses:
+                raise RuntimeError(f"HTTP {exc.code}: {url}") from exc
+            last_error = RuntimeError(f"HTTP {exc.code}: {url}")
+        except urllib.error.URLError as exc:
+            last_error = RuntimeError(f"连接失败: {exc.reason}")
+
+        if attempt < DASHBOARD_REQUEST_ATTEMPTS:
+            time.sleep(DASHBOARD_RETRY_DELAY_SECONDS * attempt)
+
+    raise last_error
+
+
+def _api_is_configured(api_base):
+    return bool(_clean_cell(api_base))
+
+
+def _query_scope_note(api_base, dashboard_fallback):
+    if _api_is_configured(api_base):
+        return ""
+    if dashboard_fallback:
+        return DASHBOARD_ONLY_QUERY_NOTE
+    return "未配置 EPA API，且未启用 CompTox Dashboard 查询。"
 
 
 def _extract_chemical_candidates(data):
