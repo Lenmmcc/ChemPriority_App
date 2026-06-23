@@ -36,6 +36,7 @@ RESOLVED_COLUMNS = [
     "echa_id",
     "resolved_name",
     "pubchem_match_status",
+    "chemspider_match_status",
     "epa_match_status",
     "echa_match_status",
     "completion_status",
@@ -110,6 +111,7 @@ def run_identifier_completion_batch(
     use_echa=True,
     use_pubchem=True,
     pubchem_base=DEFAULT_PUBCHEM_BASE,
+    chemspider_api_key=None,
     timeout=60,
     delay_seconds=0.2,
     progress_callback=None,
@@ -123,6 +125,7 @@ def run_identifier_completion_batch(
         working = _row_dict(row)
         notes = []
         pubchem_status = ""
+        chemspider_status = ""
         epa_status = ""
         echa_status = ""
 
@@ -147,6 +150,23 @@ def run_identifier_completion_batch(
             except Exception as exc:
                 pubchem_status = "PubChem 补全失败"
                 warning_rows.append(_warning_row(row, "pubchem_resolution", str(exc)))
+
+        if chemspider_api_key and _needs_chemspider_enrichment(working):
+            try:
+                chemspider_resolution = resolve_chemspider(
+                    working, api_key=chemspider_api_key
+                )
+                chemspider_status = _clean_cell(chemspider_resolution.get("status"))
+                _update_if_empty(working, "smiles", chemspider_resolution.get("smiles"))
+                _update_if_empty(working, "cas", chemspider_resolution.get("cas"))
+                _update_if_empty(working, "resolved_name", chemspider_resolution.get("preferred_name"))
+                message = _clean_cell(chemspider_resolution.get("message"))
+                notes.append(message)
+                if message:
+                    warning_rows.append(_warning_row(row, "chemspider_resolution", message))
+            except Exception as exc:
+                chemspider_status = "ChemSpider 补全失败"
+                warning_rows.append(_warning_row(row, "chemspider_resolution", str(exc)))
 
         if use_epa:
             try:
@@ -207,6 +227,7 @@ def run_identifier_completion_batch(
                 "echa_id": working["echa_id"],
                 "resolved_name": working["resolved_name"],
                 "pubchem_match_status": pubchem_status,
+                "chemspider_match_status": chemspider_status,
                 "epa_match_status": epa_status,
                 "echa_match_status": echa_status,
                 "completion_status": _completion_status(working),
@@ -297,6 +318,33 @@ def _row_dict(row):
         "dtxsid": _clean_cell(row.get("dtxsid")),
         "echa_id": _clean_cell(row.get("echa_id")),
         "resolved_name": "",
+    }
+
+
+def _needs_chemspider_enrichment(working):
+    return not all(_clean_cell(working.get(key)) for key in ("cas", "resolved_name"))
+
+
+def resolve_chemspider(working, api_key):
+    try:
+        from chemspipy import ChemSpider
+    except ImportError as exc:
+        raise RuntimeError("chemspipy is not installed") from exc
+
+    query = next((_clean_cell(working.get(key)) for key in ("smiles", "cas", "resolved_name", "compound") if _clean_cell(working.get(key))), "")
+    if not query:
+        return {"status": "No ChemSpider query", "message": ""}
+    results = ChemSpider(api_key).search(query)
+    if not results:
+        return {"status": "ChemSpider not matched", "message": "ChemSpider returned no candidate."}
+    record = results[0]
+    return {
+        "csid": str(getattr(record, "csid", "")),
+        "smiles": _clean_cell(getattr(record, "smiles", "")),
+        "preferred_name": _clean_cell(getattr(record, "common_name", "")),
+        "cas": _first_regex_match(getattr(record, "synonyms", []) or [], CAS_RE),
+        "status": "Matched ChemSpider",
+        "message": "",
     }
 
 

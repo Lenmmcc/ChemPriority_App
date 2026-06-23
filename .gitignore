@@ -1,6 +1,7 @@
 .venv/
 .venv_broken/
 .worktrees/
+.streamlit/secrets.toml
 .idea/
 output/
 test_artifacts/

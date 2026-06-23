@@ -1,4 +1,6 @@
 import unittest
+import sys
+import types
 from unittest.mock import patch
 
 import pandas as pd
@@ -8,6 +10,7 @@ from src.identifier_resolver import (
     _best_echa_query,
     resolve_pubchem_by_cas,
     run_identifier_completion_batch,
+    resolve_chemspider,
 )
 
 
@@ -69,6 +72,16 @@ class PubChemCasTests(unittest.TestCase):
             get_json.call_args_list[0].args[0],
             "compound/name/64-17-5/cids/JSON",
         )
+
+
+class ChemSpiderTests(unittest.TestCase):
+    def test_chemspider_normalizes_first_match(self):
+        record = types.SimpleNamespace(csid=42, smiles="CCO", common_name="ethanol", synonyms=["64-17-5"])
+        module = types.SimpleNamespace(ChemSpider=lambda key: types.SimpleNamespace(search=lambda query: [record]))
+        with patch.dict(sys.modules, {"chemspipy": module}):
+            result = resolve_chemspider({"smiles": "CCO"}, api_key="test-key")
+        self.assertEqual(result["csid"], "42")
+        self.assertEqual(result["cas"], "64-17-5")
 
 
 class IdentifierCompletionPubChemTests(unittest.TestCase):
