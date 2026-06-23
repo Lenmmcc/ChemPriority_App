@@ -315,6 +315,10 @@ with tab_resolver:
             status_box.info(f"正在补全：{compound} ({done}/{total})")
 
         with st.spinner("正在补全标识符，请等待..."):
+            try:
+                chemspider_api_key = str(st.secrets.get("CHEMSPIDER_API_KEY", "")).strip()
+            except Exception:
+                chemspider_api_key = ""
             completed_df, warnings_df = run_identifier_completion_batch(
                 resolver_input_df,
                 comptox_api_base=resolver_api_base,
@@ -324,6 +328,7 @@ with tab_resolver:
                 use_echa=use_echa_resolver,
                 use_pubchem=use_pubchem_resolver,
                 pubchem_base=resolver_pubchem_base,
+                chemspider_api_key=chemspider_api_key or None,
                 timeout=int(resolver_timeout_seconds),
                 delay_seconds=float(resolver_delay_seconds),
                 progress_callback=update_resolver_progress,
