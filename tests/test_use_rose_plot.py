@@ -8,11 +8,41 @@ from src.use_rose_plot import (
     extract_use_rose_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
+    generate_combined_use_rose_plot,
     generate_use_rose_plot,
 )
 
 
 class UseRosePlotTests(unittest.TestCase):
+    def test_combined_plot_uses_two_independent_semicircles(self):
+        epa = extract_use_rose_data(
+            pd.DataFrame([{"compound": "Ethanol", "用途1": "Solvent", "用途1_英文证据": "Solvent", "用途1_证据数量": 3}]),
+            source_label="EPA",
+        )
+        echa = extract_use_rose_data(
+            pd.DataFrame([{"compound": "Ethanol", "用途1": "Cleaning", "用途1_英文证据": "Cleaning", "用途1_证据数量": 2}]),
+            source_label="ECHA",
+        )
+        fig = generate_combined_use_rose_plot(pd.concat([epa, echa]), "Combined")
+        try:
+            self.assertEqual(len(fig.axes[0].patches), 2)
+            self.assertAlmostEqual(sum(patch.get_width() for patch in fig.axes[0].patches), 2 * 3.141592653589793)
+            self.assertIn("EPA", [text.get_text() for text in fig.axes[0].texts])
+            self.assertIn("ECHA", [text.get_text() for text in fig.axes[0].texts])
+        finally:
+            plt.close(fig)
+
+    def test_combined_plot_marks_missing_source(self):
+        rose_df = extract_use_rose_data(
+            pd.DataFrame([{"compound": "Ethanol", "用途1": "Solvent", "用途1_英文证据": "Solvent", "用途1_证据数量": 1}]),
+            source_label="EPA",
+        )
+        fig = generate_combined_use_rose_plot(rose_df, "Combined")
+        try:
+            self.assertIn("No ECHA data", [text.get_text() for text in fig.axes[0].texts])
+        finally:
+            plt.close(fig)
+
     def test_uses_english_evidence_labels(self):
         summary_df = pd.DataFrame(
             [

@@ -53,6 +53,7 @@ from src.use_rose_plot import (  # noqa: E402
     extract_use_rose_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
+    generate_combined_use_rose_plot,
     generate_use_rose_plot,
 )
 
@@ -594,6 +595,20 @@ with tab_rose:
             "file_prefix": "ECHA_Use_Rose_Plot",
         }
 
+    combined_rose_frames = []
+    if isinstance(comptox_summary_df, pd.DataFrame) and not comptox_summary_df.empty:
+        combined_rose_frames.append(extract_use_rose_data(comptox_summary_df, source_label="EPA"))
+    if isinstance(echa_summary_df, pd.DataFrame) and not echa_summary_df.empty:
+        combined_rose_frames.append(extract_use_rose_data(echa_summary_df, source_label="ECHA"))
+    combined_rose_df = pd.concat(combined_rose_frames, ignore_index=True) if combined_rose_frames else pd.DataFrame()
+    if not combined_rose_df.empty:
+        rose_sources["EPA + ECHA Combined"] = {
+            "source_label": "combined",
+            "rose_df": combined_rose_df,
+            "title": "EPA and ECHA Combined Use Plot",
+            "file_prefix": "EPA_ECHA_Combined_Use_Plot",
+        }
+
     if not rose_sources:
         st.info("请先完成 EPA CompTox 查询或 ECHA 查询。查询完成后，这里会显示用途风玫瑰图。")
     else:
@@ -604,10 +619,13 @@ with tab_rose:
             key="use_rose_source",
         )
         source_config = rose_sources[selected_source]
-        rose_df = extract_use_rose_data(
-            source_config["summary_df"],
-            source_label=source_config["source_label"],
-        )
+        if source_config["source_label"] == "combined":
+            rose_df = source_config["rose_df"]
+        else:
+            rose_df = extract_use_rose_data(
+                source_config["summary_df"],
+                source_label=source_config["source_label"],
+            )
 
         if rose_df.empty:
             st.warning("当前结果中没有可用于绘图的用途数据。")
@@ -635,7 +653,10 @@ with tab_rose:
                     ]
                 )
 
-            fig = generate_use_rose_plot(rose_df, source_config["title"])
+            if source_config["source_label"] == "combined":
+                fig = generate_combined_use_rose_plot(rose_df, source_config["title"])
+            else:
+                fig = generate_use_rose_plot(rose_df, source_config["title"])
             st.pyplot(fig)
 
             png_buffer = figure_to_png_bytes(fig)
