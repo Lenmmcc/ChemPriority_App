@@ -1,5 +1,6 @@
 .venv/
 .venv_broken/
+.worktrees/
 .idea/
 output/
 test_artifacts/
