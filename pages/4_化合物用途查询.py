@@ -138,7 +138,7 @@ with right_col:
     )
 
 st.info(
-    "只有 SMILES 时，建议先运行“标识符补全”。系统会先用 PubChem 解析 SMILES，"
+    "只有 SMILES 或 CAS 时，建议先运行“标识符补全”。系统会先用 PubChem 解析 CAS 或 SMILES，"
     "再用 EPA/ECHA 补全用途查询所需的 DTXSID、CAS、EC 和 ECHA ID。"
 )
 
@@ -232,9 +232,9 @@ with tab_input:
 with tab_resolver:
     st.subheader("2. 标识符补全")
     st.write(
-        "适用于只有 SMILES 或名称、缺少 CAS/EC/DTXSID/ECHA ID 的情况。"
-        "系统会先用 PubChem 解析纯 SMILES，再尝试 EPA 补 DTXSID/CAS，"
-        "最后用已有名称、CAS 或 EC 尝试补 ECHA ID。"
+        "适用于只有 SMILES、CAS 或名称、缺少 EC/DTXSID/ECHA ID 的情况。"
+        "系统会先用 PubChem 解析 CAS 或 SMILES，再尝试 EPA 补 DTXSID/CAS，"
+        "最后按 ECHA ID、EC、CAS、SMILES、名称的顺序尝试补 ECHA ID。"
     )
 
     if not resolver_valid:
@@ -249,10 +249,10 @@ with tab_resolver:
             help="只有 SMILES 时，EPA 通常比 ECHA 更适合作为第一步匹配。",
         )
         use_pubchem_resolver = st.checkbox(
-            "使用 PubChem 从 SMILES 预补全",
+            "使用 PubChem 从 CAS 或 SMILES 预补全",
             value=True,
             key="resolver_use_pubchem",
-            help="纯 SMILES、没有名称或 CAS 时，先用 PubChem 获得 CID、名称和 CAS-like 同义名。",
+            help="优先用 CAS、没有 CAS 时用 SMILES，从 PubChem 获得 CID、SMILES、名称和可用同义标识符。",
         )
         use_echa_resolver = st.checkbox(
             "使用 ECHA 补全 EC/ECHA ID",
@@ -723,9 +723,9 @@ with tab_notes:
             [
                 "标识符补全：",
                 "1. 优先保留输入表中已有的 CAS、EC、DTXSID 和 ECHA ID。",
-                "2. 使用 PubChem 尝试从 SMILES 匹配 CID、名称、CAS-like 同义名、EC 和 DTXSID。",
+                "2. 使用 PubChem 优先从 CAS、没有 CAS 时从 SMILES 匹配 CID、SMILES、名称、EC 和 DTXSID。",
                 "3. 使用 EPA 尝试从 compound、CAS 或 SMILES 匹配 DTXSID 和 CAS。",
-                "4. 使用 ECHA 尝试从 ECHA ID、EC、CAS 或名称匹配 ECHA ID 和 EC。",
+                "4. 使用 ECHA 按 ECHA ID、EC、CAS、SMILES、名称顺序匹配 ECHA ID 和 EC。",
                 "5. 补全完成后，EPA/ECHA 查询会自动使用补全后的标识符表。",
                 "",
                 "EPA 查询：",

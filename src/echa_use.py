@@ -282,8 +282,8 @@ def resolve_substance(row, base_url=DEFAULT_ECHA_BASE, timeout=90):
         ("echa_id", _clean_cell(row.get("echa_id"))),
         ("ec", _clean_cell(row.get("ec"))),
         ("cas", _clean_cell(row.get("cas"))),
-        ("compound", _clean_cell(row.get("compound"))),
         ("smiles", _clean_cell(row.get("smiles"))),
+        ("compound", _clean_cell(row.get("compound"))),
     ]
     failures = []
     for term_type, term in search_terms:
