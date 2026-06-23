@@ -112,6 +112,7 @@ def run_identifier_completion_batch(
     use_pubchem=True,
     pubchem_base=DEFAULT_PUBCHEM_BASE,
     chemspider_api_key=None,
+    use_chemspider=False,
     timeout=60,
     delay_seconds=0.2,
     progress_callback=None,
@@ -151,7 +152,11 @@ def run_identifier_completion_batch(
                 pubchem_status = "PubChem 补全失败"
                 warning_rows.append(_warning_row(row, "pubchem_resolution", str(exc)))
 
-        if chemspider_api_key and _needs_chemspider_enrichment(working):
+        if (
+            use_chemspider
+            and chemspider_api_key
+            and _needs_chemspider_enrichment(working)
+        ):
             try:
                 chemspider_resolution = resolve_chemspider(
                     working, api_key=chemspider_api_key

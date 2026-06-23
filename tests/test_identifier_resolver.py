@@ -84,6 +84,49 @@ class ChemSpiderTests(unittest.TestCase):
         self.assertEqual(result["cas"], "64-17-5")
 
 
+class ChemSpiderSelectionTests(unittest.TestCase):
+    @patch("src.identifier_resolver.resolve_chemspider")
+    def test_batch_skips_chemspider_when_user_disables_it(self, resolve_chemspider):
+        completed, _ = run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"], "smiles": ["CCO"]}),
+            use_epa=False,
+            use_echa=False,
+            use_pubchem=False,
+            use_chemspider=False,
+            chemspider_api_key="test-key",
+            delay_seconds=0,
+        )
+
+        resolve_chemspider.assert_not_called()
+        self.assertEqual(completed.loc[0, "chemspider_match_status"], "")
+
+    @patch("src.identifier_resolver.resolve_chemspider")
+    def test_batch_uses_chemspider_when_user_enables_it(self, resolve_chemspider):
+        resolve_chemspider.return_value = {
+            "smiles": "CCO",
+            "cas": "64-17-5",
+            "preferred_name": "ethanol",
+            "status": "Matched ChemSpider",
+            "message": "",
+        }
+
+        completed, _ = run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"], "smiles": ["CCO"]}),
+            use_epa=False,
+            use_echa=False,
+            use_pubchem=False,
+            use_chemspider=True,
+            chemspider_api_key="test-key",
+            delay_seconds=0,
+        )
+
+        resolve_chemspider.assert_called_once()
+        self.assertEqual(completed.loc[0, "cas"], "64-17-5")
+        self.assertEqual(
+            completed.loc[0, "chemspider_match_status"], "Matched ChemSpider"
+        )
+
+
 class IdentifierCompletionPubChemTests(unittest.TestCase):
     @patch("src.identifier_resolver.resolve_pubchem_by_cas")
     def test_batch_fills_cid_and_smiles_from_cas(self, resolve_by_cas):
