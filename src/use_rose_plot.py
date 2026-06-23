@@ -200,6 +200,63 @@ def generate_use_rose_plot(rose_df, title):
     return fig
 
 
+def generate_combined_use_rose_plot(rose_df, title):
+    """Render EPA and ECHA as equal left/right semicircles per compound."""
+    if rose_df is None or rose_df.empty:
+        raise ValueError("No use data is available for the combined use plot.")
+
+    rose_df = _prepare_plot_labels(rose_df)
+    compounds = list(rose_df["compound"].drop_duplicates())
+    use_colors = _build_use_color_map(rose_df["use_cn"].dropna().drop_duplicates())
+    n_compounds = len(compounds)
+    n_cols = min(3, n_compounds)
+    n_rows = math.ceil(n_compounds / n_cols)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        subplot_kw={"projection": "polar"},
+        figsize=(max(6.5, 4.2 * n_cols), max(5.2, 4.4 * n_rows + min(len(use_colors), 18) * 0.08)),
+    )
+    axes = np.asarray([axes]).flatten() if n_compounds == 1 else np.asarray(axes).flatten()
+
+    source_config = {"EPA": (np.pi / 2, "EPA", "No EPA data"), "ECHA": (-np.pi / 2, "ECHA", "No ECHA data")}
+    for index, ax in enumerate(axes):
+        if index >= n_compounds:
+            ax.axis("off")
+            continue
+        compound = compounds[index]
+        compound_data = rose_df[rose_df["compound"] == compound]
+        ax.set_theta_zero_location("E")
+        ax.set_theta_direction(-1)
+        ax.set_ylim(0, 1.15)
+        ax.set_yticklabels([])
+        ax.set_xticklabels([])
+        ax.grid(False)
+        ax.spines["polar"].set_visible(False)
+        ax.plot([np.pi / 2, np.pi / 2], [0, 1], color="#333333", linewidth=0.8)
+        ax.plot([3 * np.pi / 2, 3 * np.pi / 2], [0, 1], color="#333333", linewidth=0.8)
+        for source, (start, label, empty_label) in source_config.items():
+            data = compound_data[compound_data["source"] == source].sort_values("rank")
+            if data.empty:
+                ax.text(start + np.pi / 2, 0.5, empty_label, ha="center", va="center", fontsize=9, color="#666666")
+                continue
+            widths = data["angle_fraction"].astype(float).to_numpy() * np.pi
+            starts = start + np.concatenate(([0.0], np.cumsum(widths[:-1])))
+            ax.bar(starts, np.ones(len(data)), width=widths, bottom=0.0,
+                   color=[use_colors[value] for value in data["use_cn"]], edgecolor="white",
+                   linewidth=1.0, align="edge")
+            ax.text(start + np.pi / 2, 1.08, label, ha="center", va="center", fontsize=10, fontweight="bold")
+        ax.set_title(_ascii_label(compound, f"Compound {index + 1}"), fontsize=12, fontweight="bold", pad=14)
+
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.82, bottom=0.22, wspace=0.28, hspace=0.38)
+    fig.suptitle(_ascii_label(title, "Combined Use Plot"), fontsize=16, fontweight="bold", y=0.95)
+    legend_data = rose_df[["use_cn", "use_label"]].drop_duplicates("use_cn")
+    handles = [Patch(facecolor=use_colors[row.use_cn], label=row.use_label) for row in legend_data.sort_values("use_label").itertuples(index=False)]
+    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.04), ncol=min(4, max(1, len(handles))), frameon=False, fontsize=10, title="Use category", title_fontsize=11)
+    fig.text(0.98, 0.01, "Left = EPA; right = ECHA. Each half is normalized within its source; values are not compared across sources.", ha="right", va="bottom", fontsize=9, color="#333333")
+    return fig
+
+
 def figure_to_png_bytes(fig):
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=300, bbox_inches="tight", facecolor="white")
