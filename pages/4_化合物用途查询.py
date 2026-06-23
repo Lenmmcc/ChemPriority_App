@@ -138,7 +138,7 @@ with right_col:
     )
 
 st.info(
-    "只有 SMILES 时，建议先运行“标识符补全”。系统会先用 PubChem 解析 SMILES，"
+    "只有 SMILES 或 CAS 时，建议先运行“标识符补全”。系统会先用 PubChem 解析 CAS 或 SMILES，"
     "再用 EPA/ECHA 补全用途查询所需的 DTXSID、CAS、EC 和 ECHA ID。"
 )
 
@@ -232,9 +232,9 @@ with tab_input:
 with tab_resolver:
     st.subheader("2. 标识符补全")
     st.write(
-        "适用于只有 SMILES 或名称、缺少 CAS/EC/DTXSID/ECHA ID 的情况。"
-        "系统会先用 PubChem 解析纯 SMILES，再尝试 EPA 补 DTXSID/CAS，"
-        "最后用已有名称、CAS 或 EC 尝试补 ECHA ID。"
+        "适用于只有 SMILES、CAS 或名称、缺少 EC/DTXSID/ECHA ID 的情况。"
+        "系统会先用 PubChem 解析 CAS 或 SMILES，再尝试 EPA 补 DTXSID/CAS，"
+        "最后按 ECHA ID、EC、CAS、SMILES、名称的顺序尝试补 ECHA ID。"
     )
 
     if not resolver_valid:
@@ -249,10 +249,10 @@ with tab_resolver:
             help="只有 SMILES 时，EPA 通常比 ECHA 更适合作为第一步匹配。",
         )
         use_pubchem_resolver = st.checkbox(
-            "使用 PubChem 从 SMILES 预补全",
+            "使用 PubChem 从 CAS 或 SMILES 预补全",
             value=True,
             key="resolver_use_pubchem",
-            help="纯 SMILES、没有名称或 CAS 时，先用 PubChem 获得 CID、名称和 CAS-like 同义名。",
+            help="优先用 CAS、没有 CAS 时用 SMILES，从 PubChem 获得 CID、SMILES、名称和可用同义标识符。",
         )
         use_echa_resolver = st.checkbox(
             "使用 ECHA 补全 EC/ECHA ID",
@@ -281,14 +281,17 @@ with tab_resolver:
 
     with st.expander("补全接口设置", expanded=False):
         resolver_api_base = st.text_input(
-            "EPA CompTox API 地址（补全用）",
+            "自定义 EPA CompTox API 地址（补全用，可选）",
             value=COMPTOX_DEFAULT_API_BASE,
+            placeholder="留空，使用 CompTox Dashboard 匹配",
+            help="EPA 旧直连 API 已下线。留空时会使用可访问的 CompTox Dashboard 进行 DTXSID 匹配。",
             key="resolver_epa_api_base",
         )
         resolver_api_key = st.text_input(
             "EPA API Key（补全用，可选）",
             value="",
             type="password",
+            help="仅用于上方配置的自定义 EPA API。",
             key="resolver_epa_api_key",
         )
         resolver_echa_base = st.text_input(
@@ -369,17 +372,23 @@ with tab_epa:
     if not comptox_valid:
         st.error(comptox_message)
 
-    api_base = st.text_input(
-        "EPA CompTox API 地址",
-        value=COMPTOX_DEFAULT_API_BASE,
-        help="默认使用 CompTox Dashboard 当前公开 API 地址。",
+    st.info(
+        "默认直接查询 CompTox Dashboard 的产品用途类别和化学功能用途。"
+        "EPA 旧直连 API 已下线，因此默认结果不包含产品用途关键词。"
     )
-    api_key = st.text_input(
-        "EPA API Key（可选）",
-        value="",
-        type="password",
-        help="留空时使用 Dashboard 前端公开 Key；如部署环境有自己的配置，可在这里填写或设置 COMPTOX_API_KEY。",
-    )
+    with st.expander("可选：配置自定义 EPA API", expanded=False):
+        api_base = st.text_input(
+            "自定义 EPA CompTox API 地址",
+            value=COMPTOX_DEFAULT_API_BASE,
+            placeholder="留空，使用 Dashboard 查询",
+            help="仅在你已取得当前可用的 EPA API 地址时填写。留空不会请求旧 API 域名。",
+        )
+        api_key = st.text_input(
+            "EPA API Key（可选）",
+            value="",
+            type="password",
+            help="仅用于上方配置的自定义 API。",
+        )
 
     col_timeout, col_delay, col_top = st.columns(3)
     with col_timeout:
@@ -389,11 +398,7 @@ with tab_epa:
     with col_top:
         top_n = st.number_input("保留用途数量", min_value=1, max_value=10, value=COMPTOX_TOP_N_DEFAULT, step=1)
 
-    dashboard_fallback = st.checkbox(
-        "API 失败时使用 Dashboard 页面备用解析",
-        value=True,
-        help="备用解析需要访问 CompTox Dashboard 页面，适合 API 暂时不可用但页面可访问的情况。",
-    )
+    dashboard_fallback = True
 
     if st.button("开始查询用途", type="primary", disabled=not comptox_valid):
         progress_bar = st.progress(0)
@@ -428,7 +433,7 @@ with tab_epa:
             st.success("CompTox 用途查询完成。")
         elif all_queries_completed:
             st.success("CompTox 用途查询完成。")
-            st.info(f"有 {len(errors_df)} 条接口提示，通常表示 EPA API 不通，系统已使用 Dashboard 页面备用解析。")
+            st.info(f"有 {len(errors_df)} 条查询提示，请查看失败记录后按需重试。")
         else:
             st.warning(f"查询完成，但有 {len(errors_df)} 条提示或失败记录。")
 
@@ -718,9 +723,9 @@ with tab_notes:
             [
                 "标识符补全：",
                 "1. 优先保留输入表中已有的 CAS、EC、DTXSID 和 ECHA ID。",
-                "2. 使用 PubChem 尝试从 SMILES 匹配 CID、名称、CAS-like 同义名、EC 和 DTXSID。",
+                "2. 使用 PubChem 优先从 CAS、没有 CAS 时从 SMILES 匹配 CID、SMILES、名称、EC 和 DTXSID。",
                 "3. 使用 EPA 尝试从 compound、CAS 或 SMILES 匹配 DTXSID 和 CAS。",
-                "4. 使用 ECHA 尝试从 ECHA ID、EC、CAS 或名称匹配 ECHA ID 和 EC。",
+                "4. 使用 ECHA 按 ECHA ID、EC、CAS、SMILES、名称顺序匹配 ECHA ID 和 EC。",
                 "5. 补全完成后，EPA/ECHA 查询会自动使用补全后的标识符表。",
                 "",
                 "EPA 查询：",

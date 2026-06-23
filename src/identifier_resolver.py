@@ -126,15 +126,16 @@ def run_identifier_completion_batch(
         epa_status = ""
         echa_status = ""
 
-        if use_pubchem and working["smiles"]:
+        if use_pubchem and (working["cas"] or working["smiles"]):
             try:
-                pubchem_resolution = resolve_pubchem_by_smiles(
-                    working["smiles"],
+                pubchem_resolution = _resolve_pubchem_for_working(
+                    working,
                     base_url=pubchem_base,
                     timeout=timeout,
                 )
                 pubchem_status = _clean_cell(pubchem_resolution.get("status"))
                 _update_if_empty(working, "pubchem_cid", pubchem_resolution.get("pubchem_cid"))
+                _update_if_empty(working, "smiles", pubchem_resolution.get("smiles"))
                 _update_if_empty(working, "cas", pubchem_resolution.get("cas"))
                 _update_if_empty(working, "ec", pubchem_resolution.get("ec"))
                 _update_if_empty(working, "dtxsid", pubchem_resolution.get("dtxsid"))
@@ -233,8 +234,8 @@ def build_result_workbook(input_df, completed_df=None, warnings_df=None):
     guide_df = pd.DataFrame(
         [
             {"字段": "compound", "说明": "输入或补全得到的化合物名称。"},
-            {"字段": "smiles", "说明": "输入 SMILES；本模块不会改写结构式。"},
-            {"字段": "pubchem_cid", "说明": "PubChem Compound ID，主要用于纯 SMILES 的中间匹配。"},
+            {"字段": "smiles", "说明": "输入 SMILES，或由 PubChem 根据匹配的 CAS 补全。"},
+            {"字段": "pubchem_cid", "说明": "由 PubChem 根据 CAS 或 SMILES 查询补全的 Compound ID。"},
             {"字段": "cas", "说明": "CAS Registry Number，优先来自输入，其次来自 EPA 或 ECHA 匹配。"},
             {"字段": "ec", "说明": "ECHA/欧盟 EC 号，主要来自 ECHA 匹配。"},
             {"字段": "dtxsid", "说明": "EPA CompTox 使用的 DSSTox Substance ID。"},
@@ -300,18 +301,125 @@ def _row_dict(row):
 
 
 def _best_echa_query(working):
-    query = {"compound": "", "cas": "", "ec": "", "smiles": "", "echa_id": ""}
-    if working["echa_id"]:
-        query["echa_id"] = working["echa_id"]
-    elif working["ec"]:
-        query["ec"] = working["ec"]
-    elif working["cas"]:
-        query["cas"] = working["cas"]
-    elif working["resolved_name"] or working["compound"]:
-        query["compound"] = working["resolved_name"] or working["compound"]
-    else:
-        query["smiles"] = working["smiles"]
-    return query
+    return {
+        "compound": working["resolved_name"] or working["compound"],
+        "cas": working["cas"],
+        "ec": working["ec"],
+        "smiles": working["smiles"],
+        "echa_id": working["echa_id"],
+    }
+
+
+def _resolve_pubchem_for_working(working, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
+    cas = _clean_cell(working.get("cas"))
+    smiles = _clean_cell(working.get("smiles"))
+    cas_resolution = None
+    cas_error = None
+
+    if cas:
+        try:
+            cas_resolution = resolve_pubchem_by_cas(
+                cas,
+                base_url=base_url,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            cas_error = exc
+        else:
+            if _clean_cell(cas_resolution.get("pubchem_cid")):
+                return cas_resolution
+
+    if smiles:
+        try:
+            return resolve_pubchem_by_smiles(
+                smiles,
+                base_url=base_url,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            if cas_error:
+                raise RuntimeError(f"CAS: {cas_error}; SMILES: {exc}") from exc
+            raise
+
+    if cas_error:
+        raise cas_error
+    return cas_resolution or {"status": "No PubChem query", "message": ""}
+
+
+def resolve_pubchem_by_cas(cas, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
+    cas = _clean_cell(cas)
+    if not cas:
+        return {"status": "No CAS provided", "message": ""}
+
+    cid_data = _pubchem_get_json(
+        f"compound/name/{urllib.parse.quote(cas, safe='')}/cids/JSON",
+        base_url=base_url,
+        timeout=timeout,
+    )
+    return _resolution_from_pubchem_cids(cid_data, "CAS", base_url, timeout)
+
+
+def _resolution_from_pubchem_cids(cid_data, source_label, base_url, timeout):
+    cids = (
+        cid_data.get("IdentifierList", {}).get("CID", [])
+        if isinstance(cid_data, dict)
+        else []
+    )
+    if not cids:
+        return {
+            "pubchem_cid": "",
+            "smiles": "",
+            "preferred_name": "",
+            "cas": "",
+            "ec": "",
+            "dtxsid": "",
+            "status": f"PubChem {source_label} not matched",
+            "message": "PubChem returned no CID.",
+        }
+
+    cid = str(cids[0])
+    properties = _fetch_pubchem_properties(cid, base_url, timeout)
+    synonyms = _fetch_pubchem_synonyms(cid, base_url, timeout)
+    dtxsid = _first_regex_match(synonyms, DTXSID_RE)
+    return {
+        "pubchem_cid": cid,
+        "smiles": _clean_cell(
+            properties.get("CanonicalSMILES")
+            or properties.get("ConnectivitySMILES")
+        ),
+        "preferred_name": _first_text(synonyms) or _clean_cell(properties.get("IUPACName")),
+        "cas": _first_regex_match(synonyms, CAS_RE),
+        "ec": _first_regex_match(synonyms, EC_RE),
+        "dtxsid": dtxsid.upper() if dtxsid else "",
+        "status": f"Matched PubChem {source_label}",
+        "message": "",
+    }
+
+
+def _fetch_pubchem_properties(cid, base_url, timeout):
+    try:
+        prop_data = _pubchem_get_json(
+            f"compound/cid/{urllib.parse.quote(cid, safe='')}/property/IUPACName,CanonicalSMILES/JSON",
+            base_url=base_url,
+            timeout=timeout,
+        )
+        records = prop_data.get("PropertyTable", {}).get("Properties", [])
+        return records[0] if records else {}
+    except Exception:
+        return {}
+
+
+def _fetch_pubchem_synonyms(cid, base_url, timeout):
+    try:
+        synonym_data = _pubchem_get_json(
+            f"compound/cid/{urllib.parse.quote(cid, safe='')}/synonyms/JSON",
+            base_url=base_url,
+            timeout=timeout,
+        )
+        records = synonym_data.get("InformationList", {}).get("Information", [])
+        return records[0].get("Synonym", []) if records else []
+    except Exception:
+        return []
 
 
 def resolve_pubchem_by_smiles(smiles, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
@@ -325,55 +433,7 @@ def resolve_pubchem_by_smiles(smiles, base_url=DEFAULT_PUBCHEM_BASE, timeout=60)
         base_url=base_url,
         timeout=timeout,
     )
-    cids = (
-        cid_data.get("IdentifierList", {}).get("CID", [])
-        if isinstance(cid_data, dict)
-        else []
-    )
-    if not cids:
-        return {"status": "PubChem 未匹配", "message": "PubChem 未返回 CID。"}
-
-    cid = str(cids[0])
-    properties = {}
-    try:
-        prop_data = _pubchem_get_json(
-            f"compound/cid/{urllib.parse.quote(cid, safe='')}/property/IUPACName,CanonicalSMILES/JSON",
-            base_url=base_url,
-            timeout=timeout,
-        )
-        records = prop_data.get("PropertyTable", {}).get("Properties", [])
-        if records:
-            properties = records[0]
-    except Exception:
-        properties = {}
-
-    synonyms = []
-    try:
-        synonym_data = _pubchem_get_json(
-            f"compound/cid/{urllib.parse.quote(cid, safe='')}/synonyms/JSON",
-            base_url=base_url,
-            timeout=timeout,
-        )
-        records = synonym_data.get("InformationList", {}).get("Information", [])
-        if records:
-            synonyms = records[0].get("Synonym", []) or []
-    except Exception:
-        synonyms = []
-
-    preferred_name = _first_text(synonyms) or _clean_cell(properties.get("IUPACName"))
-    cas = _first_regex_match(synonyms, CAS_RE)
-    ec = _first_regex_match(synonyms, EC_RE)
-    dtxsid = _first_regex_match(synonyms, DTXSID_RE)
-
-    return {
-        "pubchem_cid": cid,
-        "preferred_name": preferred_name,
-        "cas": cas,
-        "ec": ec,
-        "dtxsid": dtxsid.upper() if dtxsid else "",
-        "status": "通过 PubChem SMILES 匹配",
-        "message": "",
-    }
+    return _resolution_from_pubchem_cids(cid_data, "SMILES", base_url, timeout)
 
 
 def _pubchem_get_json(path, params=None, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
