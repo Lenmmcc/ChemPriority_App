@@ -241,6 +241,12 @@ with tab_resolver:
     if not resolver_valid:
         st.error(resolver_message)
 
+    try:
+        chemspider_api_key = str(st.secrets.get("CHEMSPIDER_API_KEY", "")).strip()
+    except Exception:
+        chemspider_api_key = ""
+    chemspider_available = bool(chemspider_api_key)
+
     col_source, col_timeout, col_delay = st.columns([2, 1, 1])
     with col_source:
         use_epa_resolver = st.checkbox(
@@ -255,12 +261,25 @@ with tab_resolver:
             key="resolver_use_pubchem",
             help="优先用 CAS、没有 CAS 时用 SMILES，从 PubChem 获得 CID、SMILES、名称和可用同义标识符。",
         )
+        use_chemspider_resolver = st.checkbox(
+            "使用 ChemSpider 补全 CAS/名称",
+            value=False,
+            disabled=not chemspider_available,
+            help=(
+                "选中后仅在 PubChem 未补全 CAS 或标准名称时查询 ChemSpider。"
+                if chemspider_available
+                else "部署环境未配置 ChemSpider API Key，当前不可用。"
+            ),
+            key="resolver_use_chemspider",
+        )
         use_echa_resolver = st.checkbox(
             "使用 ECHA 补全 EC/ECHA ID",
             value=True,
             key="resolver_use_echa",
             help="ECHA 更依赖 ECHA ID、EC、CAS 或明确名称；只有 SMILES 时稳定性较弱。",
         )
+        if not chemspider_available:
+            st.caption("ChemSpider 未配置，已跳过。")
     with col_timeout:
         resolver_timeout_seconds = st.number_input(
             "补全请求超时（秒）",
@@ -315,10 +334,6 @@ with tab_resolver:
             status_box.info(f"正在补全：{compound} ({done}/{total})")
 
         with st.spinner("正在补全标识符，请等待..."):
-            try:
-                chemspider_api_key = str(st.secrets.get("CHEMSPIDER_API_KEY", "")).strip()
-            except Exception:
-                chemspider_api_key = ""
             completed_df, warnings_df = run_identifier_completion_batch(
                 resolver_input_df,
                 comptox_api_base=resolver_api_base,
@@ -329,6 +344,7 @@ with tab_resolver:
                 use_pubchem=use_pubchem_resolver,
                 pubchem_base=resolver_pubchem_base,
                 chemspider_api_key=chemspider_api_key or None,
+                use_chemspider=use_chemspider_resolver,
                 timeout=int(resolver_timeout_seconds),
                 delay_seconds=float(resolver_delay_seconds),
                 progress_callback=update_resolver_progress,
