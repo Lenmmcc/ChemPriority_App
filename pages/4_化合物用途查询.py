@@ -49,6 +49,7 @@ from src.identifier_resolver import (  # noqa: E402
     run_identifier_completion_batch,
     validate_input as validate_resolver_input,
 )
+from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
 from src.use_rose_plot import (  # noqa: E402
     extract_use_rose_data,
     figure_to_pdf_bytes,
@@ -241,12 +242,6 @@ with tab_resolver:
     if not resolver_valid:
         st.error(resolver_message)
 
-    try:
-        chemspider_api_key = str(st.secrets.get("CHEMSPIDER_API_KEY", "")).strip()
-    except Exception:
-        chemspider_api_key = ""
-    chemspider_available = bool(chemspider_api_key)
-
     col_source, col_timeout, col_delay = st.columns([2, 1, 1])
     with col_source:
         use_epa_resolver = st.checkbox(
@@ -264,12 +259,7 @@ with tab_resolver:
         use_chemspider_resolver = st.checkbox(
             "使用 ChemSpider 补全 CAS/名称",
             value=False,
-            disabled=not chemspider_available,
-            help=(
-                "选中后仅在 PubChem 未补全 CAS 或标准名称时查询 ChemSpider。"
-                if chemspider_available
-                else "部署环境未配置 ChemSpider API Key，当前不可用。"
-            ),
+            help="仅用于本次补全；选中后请在下方输入 ChemSpider API Key。",
             key="resolver_use_chemspider",
         )
         use_echa_resolver = st.checkbox(
@@ -278,8 +268,6 @@ with tab_resolver:
             key="resolver_use_echa",
             help="ECHA 更依赖 ECHA ID、EC、CAS 或明确名称；只有 SMILES 时稳定性较弱。",
         )
-        if not chemspider_available:
-            st.caption("ChemSpider 未配置，已跳过。")
     with col_timeout:
         resolver_timeout_seconds = st.number_input(
             "补全请求超时（秒）",
@@ -325,7 +313,29 @@ with tab_resolver:
             key="resolver_pubchem_base",
         )
 
-    if st.button("开始补全标识符", type="primary", disabled=not resolver_valid, key="resolver_start"):
+    with st.form("resolver_run_form", clear_on_submit=True):
+        raw_chemspider_api_key = ""
+        if use_chemspider_resolver:
+            raw_chemspider_api_key = st.text_input(
+                "ChemSpider API Key（仅本次运行使用）",
+                type="password",
+                autocomplete="off",
+                help="提交后立即清除；不会写入配置、结果或下载文件。",
+            )
+        start_resolver = st.form_submit_button(
+            "开始补全标识符",
+            type="primary",
+            disabled=not resolver_valid,
+        )
+
+    if start_resolver:
+        chemspider_options = prepare_chemspider_run_options(
+            use_chemspider_resolver,
+            raw_chemspider_api_key,
+        )
+        if chemspider_options.warning:
+            st.warning(chemspider_options.warning)
+
         progress_bar = st.progress(0)
         status_box = st.empty()
 
@@ -343,8 +353,8 @@ with tab_resolver:
                 use_echa=use_echa_resolver,
                 use_pubchem=use_pubchem_resolver,
                 pubchem_base=resolver_pubchem_base,
-                chemspider_api_key=chemspider_api_key or None,
-                use_chemspider=use_chemspider_resolver,
+                chemspider_api_key=chemspider_options.api_key,
+                use_chemspider=chemspider_options.enabled,
                 timeout=int(resolver_timeout_seconds),
                 delay_seconds=float(resolver_delay_seconds),
                 progress_callback=update_resolver_progress,
