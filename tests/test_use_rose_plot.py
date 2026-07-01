@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from src.use_rose_plot import (
+    build_epa_echa_combined_rose_data,
     extract_use_rose_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
@@ -63,6 +64,70 @@ class UseRosePlotTests(unittest.TestCase):
         self.assertEqual(rose_df["use_label"].tolist(), ["Deodorizer", "Laboratory supplies"])
         self.assertEqual(rose_df["compound_label"].tolist(), ["p-Cymene", "p-Cymene"])
         self.assertAlmostEqual(rose_df["angle_fraction"].sum(), 1.0)
+
+    def test_extracts_source_specific_use_prefix_for_separate_epa_plots(self):
+        summary_df = pd.DataFrame(
+            [
+                {
+                    "compound": "Benzyl chloride",
+                    "产品场景用途1": "个人护理用品 (Personal care products)",
+                    "产品场景用途1_英文证据": "Personal care products",
+                    "产品场景用途1_证据数量": 12,
+                    "功能用途1": "芳香剂 (Fragrance)",
+                    "功能用途1_英文证据": "Fragrance",
+                    "功能用途1_证据数量": 0.91,
+                }
+            ]
+        )
+
+        product_rose_df = extract_use_rose_data(summary_df, source_label="EPA PUC", use_prefix="产品场景用途")
+        functional_rose_df = extract_use_rose_data(summary_df, source_label="EPA FC", use_prefix="功能用途")
+
+        self.assertEqual(product_rose_df["source"].tolist(), ["EPA PUC"])
+        self.assertEqual(product_rose_df["use_label"].tolist(), ["Personal care products"])
+        self.assertEqual(functional_rose_df["source"].tolist(), ["EPA FC"])
+        self.assertEqual(functional_rose_df["use_label"].tolist(), ["Fragrance"])
+
+    def test_combined_data_uses_epa_product_scenarios_not_legacy_comprehensive_uses(self):
+        comptox_summary = pd.DataFrame(
+            [
+                {
+                    "compound": "Benzyl chloride",
+                    "用途1": "Solvent",
+                    "用途1_英文证据": "Solvent",
+                    "用途1_证据数量": 99,
+                    "产品场景用途1": "Raw materials:coatings",
+                    "产品场景用途1_英文证据": "Raw materials:coatings",
+                    "产品场景用途1_证据数量": 4,
+                    "功能用途1": "Fragrance",
+                    "功能用途1_英文证据": "Fragrance",
+                    "功能用途1_证据数量": 0.8,
+                }
+            ]
+        )
+        echa_summary = pd.DataFrame(
+            [
+                {
+                    "compound": "Benzyl chloride",
+                    "用途1": "Industrial use",
+                    "用途1_英文证据": "Industrial use",
+                    "用途1_证据数量": 2,
+                }
+            ]
+        )
+
+        combined = build_epa_echa_combined_rose_data(comptox_summary, echa_summary)
+
+        self.assertEqual(
+            combined[combined["source"].eq("EPA")]["use_label"].tolist(),
+            ["Raw materials:coatings"],
+        )
+        self.assertNotIn("Solvent", combined["use_label"].tolist())
+        self.assertNotIn("Fragrance", combined["use_label"].tolist())
+        self.assertEqual(
+            combined[combined["source"].eq("ECHA")]["use_label"].tolist(),
+            ["Industrial use"],
+        )
 
     def test_plot_exports_with_ascii_only_text(self):
         summary_df = pd.DataFrame(

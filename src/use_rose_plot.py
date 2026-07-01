@@ -27,7 +27,7 @@ USE_COLOR_PALETTE = [
 ]
 
 
-def extract_use_rose_data(summary_df, source_label):
+def extract_use_rose_data(summary_df, source_label, use_prefix="用途"):
     """Convert Top-use summary rows into long-form rose plot data."""
     if summary_df is None or summary_df.empty:
         return pd.DataFrame(
@@ -44,18 +44,18 @@ def extract_use_rose_data(summary_df, source_label):
             ]
         )
 
-    use_ranks = _find_use_ranks(summary_df.columns)
+    use_ranks = _find_use_ranks(summary_df.columns, use_prefix=use_prefix)
     rows = []
     for compound_index, (_, row) in enumerate(summary_df.iterrows(), start=1):
         compound = _clean_text(row.get("compound")) or "未命名化合物"
         compound_label = _ascii_label(compound, f"Compound {compound_index}")
         entries = []
         for rank in use_ranks:
-            use_cn = _clean_text(row.get(f"用途{rank}"))
+            use_cn = _clean_text(row.get(f"{use_prefix}{rank}"))
             if not use_cn:
                 continue
-            use_en = _clean_text(row.get(f"用途{rank}_英文证据"))
-            evidence = _to_number(row.get(f"用途{rank}_证据数量"))
+            use_en = _clean_text(row.get(f"{use_prefix}{rank}_英文证据"))
+            evidence = _to_number(row.get(f"{use_prefix}{rank}_证据数量"))
             entries.append(
                 {
                     "rank": rank,
@@ -105,6 +105,36 @@ def extract_use_rose_data(summary_df, source_label):
                 )
 
     return pd.DataFrame(rows)
+
+
+def build_epa_echa_combined_rose_data(comptox_summary_df=None, echa_summary_df=None):
+    frames = []
+    if isinstance(comptox_summary_df, pd.DataFrame) and not comptox_summary_df.empty:
+        frames.append(
+            extract_use_rose_data(
+                comptox_summary_df,
+                source_label="EPA",
+                use_prefix="产品场景用途",
+            )
+        )
+    if isinstance(echa_summary_df, pd.DataFrame) and not echa_summary_df.empty:
+        frames.append(extract_use_rose_data(echa_summary_df, source_label="ECHA"))
+    frames = [frame for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "source",
+                "compound",
+                "compound_label",
+                "rank",
+                "use_cn",
+                "use_label",
+                "evidence_count",
+                "angle_fraction",
+                "angle_basis",
+            ]
+        )
+    return pd.concat(frames, ignore_index=True)
 
 
 def generate_use_rose_plot(rose_df, title):
@@ -271,10 +301,11 @@ def figure_to_pdf_bytes(fig):
     return buffer
 
 
-def _find_use_ranks(columns):
+def _find_use_ranks(columns, use_prefix="用途"):
     ranks = []
+    pattern = re.compile(rf"{re.escape(use_prefix)}(\d+)")
     for col in columns:
-        match = re.fullmatch(r"用途(\d+)", str(col))
+        match = pattern.fullmatch(str(col))
         if match:
             ranks.append(int(match.group(1)))
     return sorted(ranks)

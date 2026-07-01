@@ -22,6 +22,8 @@ from src.comptox_use import (  # noqa: E402
     REQUIRED_IDENTIFIER_COLUMNS as COMPTOX_REQUIRED_IDENTIFIER_COLUMNS,
     TOP_N_DEFAULT as COMPTOX_TOP_N_DEFAULT,
     build_empty_summary_template as comptox_build_empty_summary_template,
+    build_functional_use_table as comptox_build_functional_use_table,
+    build_product_use_table as comptox_build_product_use_table,
     build_result_workbook as comptox_build_result_workbook,
     make_template_file as make_comptox_template_file,
     normalize_input_columns as normalize_comptox_input_columns,
@@ -39,9 +41,23 @@ from src.echa_use import (  # noqa: E402
     run_echa_use_batch,
     validate_input as validate_echa_input,
 )
+from src.echa_ghs import (  # noqa: E402
+    build_empty_summary_template as echa_ghs_build_empty_summary_template,
+    build_result_workbook as echa_ghs_build_result_workbook,
+    run_echa_ghs_batch,
+)
+from src.source_origin import (  # noqa: E402
+    REQUIRED_IDENTIFIER_COLUMNS as SOURCE_ORIGIN_REQUIRED_IDENTIFIER_COLUMNS,
+    build_empty_summary_template as source_origin_build_empty_summary_template,
+    build_result_workbook as source_origin_build_result_workbook,
+    normalize_source_input_columns,
+    run_source_origin_batch,
+    validate_input as validate_source_origin_input,
+)
 from src.identifier_resolver import (  # noqa: E402
     DEFAULT_PUBCHEM_BASE,
     REQUIRED_IDENTIFIER_COLUMNS as RESOLVER_REQUIRED_IDENTIFIER_COLUMNS,
+    build_epi_input_workbook as resolver_build_epi_input_workbook,
     build_empty_completed_template as resolver_build_empty_completed_template,
     build_result_workbook as resolver_build_result_workbook,
     make_template_file as make_resolver_template_file,
@@ -51,6 +67,7 @@ from src.identifier_resolver import (  # noqa: E402
 )
 from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
 from src.use_rose_plot import (  # noqa: E402
+    build_epa_echa_combined_rose_data,
     extract_use_rose_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
@@ -83,6 +100,49 @@ QUERY_RESULT_KEYS = (
     "echa_use_candidates",
     "echa_use_dossiers",
     "echa_use_errors",
+    "echa_ghs_summary",
+    "echa_ghs_classifications",
+    "echa_ghs_errors",
+    "source_origin_summary",
+    "source_origin_evidence",
+    "source_origin_errors",
+)
+
+COMPTOX_SUMMARY_PREVIEW_COLUMNS = (
+    "compound",
+    "cas",
+    "matched_dtxsid",
+    "产品用途类别",
+    "化学功能用途",
+    "产品场景Top5",
+    "功能用途Top5",
+    "CompTox来源链接",
+    "query_status",
+    "query_notes",
+)
+
+COMPTOX_PRODUCT_USE_PREVIEW_COLUMNS = (
+    "compound",
+    "dtxsid",
+    "产品用途类别",
+    "英文产品用途类别",
+    "general_category",
+    "product_family",
+    "product_type",
+    "product_count",
+    "CompTox产品用途链接",
+)
+
+COMPTOX_FUNCTIONAL_USE_PREVIEW_COLUMNS = (
+    "compound",
+    "dtxsid",
+    "功能用途",
+    "英文功能用途",
+    "来源类型",
+    "预测概率",
+    "reported_use",
+    "harmonized_use",
+    "CompTox功能用途链接",
 )
 
 
@@ -95,6 +155,10 @@ def clear_cached_query_input():
     for key in INPUT_CACHE_KEYS:
         st.session_state.pop(key, None)
     clear_query_results()
+
+
+def select_existing_columns(df, columns):
+    return df[[column for column in columns if column in df.columns]]
 
 
 st.set_page_config(
@@ -185,9 +249,11 @@ else:
 
 comptox_input_df = normalize_comptox_input_columns(query_input_df)
 echa_input_df = normalize_echa_input_columns(query_input_df)
+source_origin_input_df = normalize_source_input_columns(query_input_df)
 
 comptox_valid, comptox_message = validate_comptox_input(comptox_input_df)
 echa_valid, echa_message = validate_echa_input(echa_input_df)
+source_origin_valid, source_origin_message = validate_source_origin_input(source_origin_input_df)
 
 if not resolver_valid and not comptox_valid and not echa_valid:
     st.error("输入表格没有可用于标识符补全、EPA 或 ECHA 查询的标识列。")
@@ -209,14 +275,31 @@ if echa_valid:
 else:
     st.warning(f"ECHA 输入检查未通过：{echa_message}")
 
-tab_input, tab_resolver, tab_epa, tab_echa, tab_rose, tab_output, tab_notes = st.tabs(
-    ["输入数据", "标识符补全", "EPA CompTox 查询", "ECHA 查询", "用途图谱", "结果下载", "字段说明"]
+if source_origin_valid:
+    st.success(source_origin_message)
+else:
+    st.warning(f"来源属性输入检查未通过：{source_origin_message}")
+
+tab_input, tab_resolver, tab_epa, tab_echa, tab_echa_ghs, tab_source_origin, tab_rose, tab_output, tab_notes = st.tabs(
+    [
+        "输入数据",
+        "标识符补全",
+        "EPA CompTox 查询",
+        "ECHA 查询",
+        "ECHA GHS危害",
+        "来源属性",
+        "用途图谱",
+        "结果下载",
+        "字段说明",
+    ]
 )
 
 with tab_input:
     st.subheader("待查询化合物")
     st.info(query_input_label)
-    view_raw, view_resolver, view_epa, view_echa = st.tabs(["原始表格", "补全标准列", "EPA 标准列", "ECHA 标准列"])
+    view_raw, view_resolver, view_epa, view_echa, view_source_origin = st.tabs(
+        ["原始表格", "补全标准列", "EPA 标准列", "ECHA 标准列", "来源属性标准列"]
+    )
     with view_raw:
         show_dataframe(raw_input_df)
     with view_resolver:
@@ -229,6 +312,8 @@ with tab_input:
         show_dataframe(comptox_input_df[COMPTOX_REQUIRED_IDENTIFIER_COLUMNS])
     with view_echa:
         show_dataframe(echa_input_df[ECHA_REQUIRED_IDENTIFIER_COLUMNS])
+    with view_source_origin:
+        show_dataframe(source_origin_input_df[SOURCE_ORIGIN_REQUIRED_IDENTIFIER_COLUMNS])
     st.metric("化合物数量", len(raw_input_df))
 
 with tab_resolver:
@@ -389,6 +474,14 @@ with tab_resolver:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="resolver_download_in_tab",
         )
+        st.download_button(
+            label="下载 EPI Suite 输入表（6列）",
+            data=resolver_build_epi_input_workbook(completed_df),
+            file_name="Identifier_Completion_EPISuite_Input.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="resolver_epi_input_download_in_tab",
+            help="仅包含 compound、smiles、cas、ec、dtxsid、echa_id，可直接上传到第三部分。",
+        )
 
     if warnings_df is not None and not warnings_df.empty:
         with st.expander("查看补全提示和失败记录", expanded=False):
@@ -397,8 +490,8 @@ with tab_resolver:
 with tab_epa:
     st.subheader("3. 查询用途类别")
     st.write(
-        "系统会先把化合物匹配到 CompTox 的 DTXSID，再查询产品用途类别和化学功能用途。"
-        "同一化合物有多个用途时，会按证据数量排序并取前五个。"
+        "系统会先把化合物匹配到 CompTox 的 DTXSID，再查询产品用途类别（产品场景）和化学功能用途（技术功能）。"
+        "产品场景和功能用途会分别生成 Top5，综合候选 Top5 仅用于兼容旧报告。"
     )
 
     if not comptox_valid:
@@ -406,8 +499,22 @@ with tab_epa:
 
     st.info(
         "默认直接查询 CompTox Dashboard 的产品用途类别和化学功能用途。"
-        "EPA 旧直连 API 已下线，因此默认结果不包含产品用途关键词。"
+        "EPA 旧直连 API 已下线，因此默认结果不包含产品用途关键词；"
+        "产品用途关键词仅在你配置可用的自定义 EPA API 时可能返回。"
     )
+    with st.expander("EPA 术语说明：产品用途类别、化学功能用途和产品用途关键词", expanded=False):
+        st.markdown(
+            "\n".join(
+                [
+                    "- 产品用途类别（Product Use Category, PUC）：表示化学物质出现在哪类产品或产品场景中，例如个人护理用品、清洁用品、涂料。",
+                    "- 化学功能用途（Chemical Functional Use / Function Category, FC）：表示化学物质在产品或工艺中的技术功能，例如溶剂、芳香剂、增塑剂。",
+                    "- 产品用途关键词（Chemical List Presence Keyword）：来自清单或文本的宽泛用途关键词；默认 Dashboard 模式不返回该类证据。",
+                ]
+            )
+        )
+        st.link_button("EPA CPDat", "https://www.epa.gov/chemical-research/chemical-and-products-database-cpdat")
+        st.link_button("ChemExpo Data Overview", "https://comptox.epa.gov/chemexpo/static/user_guide/data_overview.html")
+        st.link_button("ChemExpo Glossary", "https://comptox.epa.gov/chemexpo/static/user_guide/glossary.html")
     with st.expander("可选：配置自定义 EPA API", expanded=False):
         api_base = st.text_input(
             "自定义 EPA CompTox API 地址",
@@ -472,13 +579,30 @@ with tab_epa:
     summary_df = st.session_state.get("comptox_use_summary")
     candidates_df = st.session_state.get("comptox_use_candidates")
     errors_df = st.session_state.get("comptox_use_errors")
+    product_use_df = comptox_build_product_use_table(candidates_df)
+    functional_use_df = comptox_build_functional_use_table(candidates_df)
 
     if summary_df is None:
         st.subheader("结果预览")
-        show_dataframe(comptox_build_empty_summary_template(comptox_input_df, top_n=COMPTOX_TOP_N_DEFAULT))
+        show_dataframe(
+            select_existing_columns(
+                comptox_build_empty_summary_template(comptox_input_df, top_n=COMPTOX_TOP_N_DEFAULT),
+                COMPTOX_SUMMARY_PREVIEW_COLUMNS,
+            )
+        )
     else:
-        st.subheader("前五用途结果")
-        show_dataframe(summary_df)
+        st.subheader("CompTox 用途结果")
+        show_dataframe(select_existing_columns(summary_df, COMPTOX_SUMMARY_PREVIEW_COLUMNS))
+
+    if not product_use_df.empty:
+        st.subheader("产品用途类别")
+        st.caption("来自 CompTox product-use-categories 页面；表示化学物质出现在哪类产品或产品场景中。")
+        show_dataframe(select_existing_columns(product_use_df, COMPTOX_PRODUCT_USE_PREVIEW_COLUMNS))
+
+    if not functional_use_df.empty:
+        st.subheader("化学功能用途")
+        st.caption("来自 CompTox chemical-functional-use 页面；表示化学物质在产品或工艺中的技术功能。predicted 记录保留预测概率。")
+        show_dataframe(select_existing_columns(functional_use_df, COMPTOX_FUNCTIONAL_USE_PREVIEW_COLUMNS))
 
     if candidates_df is not None and not candidates_df.empty:
         with st.expander("查看全部用途候选", expanded=False):
@@ -600,8 +724,165 @@ with tab_echa:
         with st.expander("查看 ECHA 提示和失败记录", expanded=False):
             show_dataframe(echa_errors_df)
 
+with tab_echa_ghs:
+    st.subheader("5. 查询 ECHA GHS/C&L 危害分类")
+    st.write(
+        "系统会先匹配 ECHA CHEM 物质，再读取 C&L Inventory 中的协调分类或行业自分类。"
+        "结果表示 GHS/CLP 危害标签，不表示化合物用途或地区赋存特征。"
+        "临时网络中断、限流或服务端错误会自动重试；仍失败时会写入提示和失败记录。"
+    )
+
+    if not echa_valid:
+        st.error(echa_message)
+
+    col_timeout, col_delay = st.columns(2)
+    with col_timeout:
+        echa_ghs_timeout_seconds = st.number_input(
+            "ECHA GHS 单个请求超时（秒）",
+            min_value=30,
+            max_value=300,
+            value=90,
+            step=10,
+        )
+    with col_delay:
+        echa_ghs_delay_seconds = st.number_input(
+            "ECHA GHS 请求间隔（秒）",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.5,
+            step=0.1,
+        )
+
+    if st.button("开始 ECHA GHS危害查询", type="primary", disabled=not echa_valid):
+        progress_bar = st.progress(0)
+        status_box = st.empty()
+
+        def update_echa_ghs_progress(done, total, compound):
+            progress_bar.progress(done / total)
+            status_box.info(f"正在处理：{compound} ({done}/{total})")
+
+        with st.spinner("正在读取 ECHA C&L Inventory，请等待..."):
+            summary_df, classifications_df, errors_df = run_echa_ghs_batch(
+                echa_input_df,
+                base_url=echa_base,
+                timeout=int(echa_ghs_timeout_seconds),
+                delay_seconds=float(echa_ghs_delay_seconds),
+                progress_callback=update_echa_ghs_progress,
+            )
+
+        st.session_state["echa_ghs_summary"] = summary_df
+        st.session_state["echa_ghs_classifications"] = classifications_df
+        st.session_state["echa_ghs_errors"] = errors_df
+
+        if errors_df.empty:
+            st.success("ECHA GHS危害查询完成。")
+        else:
+            st.warning(f"ECHA GHS危害查询完成，但有 {len(errors_df)} 条提示或失败记录。")
+
+    echa_ghs_summary_df = st.session_state.get("echa_ghs_summary")
+    echa_ghs_classifications_df = st.session_state.get("echa_ghs_classifications")
+    echa_ghs_errors_df = st.session_state.get("echa_ghs_errors")
+
+    if echa_ghs_summary_df is None:
+        st.subheader("结果预览")
+        show_dataframe(echa_ghs_build_empty_summary_template(echa_input_df))
+    else:
+        st.subheader("GHS/C&L 危害摘要")
+        show_dataframe(echa_ghs_summary_df)
+
+    if echa_ghs_classifications_df is not None and not echa_ghs_classifications_df.empty:
+        with st.expander("查看全部 GHS/C&L 危害分类明细", expanded=False):
+            show_dataframe(echa_ghs_classifications_df)
+
+    if echa_ghs_errors_df is not None and not echa_ghs_errors_df.empty:
+        with st.expander("查看 ECHA GHS 提示和失败记录", expanded=False):
+            show_dataframe(echa_ghs_errors_df)
+
+with tab_source_origin:
+    st.subheader("6. 来源属性评估")
+    st.write(
+        "系统会合并 EPA/ECHA 的人为源证据与 ChEBI、COCONUT 的天然源证据，"
+        "判断化合物更可能属于天然源、人为源、兼具天然源和人为源，或证据不足。"
+        "该结果是证据合并判断，不是 GHS 危害、用途图谱或地区赋存统计。"
+    )
+
+    if not source_origin_valid:
+        st.error(source_origin_message)
+
+    col_timeout, col_delay = st.columns(2)
+    with col_timeout:
+        source_origin_timeout_seconds = st.number_input(
+            "来源属性单个请求超时（秒）",
+            min_value=20,
+            max_value=240,
+            value=60,
+            step=10,
+            key="source_origin_timeout_seconds",
+        )
+    with col_delay:
+        source_origin_delay_seconds = st.number_input(
+            "来源属性请求间隔（秒）",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.2,
+            step=0.1,
+            key="source_origin_delay_seconds",
+        )
+
+    if st.button("开始来源属性评估", type="primary", disabled=not source_origin_valid):
+        progress_bar = st.progress(0)
+        status_box = st.empty()
+
+        def update_source_origin_progress(done, total, compound):
+            progress_bar.progress(done / total)
+            status_box.info(f"正在评估：{compound} ({done}/{total})")
+
+        with st.spinner("正在合并来源属性证据，请等待..."):
+            summary_df, evidence_df, errors_df = run_source_origin_batch(
+                source_origin_input_df,
+                comptox_summary_df=st.session_state.get("comptox_use_summary"),
+                comptox_candidates_df=st.session_state.get("comptox_use_candidates"),
+                echa_summary_df=st.session_state.get("echa_use_summary"),
+                echa_candidates_df=st.session_state.get("echa_use_candidates"),
+                echa_dossiers_df=st.session_state.get("echa_use_dossiers"),
+                comptox_api_base=api_base,
+                comptox_api_key=api_key.strip() or None,
+                echa_base=echa_base,
+                timeout=int(source_origin_timeout_seconds),
+                delay_seconds=float(source_origin_delay_seconds),
+                progress_callback=update_source_origin_progress,
+            )
+
+        st.session_state["source_origin_summary"] = summary_df
+        st.session_state["source_origin_evidence"] = evidence_df
+        st.session_state["source_origin_errors"] = errors_df
+
+        if errors_df.empty:
+            st.success("来源属性评估完成。")
+        else:
+            st.warning(f"来源属性评估完成，但有 {len(errors_df)} 条提示或失败记录。")
+
+    source_origin_summary_df = st.session_state.get("source_origin_summary")
+    source_origin_evidence_df = st.session_state.get("source_origin_evidence")
+    source_origin_errors_df = st.session_state.get("source_origin_errors")
+
+    if source_origin_summary_df is None:
+        st.subheader("结果预览")
+        show_dataframe(source_origin_build_empty_summary_template(source_origin_input_df))
+    else:
+        st.subheader("来源属性摘要")
+        show_dataframe(source_origin_summary_df)
+
+    if source_origin_evidence_df is not None and not source_origin_evidence_df.empty:
+        with st.expander("查看来源属性证据明细", expanded=False):
+            show_dataframe(source_origin_evidence_df)
+
+    if source_origin_errors_df is not None and not source_origin_errors_df.empty:
+        with st.expander("查看来源属性提示和失败记录", expanded=False):
+            show_dataframe(source_origin_errors_df)
+
 with tab_rose:
-    st.subheader("5. 用途风玫瑰图")
+    st.subheader("7. 用途风玫瑰图")
     st.write(
         "根据 EPA 或 ECHA 的 Top 用途结果绘图。每个化合物一个极坐标子图，"
         "每个用途扇区的角度按该用途证据数量占当前化合物 Top 用途证据总量的比例计算。"
@@ -610,11 +891,19 @@ with tab_rose:
     rose_sources = {}
     comptox_summary_df = st.session_state.get("comptox_use_summary")
     if isinstance(comptox_summary_df, pd.DataFrame) and not comptox_summary_df.empty:
-        rose_sources["EPA CompTox"] = {
-            "source_label": "EPA",
+        rose_sources["EPA CompTox 产品场景"] = {
+            "source_label": "EPA PUC",
             "summary_df": comptox_summary_df,
-            "title": "EPA CompTox Use Rose Plot",
-            "file_prefix": "EPA_Use_Rose_Plot",
+            "use_prefix": "产品场景用途",
+            "title": "EPA CompTox Product-Use Category Rose Plot",
+            "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
+        }
+        rose_sources["EPA CompTox 功能用途"] = {
+            "source_label": "EPA FC",
+            "summary_df": comptox_summary_df,
+            "use_prefix": "功能用途",
+            "title": "EPA CompTox Functional-Use Rose Plot",
+            "file_prefix": "EPA_Functional_Use_Rose_Plot",
         }
 
     echa_summary_df = st.session_state.get("echa_use_summary")
@@ -626,12 +915,7 @@ with tab_rose:
             "file_prefix": "ECHA_Use_Rose_Plot",
         }
 
-    combined_rose_frames = []
-    if isinstance(comptox_summary_df, pd.DataFrame) and not comptox_summary_df.empty:
-        combined_rose_frames.append(extract_use_rose_data(comptox_summary_df, source_label="EPA"))
-    if isinstance(echa_summary_df, pd.DataFrame) and not echa_summary_df.empty:
-        combined_rose_frames.append(extract_use_rose_data(echa_summary_df, source_label="ECHA"))
-    combined_rose_df = pd.concat(combined_rose_frames, ignore_index=True) if combined_rose_frames else pd.DataFrame()
+    combined_rose_df = build_epa_echa_combined_rose_data(comptox_summary_df, echa_summary_df)
     if not combined_rose_df.empty:
         rose_sources["EPA + ECHA Combined"] = {
             "source_label": "combined",
@@ -656,7 +940,11 @@ with tab_rose:
             rose_df = extract_use_rose_data(
                 source_config["summary_df"],
                 source_label=source_config["source_label"],
+                use_prefix=source_config.get("use_prefix", "用途"),
             )
+
+        if source_config.get("note"):
+            st.info(source_config["note"])
 
         if rose_df.empty:
             st.warning("当前结果中没有可用于绘图的用途数据。")
@@ -713,7 +1001,7 @@ with tab_rose:
                 )
 
 with tab_output:
-    st.subheader("6. 下载结果工作簿")
+    st.subheader("8. 下载结果工作簿")
     completed_df = st.session_state.get("identifier_completed_df")
     identifier_warnings_df = st.session_state.get("identifier_warnings_df")
 
@@ -728,6 +1016,16 @@ with tab_output:
         data=identifier_workbook_buffer,
         file_name="Identifier_Completion_Report.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.download_button(
+        label="下载 EPI Suite 输入表（6列）",
+        data=resolver_build_epi_input_workbook(completed_df),
+        file_name="Identifier_Completion_EPISuite_Input.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="resolver_epi_input_download_in_output",
+        help="仅包含 compound、smiles、cas、ec、dtxsid、echa_id，可直接上传到第三部分。",
+        disabled=completed_df is None or completed_df.empty,
     )
 
     summary_df = st.session_state.get("comptox_use_summary")
@@ -768,6 +1066,42 @@ with tab_output:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    echa_ghs_summary_df = st.session_state.get("echa_ghs_summary")
+    echa_ghs_classifications_df = st.session_state.get("echa_ghs_classifications")
+    echa_ghs_errors_df = st.session_state.get("echa_ghs_errors")
+
+    echa_ghs_workbook_buffer = echa_ghs_build_result_workbook(
+        echa_input_df,
+        summary_df=echa_ghs_summary_df,
+        classifications_df=echa_ghs_classifications_df,
+        errors_df=echa_ghs_errors_df,
+    )
+
+    st.download_button(
+        label="下载 ECHA GHS危害查询结果",
+        data=echa_ghs_workbook_buffer,
+        file_name="ECHA_GHS_Hazard_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    source_origin_summary_df = st.session_state.get("source_origin_summary")
+    source_origin_evidence_df = st.session_state.get("source_origin_evidence")
+    source_origin_errors_df = st.session_state.get("source_origin_errors")
+
+    source_origin_workbook_buffer = source_origin_build_result_workbook(
+        source_origin_input_df,
+        summary_df=source_origin_summary_df,
+        evidence_df=source_origin_evidence_df,
+        errors_df=source_origin_errors_df,
+    )
+
+    st.download_button(
+        label="下载来源属性评估结果",
+        data=source_origin_workbook_buffer,
+        file_name="Source_Origin_Evidence_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 with tab_notes:
     st.subheader("查询逻辑")
     st.markdown(
@@ -782,16 +1116,29 @@ with tab_notes:
                 "",
                 "EPA 查询：",
                 "1. 优先使用输入表中的 `dtxsid`，否则用 CAS、compound、SMILES 去 CompTox 匹配。",
-                "2. 查询产品用途类别、产品用途关键词和化学功能用途。",
-                "3. 将英文用途映射为中文类别，例如个人护理用品、化学品中间体、增塑剂、农药等。",
-                "4. 对同一中文类别合并证据数量，按证据数量排序，只在主表保留前五个用途。",
-                "5. 完整候选用途会保存在下载文件的 `All_Use_Candidates` 工作表中。",
+                "2. 默认查询产品用途类别（PUC，产品场景）和化学功能用途（FC，技术功能）；产品用途关键词仅在配置可用自定义 EPA API 时可能返回。",
+                "3. 产品用途类别和化学功能用途分别显示为明细表；predicted 功能用途保留预测概率。",
+                "4. 将英文用途映射为中文类别，例如个人护理用品、化学品中间体、增塑剂、农药等。",
+                "5. 对产品场景和功能用途分别生成 Top5；综合候选 Top5 仅用于兼容旧报告，不能把不同证据数量纲直接比较。",
+                "6. 下载文件中 `Product_Use_Categories` 单独保存产品用途类别，`Functional_Uses` 单独保存化学功能用途，`Evidence_Metadata` 说明证据类型。",
                 "",
                 "ECHA 查询：",
                 "ECHA 查询会读取 ECHA CHEM 的物质匹配结果和 REACH dossier。结果中的中文用途类别来自 dossier 目录里的用途描述，",
                 "下载文件会保留原始英文用途、dossier 编号和记录链接，便于后续人工核对。",
+                "",
+                "ECHA GHS危害查询：",
+                "1. ECHA GHS/C&L 查询读取 C&L Inventory 的协调分类或行业自分类；结果表示危害分类，不表示用途或地区赋存特征。",
+                "2. GHS危害分层只根据 ECHA 返回的 hazard class/category 和 H 语句派生；无GHS数据或未分类不等于无危害。",
+                "",
+                "来源属性评估：",
+                "1. 人为源证据来自 EPA CompTox 产品/功能用途和 ECHA REACH 用途、dossier 证据。",
+                "2. 天然源证据来自 ChEBI OLS 和 COCONUT；LOTUS 暂作为人工复核来源，不在第一版自动查询。",
+                "3. 有人为源证据且有天然源证据时判为兼具天然源和人为源；接口失败只进入提示记录，不等同于无来源证据。",
             ]
         )
     )
     st.link_button("打开 CompTox Dashboard", DEFAULT_DASHBOARD_BASE)
     st.link_button("打开 ECHA CHEM", DEFAULT_ECHA_BASE)
+    st.link_button("打开 ChEBI", "https://www.ebi.ac.uk/chebi/")
+    st.link_button("打开 COCONUT", "https://coconut.naturalproducts.net/")
+    st.link_button("打开 LOTUS", "https://lotus.naturalproducts.net/")

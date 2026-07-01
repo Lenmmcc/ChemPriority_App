@@ -1,221 +1,119 @@
-# ChemPriority 新手操作文档
+# ChemPriority
 
-ChemPriority 是一个面向污染物优先控制筛选的网页工具，用于整理化合物输入表、计算 ToxPi 毒性综合得分、预测 EPI Suite 环境归趋指标，并查询 EPA CompTox 与 ECHA CHEM 中的化合物用途证据。
+ChemPriority 是一个面向污染物优先控制筛选的 Streamlit 工具。它把数据整理、ToxPi 综合评分、环境归趋预测和公开用途证据查询放在四个独立页面中，便于将化合物清单转化为可复核的筛选结果。
 
-本文档面向首次使用者，重点说明如何准备 Excel、进入各功能页面、完成操作并下载结果。
+> 适合用于科研或业务中的**数据整理、候选物排序和证据初筛**。页面中的预测结果、用途候选和综合分数都不应直接替代人工核验、正式风险评估或监管结论。
 
-## 1. 开始使用
+## 项目用途与适用范围
 
-如果已经部署到服务器，请直接打开管理员提供的网址。进入网页后，左侧导航栏会显示 4 个功能页面：
+| 模块 | 解决的问题 | 最小输入 | 主要输出 |
+| --- | --- | --- | --- |
+| ADMETlab 毒性数据获取 | 整理并校验待提交至 ADMETlab 的化合物清单 | `compound`、`smiles` | `ADMETlab_Validated_Input.xlsx` |
+| ToxPi 毒性评估 | 按选择的毒性指标与权重计算综合分数，并检验排序稳健性 | `compound` + 至少 1 个数值型毒性指标 | Excel 报告及 ToxPi、柱状图、敏感性 PDF |
+| EPI Suite 环境归趋预测 | 批量请求 EPI Web Suite，或整理外部 EPI Suite 结果 | `compound`、`smiles` | `EPISuite_Fate_Report.xlsx` |
+| EPA/ECHA 用途查询 | 补全标识符，查询 EPA CompTox / ECHA CHEM 用途证据、ECHA GHS/C&L 危害分类和来源属性证据 | `compound`、`cas`、`ec`、`smiles`、`dtxsid`、`echa_id` 中任一可用字段 | 标识符、CompTox、ECHA 用途、ECHA GHS 和来源属性工作簿；用途图 |
 
-1. `ADMETlab毒性数据获取`
-2. `ToxPi毒性评估`
-3. `EPISuite环境归趋`
-4. `化合物用途查询`
+四个模块可以独立使用。例如，已有毒性数值时可直接进入 ToxPi；只需要用途证据时可直接进入“化合物用途查询”。
 
-如果需要在本机临时运行，请在项目根目录安装依赖后启动：
+## 快速开始
 
-```bash
-pip install -r requirements.txt
+### 本地运行
+
+在项目根目录执行。请使用一个能够安装 [requirements.txt](requirements.txt) 中依赖的 Python 环境。
+
+~~~powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 streamlit run app.py
-```
+~~~
 
-启动后，浏览器会打开 ChemPriority 主页面。
+浏览器打开后，从左侧导航栏进入相应页面。若已有虚拟环境，只需激活环境并执行后两行命令。
 
-## 2. 使用前准备
+### 在线部署使用
 
-所有输入文件均使用 Excel 格式，推荐使用 `.xlsx`。请尽量保持第一行为字段名，每一行代表一个化合物。
+若管理员已部署应用，直接打开其提供的网址即可。浏览器无需安装本项目依赖；但 EPI Web Suite、PubChem、EPA CompTox、ECHA CHEM 和 ChemSpider（可选）等功能需要部署服务器能够访问外部服务。
 
-| 功能模块 | 必需或建议字段 | 说明 |
-| --- | --- | --- |
-| ADMETlab 毒性数据获取 | `compound`, `smiles` | `compound` 为化合物名称，`smiles` 为结构式字符串。 |
-| ToxPi 毒性评估 | `compound` + 至少 1 个数值型毒性指标列 | 系统会自动识别可转为数字的指标列，再由用户选择本次纳入计算的指标。 |
-| EPI Suite 环境归趋 | `compound`, `smiles` | 用于调用 EPI Web Suite 或生成备用输入包。 |
-| 化合物用途查询 | `compound`, `cas`, `ec`, `smiles`, `dtxsid`, `echa_id` | 不要求全部都有。只有 `smiles` 时建议先运行“标识符补全”。 |
+## 四个模块速查
 
-ToxPi 示例表可参考项目中的 `data/data.xlsx`。其中包含 `compound`、`hERG Blockers-hERG`、`DILI`、`oral cavity`、`Skin sensitivity`、`carcinogenicity` 等毒性指标列。
+### 1. ADMETlab 毒性数据获取
 
-使用前请检查：
+- 下载 `ADMETlab_Input_Template.xlsx`，填写 `compound` 和 `smiles`。
+- 上传后，页面检查必需列、空值和重复的化合物名称。
+- 当前版本**不自动提交或下载 ADMETlab 预测结果**；它只导出已校验的 `ADMETlab_Validated_Input.xlsx`，供用户后续在 ADMETlab 平台处理。
 
-- `compound` 不要为空，建议不要重复。
-- `smiles`、`cas`、`ec`、`dtxsid`、`echa_id` 等标识符尽量准确。
-- ToxPi 指标列必须能转为数字，空值过多会影响计算。
-- 涉及 EPA、ECHA、PubChem、EPI Web Suite 的功能依赖外部网络，查询可能较慢，也可能因接口变化或网络限制失败。
+### 2. ToxPi 毒性评估与排序稳健性分析
 
-## 3. ADMETlab 毒性数据获取
+- 上传包含 `compound` 和数值型毒性指标的 Excel。项目自带的 [data/data.xlsx](data/data.xlsx) 可作为示例。
+- 在侧栏选择参与计算的指标，调整权重、Top K 和蒙特卡洛随机种子；可选地设置化合物分组和柱状图配色。
+- 输出包括 `ToxPi_Calculated_Report.xlsx`、美化版/原始风玫瑰图、综合得分柱状图和各随机种子的敏感性分布图。
+- 得分仅反映**本次选择的指标与权重**下的相对优先级，不表示固有风险或监管优先级。
 
-该页面用于整理和校验后续提交 ADMETlab 的输入表。目前 ADMETlab 自动连接路线尚未启用，页面主要提供输入校验和已校验表下载。
+### 3. EPI Suite 环境归趋预测
 
-操作步骤：
+- 使用 `compound` 与 `smiles` 两列；页面提供 `EPISuite_Input_Template.xlsx`。
+- 可直接调用默认 EPI Web Suite 页面端接口进行批量预测。
+- 服务不可用时，下载 `EPISuite_Input_Package.zip`，在外部 EPI Suite / EPI Web Suite 完成计算后，将 CSV、Excel、TXT 或 DOC 文本结果上传回页面解析。
+- 最终下载 `EPISuite_Fate_Report.xlsx`，其中保留输入、合并结果、原始解析结果和解析提示。
 
-1. 进入左侧导航栏的 `ADMETlab毒性数据获取`。
-2. 点击右侧 `下载 Excel 模板`，可先下载 `ADMETlab_Input_Template.xlsx` 作为填写参考。
-3. 准备包含 `compound` 和 `smiles` 两列的 Excel。
-4. 在 `上传 Excel 文件` 处上传输入表。
-5. 如果页面提示输入数据检查通过，可在 `输入数据` 标签页查看待提交化合物。
-6. 在 `ADMETlab 连接` 标签页查看当前连接状态说明。
-7. 在 `结果下载` 标签页点击下载，得到 `ADMETlab_Validated_Input.xlsx`。
+### 4. EPA/ECHA 用途查询
 
-常见提示：
+- 输入至少包含 `compound`、`cas`、`ec`、`smiles`、`dtxsid` 或 `echa_id` 之一；字段越完整，匹配越稳定。
+- 推荐先执行“标识符补全”，再分别运行 EPA CompTox、ECHA 用途、ECHA GHS危害和来源属性评估。
+- EPA 默认通过 CompTox Dashboard 获取产品用途类别和化学功能用途；化学功能用途会单独列出表格，并保留 Dashboard 预测功能用途的 probability。ECHA 用途查询从 ECHA CHEM 及 REACH dossier 中提取用途证据。
+- ECHA GHS危害查询从 C&L Inventory 读取协调分类或行业自分类，输出 GHS危害分层、H 语句、信号词和图标；临时网络中断、限流或服务端错误会自动重试。
+- 来源属性评估会合并 EPA/ECHA 人为源证据与 ChEBI、COCONUT 天然源证据，输出天然源、人为源、兼具天然源和人为源或证据不足。
+- 每个来源分别给出排序后的用途候选、完整候选清单、来源属性证据、提示/失败记录和可下载工作簿。用途风玫瑰图只对已得到用途结果的化合物绘制。
 
-- 缺少 `compound` 或 `smiles` 时，页面会提示缺少必要列。
-- `compound` 或 `smiles` 有空值时，请先回到 Excel 中补齐或删除对应行。
-- `compound` 重复时，请确认是否需要合并、重命名或保留重复记录。
+## 推荐使用路径
 
-## 4. ToxPi 毒性评估
-
-该页面用于根据毒性指标计算 ToxPi 综合得分，生成风玫瑰图、柱状图，并进行排序稳健性分析。
-
-操作步骤：
-
-1. 进入左侧导航栏的 `ToxPi毒性评估`。
-2. 在左侧 `ToxPi 控制台` 中上传污染物原始数据 Excel。
-3. 确认表格包含 `compound` 列，以及至少 1 个数值型毒性指标列。
-4. 在 `选择要纳入本次 ToxPi 计算的指标` 中勾选本次参与计算的指标。默认会选中系统识别到的全部数值型指标。
-5. 在 `毒性因子权重` 中为每个指标设置权重。权重越高，该指标对综合得分影响越大。
-6. 在 `稳健频次统计阈值 (Top K)` 中设置关注前多少名化合物。
-7. 在 `蒙特卡洛随机种子列表` 中保留默认种子，或输入多个整数种子。
-8. 如需区分化合物类别，可展开 `种类划定与分组配色`，设置分组名称和柱状图颜色。
-9. 在主页面查看 3 个标签页：
-   - `数据审查`：查看原始数据、归一化数据和 ToxPi 得分。
-   - `ToxPi 图谱`：查看风玫瑰图和综合得分柱状图。
-   - `排序稳健性`：查看蒙特卡洛扰动下的排序稳定性结果。
-
-可下载结果：
-
-| 下载内容 | 文件名 |
+| 你的起点 | 推荐路径 |
 | --- | --- |
-| 美化版 ToxPi 风玫瑰图 | `ToxPi_Plot_Beautified.pdf` |
-| 原始版 ToxPi 风玫瑰图 | `ToxPi_Plot_Original.pdf` |
-| 综合得分柱状图 | `ToxPi_Bar_Plot_Group_Colors.pdf` |
-| 不同随机种子的敏感性分布图 | `Sensitivity_Distribution_seed_*.pdf` |
-| 完整计算报告 | `ToxPi_Calculated_Report.xlsx` |
+| 已有化合物毒性数值 | 直接使用 ToxPi，选择指标和权重后导出报告。 |
+| 只有化合物名称或 SMILES，需要用途信息 | 在用途查询页先补全标识符，再运行 EPA 与/或 ECHA 查询。 |
+| 有 `compound + smiles`，需要环境归趋指标 | 使用 EPI Suite 页面；先尝试网页端预测，失败时走输入包和外部结果解析路线。 |
+| 需要整理待预测的 ADMETlab 清单 | 使用 ADMETlab 页面做格式校验并下载已校验输入表。 |
 
-注意事项：
+## Excel 输入规则
 
-- 至少选择 1 个毒性指标，且所有权重之和必须大于 0。
-- 如果所有化合物的毒性指标都为空，系统无法计算。
-- ToxPi 得分越高，表示在当前指标和权重设置下综合优先级越高。
-- 权重设置会影响排序，建议在报告中记录采用的指标和权重。
+- 推荐 `.xlsx` 格式；第一行为字段名，每一行表示一个化合物。
+- `compound` 建议非空且唯一。对于 ADMETlab 和 EPI Suite，`compound` 与 `smiles` 都是必填项。
+- ToxPi 会忽略常见元数据列，并将能转换成数值的其他列作为候选毒性指标；至少保留一个可用数值列。
+- 用途查询支持 `compound`、`cas`、`ec`、`smiles`、`dtxsid`、`echa_id`。系统会统一字段名，但最好直接使用这些标准列名。
+- 上传数据会在**同一浏览器会话**中保留，以便在该页面内切换标签页；点击页面中的“清空当前数据”会删除该页面的缓存和依赖结果。
 
-## 5. EPI Suite 环境归趋预测
+## 管理员可选配置
 
-该页面用于批量计算或整理 EPI Suite 环境归趋指标，包括物化性质、降解、生物富集和环境介质分配等结果。
+ChemSpider 仅用于标识符补全阶段中 PubChem 未补齐的 CAS 或标准名称。没有配置密钥时，ChemSpider 选项会被禁用，其余功能仍可使用。
 
-操作步骤：
+本地部署时，将密钥写入 `.streamlit/secrets.toml`；该文件已被 `.gitignore` 忽略，绝不能提交真实密钥。
 
-1. 进入左侧导航栏的 `EPISuite环境归趋`。
-2. 点击右侧 `下载 Excel 模板`，可获得 `EPISuite_Input_Template.xlsx`。
-3. 准备包含 `compound` 和 `smiles` 两列的 Excel。
-4. 上传 Excel 后，页面会显示目标环境归趋指标，并检查输入数据。
-5. 在 `输入数据` 标签页确认待预测化合物。
+~~~toml
+CHEMSPIDER_API_KEY = "你的密钥"
+~~~
 
-在线预测方式：
+托管部署时，请在对应平台的 Streamlit Secrets 中配置同名键。不要将密钥写入代码、Excel、截图、日志或导出的工作簿。
 
-1. 打开 `网页端预测` 标签页。
-2. 保持默认 `EPI Web Suite API 地址`，除非管理员要求修改。
-3. 根据网络情况设置 `单个化合物超时时间（秒）` 和 `请求间隔（秒）`。
-4. 点击 `开始网页端预测`。
-5. 等待进度条完成，查看网页端预测结果和失败记录。
+## 结果解释与使用边界
 
-备用方式：
+- 外部服务会限流、超时、改版或缺少目标化合物；查看下载工作簿中的提示、失败记录和原始候选，而非只看成功行。
+- EPA 与 ECHA 的证据来源与覆盖范围不同，应分开阅读，不能将同名用途直接视为等价证据。
+- ECHA GHS/C&L 结果是物质层面的危害分类，不是 REACH 用途证据，也不是地区赋存特征；无GHS数据或未分类不等于无危害，查询失败应查看提示/失败记录后重试。
+- 来源属性是基于当前接入数据库的证据合并判断；证据不足不等于没有天然源或人为源，LOTUS 等天然产物库可作为后续人工复核来源。
+- 用途图按用途候选的证据数量绘制；缺少有效数量时会采用等角度回退绘图。
+- 使用结果前，应核对输入结构/标识符、匹配名称、原始英文用途或 dossier 链接，以及异常记录。
 
-1. 如果在线预测不可用，打开 `备用输入包` 标签页。
-2. 点击下载 `EPISuite_Input_Package.zip`。
-3. 将输入包中的 SMILES 信息复制到外部 EPI Suite 或 EPI Web Suite 中计算。
-4. 保存外部结果文件。
-5. 回到 `解析外部结果` 标签页，上传 CSV、Excel、TXT 或 DOC 结果文件。
-6. 页面会将外部结果解析为结构化表格，并与原始输入合并。
+## 详细操作手册
 
-可下载结果：
+[查看完整用户操作手册](docs/用户操作手册.md)：逐页操作步骤、下载文件说明、结果解释和故障排查。
 
-| 下载内容 | 文件名 |
-| --- | --- |
-| EPI Suite 输入模板 | `EPISuite_Input_Template.xlsx` |
-| EPI Suite 备用输入包 | `EPISuite_Input_Package.zip` |
-| 环境归趋结果工作簿 | `EPISuite_Fate_Report.xlsx` |
+## 项目结构
 
-注意事项：
-
-- 在线预测依赖 EPI Web Suite 网页端 API，服务器必须能访问对应地址。
-- 单个化合物可能因为 SMILES 不合法、网络超时或外部服务异常而失败。
-- 失败记录会保存在页面和下载报告中，建议逐条检查。
-
-## 6. 化合物用途查询
-
-该页面用于查询化合物用途证据。系统可先补全标识符，再分别从 EPA CompTox Dashboard 和 ECHA CHEM 查询用途信息，并按证据强度保留前五个用途。
-
-操作步骤：
-
-1. 进入左侧导航栏的 `化合物用途查询`。
-2. 根据已有数据下载合适模板：
-   - `Identifier_Completion_Input_Template.xlsx`：用于标识符补全。
-   - `EPA_CompTox_Use_Input_Template.xlsx`：用于 EPA CompTox 查询。
-   - `ECHA_Use_Input_Template.xlsx`：用于 ECHA 查询。
-3. 上传包含 `compound`、`cas`、`ec`、`smiles`、`dtxsid` 或 `echa_id` 中任意可用字段的 Excel。
-4. 在 `输入数据` 标签页检查原始表、补全标准列、EPA 标准列和 ECHA 标准列。
-
-建议流程：
-
-1. 如果只有 `smiles` 或标识符不完整，先打开 `标识符补全` 标签页。
-2. 默认勾选 `使用 EPA 补全 DTXSID/CAS`、`使用 PubChem 从 SMILES 预补全`、`使用 ECHA 补全 EC/ECHA ID`。若部署者配置了 ChemSpider API Key，可按需勾选 `使用 ChemSpider 补全 CAS/名称`；未配置时该选项会禁用。
-3. 点击 `开始补全标识符`，等待补全完成。
-4. 补全后，EPA/ECHA 查询会自动使用补全后的标识符表。
-5. 打开 `EPA CompTox 查询` 标签页，确认参数后点击 `开始查询用途`。
-6. 打开 `ECHA 查询` 标签页，确认参数后点击 `开始 ECHA 查询用途`。
-7. 在 `结果下载` 标签页下载各类报告。
-
-可下载结果：
-
-| 下载内容 | 文件名 |
-| --- | --- |
-| 标识符补全结果 | `Identifier_Completion_Report.xlsx` |
-| EPA CompTox 用途查询结果 | `CompTox_Use_Category_Report.xlsx` |
-| ECHA REACH 用途证据结果 | `ECHA_REACH_Use_Evidence_Report.xlsx` |
-
-注意事项：
-
-- EPA 查询优先使用 `dtxsid`，没有时会尝试用 CAS、compound 或 SMILES 匹配。
-- 默认通过 CompTox Dashboard 查询产品用途类别和化学功能用途。EPA 旧直连 API 已下线；只有部署者配置了当前可用的自定义 API 时，结果才会额外包含产品用途关键词。
-- ECHA 查询更依赖 `echa_id`、`ec`、CAS 或明确名称；只有 SMILES 时稳定性较弱。
-- ChemSpider 仅用于补齐 PubChem 之后仍缺失的 CAS 或标准名称。管理员可在 Streamlit Secrets 中配置 `CHEMSPIDER_API_KEY`；密钥不会显示在页面、导出结果或版本库中。
-- 查询结果会保留用途候选、证据数量、失败记录和来源信息。
-- 用途分类来自外部数据库和页面解析，正式使用前建议人工核对原始证据链接和英文用途描述。
-
-## 7. 结果文件总览
-
-| 模块 | 主要结果文件 | 用途 |
-| --- | --- | --- |
-| ADMETlab 毒性数据获取 | `ADMETlab_Validated_Input.xlsx` | 保存已通过校验的 ADMETlab 输入清单。 |
-| ToxPi 毒性评估 | `ToxPi_Calculated_Report.xlsx` | 保存 ToxPi 得分、稳健性分析和本次指标信息。 |
-| ToxPi 毒性评估 | `ToxPi_Plot_Beautified.pdf`, `ToxPi_Plot_Original.pdf`, `ToxPi_Bar_Plot_Group_Colors.pdf` | 保存 ToxPi 图谱和柱状图。 |
-| EPI Suite 环境归趋 | `EPISuite_Fate_Report.xlsx` | 保存输入表、环境归趋结果、合并结果和解析提示。 |
-| 化合物用途查询 | `Identifier_Completion_Report.xlsx` | 保存 PubChem、EPA、ECHA 标识符补全结果和提示。 |
-| 化合物用途查询 | `CompTox_Use_Category_Report.xlsx` | 保存 EPA CompTox 用途结果、全部候选用途和失败记录。 |
-| 化合物用途查询 | `ECHA_REACH_Use_Evidence_Report.xlsx` | 保存 ECHA 用途证据、候选用途、dossier 信息和失败记录。 |
-
-## 8. 常见问题
-
-### 上传后提示缺少必要列怎么办？
-
-请检查 Excel 第一行字段名是否正确。常用字段包括 `compound`、`smiles`、`cas`、`ec`、`dtxsid`、`echa_id`。字段名前后不要有多余空格。
-
-### ToxPi 页面没有识别到毒性指标怎么办？
-
-请确认除 `compound` 外，至少有一列毒性指标可以转为数字。不要把数值写成带单位或说明文字的格式。
-
-### 为什么外部查询很慢？
-
-EPI Suite、EPA CompTox、ECHA 和 PubChem 查询都依赖外部网站或接口。化合物数量越多，耗时越长。建议先用少量样品测试，确认网络和字段无误后再批量运行。
-
-### 查询完成但有失败记录，结果还能用吗？
-
-可以先查看成功记录，但失败行需要单独核对。失败原因可能是网络超时、外部接口不可用、标识符无法匹配或化合物未被数据库收录。
-
-### 是否可以只用部分模块？
-
-可以。四个页面相互独立。若已有毒性指标，可直接使用 ToxPi；若只需要用途证据，可直接使用化合物用途查询。
-
-### 输出结果是否可以直接作为最终结论？
-
-不建议直接作为最终结论。ChemPriority 用于批量整理、评分和证据筛选，最终报告前仍应人工核对输入数据、权重设置、外部数据库证据和异常记录。
+~~~text
+app.py                       # Streamlit 首页
+pages/                       # 四个业务页面
+src/                         # ToxPi、EPI Suite、标识符和用途查询核心逻辑
+data/data.xlsx               # ToxPi 示例数据
+tests/                       # 回归测试
+docs/用户操作手册.md          # 面向普通用户的完整手册
+~~~

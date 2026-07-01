@@ -13,6 +13,7 @@ import pandas as pd
 
 
 REQUIRED_COLUMNS = ["compound", "smiles"]
+OPTIONAL_COLUMNS = ["cas"]
 
 DEFAULT_EPI_WEB_API = "https://episuite.dev/api/submit"
 
@@ -111,6 +112,24 @@ FATE_ENDPOINTS = [
 
 ENDPOINT_KEYS = [item["endpoint"] for item in FATE_ENDPOINTS]
 
+EPI_WEB_RESULT_SHEETS = [
+    "Core_Summary",
+    "Properties",
+    "Degradation",
+    "Fate_Transport",
+    "Bioaccumulation",
+    "ECOSAR_Aquatic_Toxicity",
+    "Model_Metadata",
+    "Raw_API_JSON",
+    "Warnings",
+]
+
+EPI_REPORT_HIDDEN_COMPAT_COLUMNS = [
+    "log_kow",
+    "log_kow_selected",
+    "log_kow_units",
+]
+
 _NUMBER = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)"
 
 TEXT_PATTERNS = {
@@ -175,6 +194,7 @@ TEXT_PATTERNS = {
 COLUMN_ALIASES = {
     "compound": ["compound", "name", "chemical", "chemical_name", "chem_name"],
     "smiles": ["smiles", "smiles_notation", "canonical_smiles", "isomeric_smiles"],
+    "cas": ["cas", "casrn", "cas_no", "cas_number", "cas号"],
     "log_kow": ["log_kow", "logkow", "log_kow_kowwin", "kowwin", "logp"],
     "water_solubility_mg_l": [
         "water_solubility",
@@ -218,6 +238,7 @@ def make_template_file():
         {
             "compound": ["example_compound_1", "example_compound_2"],
             "smiles": ["CCO", "c1ccccc1"],
+            "cas": ["64-17-5", "71-43-2"],
         }
     )
     buffer = io.BytesIO()
@@ -238,9 +259,11 @@ def normalize_input_columns(df):
             rename_map[col] = "compound"
         elif key in {"smiles", "canonicalsmiles", "isomericsmiles"}:
             rename_map[col] = "smiles"
+        elif key in {"cas", "casrn", "casno", "casnumber", "cas号", "cas编号"}:
+            rename_map[col] = "cas"
 
     normalized = normalized.rename(columns=rename_map)
-    for col in REQUIRED_COLUMNS:
+    for col in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
         if col in normalized.columns:
             normalized[col] = normalized[col].astype(str).str.strip()
             normalized[col] = normalized[col].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
@@ -264,7 +287,7 @@ def validate_input(df):
 
 
 def build_input_zip(df):
-    clean_df = df[REQUIRED_COLUMNS].copy()
+    clean_df = df[input_columns_for_display(df)].copy()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     csv_buffer = io.StringIO()
@@ -281,7 +304,7 @@ def build_input_zip(df):
             "EPI Suite input package",
             "",
             "Files:",
-            "- episuite_input.csv: compound and SMILES table for traceability.",
+            "- episuite_input.csv: compound, SMILES, and optional CAS table for traceability.",
             "- episuite_smiles_only.txt: one SMILES per line; safest format for EPI Web Suite paste input.",
             "- episuite_named.smi: SMILES + compound name separated by tab; useful for cheminformatics tools.",
             "- episuite_paste_list.txt: SMILES list for direct copy/paste.",
@@ -306,14 +329,22 @@ def build_input_zip(df):
 
 
 def build_empty_result_template(input_df):
-    result = input_df[REQUIRED_COLUMNS].copy()
+    result = input_df[input_columns_for_display(input_df)].copy()
     for key in ENDPOINT_KEYS:
         result[key] = pd.NA
     return result
 
 
-def call_epi_web_api(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90):
-    params = urllib.parse.urlencode({"smiles": smiles})
+def input_columns_for_display(df):
+    return REQUIRED_COLUMNS + [col for col in OPTIONAL_COLUMNS if col in df.columns]
+
+
+def call_epi_web_api(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, cas=None):
+    request_params = {"smiles": smiles}
+    cas = _clean_optional_text(cas)
+    if cas:
+        request_params["cas"] = cas
+    params = urllib.parse.urlencode(request_params)
     separator = "&" if "?" in api_url else "?"
     url = f"{api_url}{separator}{params}"
     request = urllib.request.Request(
@@ -340,26 +371,31 @@ def run_epi_web_batch(input_df, api_url=DEFAULT_EPI_WEB_API, timeout=90, delay_s
     errors = []
     total = len(input_df)
 
-    for idx, row in enumerate(input_df[REQUIRED_COLUMNS].itertuples(index=False), start=1):
-        compound = str(row.compound).strip()
-        smiles = str(row.smiles).strip()
+    for idx, (_, row) in enumerate(input_df.iterrows(), start=1):
+        compound = str(row.get("compound", "")).strip()
+        smiles = str(row.get("smiles", "")).strip()
+        cas = _clean_optional_text(row.get("cas"))
+        query_note = ""
         try:
-            raw = call_epi_web_api(smiles, api_url=api_url, timeout=timeout)
-            rows.append(extract_epi_web_summary(compound, smiles, raw))
-            raw_rows.append(
-                {
-                    "compound": compound,
-                    "smiles": smiles,
-                    "raw_json": json.dumps(raw, ensure_ascii=False),
-                }
-            )
+            raw = call_epi_web_api(smiles, cas=cas, api_url=api_url, timeout=timeout)
         except Exception as exc:
             error_text = str(exc)
-            errors.append({"compound": compound, "smiles": smiles, "error": error_text})
-            failed = {"compound": compound, "smiles": smiles, "status": "failed", "error": error_text}
-            for key in ENDPOINT_KEYS:
-                failed[key] = pd.NA
-            rows.append(failed)
+            if cas and _is_cas_not_located_error(error_text):
+                try:
+                    raw = call_epi_web_api(smiles, cas=None, api_url=api_url, timeout=timeout)
+                    query_note = f"CAS 查询失败，已回退到 SMILES：{error_text}"
+                except Exception as fallback_exc:
+                    fallback_error = f"{error_text}; SMILES 回退失败：{fallback_exc}"
+                    _append_failed_epi_row(rows, errors, compound, smiles, cas, fallback_error)
+                    raw = None
+                    query_note = ""
+            else:
+                _append_failed_epi_row(rows, errors, compound, smiles, cas, error_text)
+                raw = None
+                query_note = ""
+
+        if raw is not None:
+            _append_successful_epi_row(rows, raw_rows, compound, smiles, cas, raw, query_note=query_note)
 
         if progress_callback:
             progress_callback(idx, total, compound)
@@ -369,26 +405,88 @@ def run_epi_web_batch(input_df, api_url=DEFAULT_EPI_WEB_API, timeout=90, delay_s
     return pd.DataFrame(rows), pd.DataFrame(raw_rows), pd.DataFrame(errors)
 
 
-def extract_epi_web_summary(compound, smiles, data):
+def _append_successful_epi_row(rows, raw_rows, compound, smiles, cas, raw, query_note=""):
+    rows.append(extract_epi_web_summary(compound, smiles, raw, cas=cas, query_note=query_note))
+    chemical = raw.get("chemicalProperties", {})
+    raw_rows.append(
+        {
+            "compound": compound,
+            "smiles": smiles,
+            "cas": cas or pd.NA,
+            "epi_cas": chemical.get("cas"),
+            "epi_smiles": chemical.get("smiles"),
+            "query_note": query_note,
+            "raw_json": json.dumps(raw, ensure_ascii=False),
+        }
+    )
+
+
+def _append_failed_epi_row(rows, errors, compound, smiles, cas, error_text):
+    errors.append({"compound": compound, "smiles": smiles, "cas": cas or pd.NA, "error": error_text})
+    failed = {
+        "compound": compound,
+        "smiles": smiles,
+        "cas": cas or pd.NA,
+        "status": "failed",
+        "error": error_text,
+    }
+    for key in ENDPOINT_KEYS:
+        failed[key] = pd.NA
+    rows.append(failed)
+
+
+def _is_cas_not_located_error(error_text):
+    normalized = str(error_text).lower()
+    return "http 404" in normalized and "could not locate cas id" in normalized
+
+
+def extract_epi_web_summary(compound, smiles, data, cas=None, query_note=""):
     chemical = data.get("chemicalProperties", {})
+    log_kow_selected = _value_at(data, "logKow.selectedValue.value")
+    water_solubility_selected = _first_value(
+        data,
+        [
+            "waterSolubilityFromWaterNt.selectedValue.value",
+            "waterSolubilityFromLogKow.selectedValue.value",
+        ],
+    )
+    vapor_pressure_selected = _value_at(data, "vaporPressure.selectedValue.value")
+    henry_selected = _value_at(data, "henrysLawConstant.selectedValue.value")
+    log_koc_selected = _value_at(data, "logKoc.selectedValue.value")
     return {
         "compound": compound,
         "smiles": smiles,
+        "cas": _clean_optional_text(cas) or pd.NA,
         "status": "success",
+        "query_note": query_note,
         "epi_name": chemical.get("name"),
         "epi_systematic_name": chemical.get("systematicName"),
         "epi_cas": chemical.get("cas"),
+        "epi_smiles": chemical.get("smiles"),
         "molecular_formula": chemical.get("molecularFormula"),
         "molecular_weight": chemical.get("molecularWeight"),
         "organic": chemical.get("organic"),
         "flags": chemical.get("flags"),
-        "log_kow": _value_at(data, "logKow.selectedValue.value"),
+        "log_kow": log_kow_selected,
+        "log_kow_selected": log_kow_selected,
+        "log_kow_estimated": _value_at(data, "logKow.estimatedValue.value"),
+        "log_kow_experimental": _experimental_or_selected_value(data, "logKow"),
         "log_kow_type": _value_at(data, "logKow.selectedValue.valueType"),
-        "water_solubility_mg_l": _first_value(
+        "water_solubility_mg_l": water_solubility_selected,
+        "water_solubility_selected": water_solubility_selected,
+        "water_solubility_estimated": _first_section_value(
             data,
             [
-                "waterSolubilityFromWaterNt.selectedValue.value",
-                "waterSolubilityFromLogKow.selectedValue.value",
+                "waterSolubilityFromWaterNt",
+                "waterSolubilityFromLogKow",
+            ],
+            "estimatedValue.value",
+        ),
+        "water_solubility_experimental": _first_experimental_or_selected_value(
+            data,
+            [
+                "waterSolubilityFromWaterNt",
+                "waterSolubilityFromLogKow",
             ],
         ),
         "water_solubility_type": _first_value(
@@ -398,11 +496,20 @@ def extract_epi_web_summary(compound, smiles, data):
                 "waterSolubilityFromLogKow.selectedValue.valueType",
             ],
         ),
-        "vapor_pressure_mm_hg": _value_at(data, "vaporPressure.selectedValue.value"),
+        "vapor_pressure_mm_hg": vapor_pressure_selected,
+        "vapor_pressure_selected": vapor_pressure_selected,
+        "vapor_pressure_estimated": _value_at(data, "vaporPressure.estimatedValue.value"),
+        "vapor_pressure_experimental": _experimental_or_selected_value(data, "vaporPressure"),
         "vapor_pressure_type": _value_at(data, "vaporPressure.selectedValue.valueType"),
-        "henry_atm_m3_mol": _value_at(data, "henrysLawConstant.selectedValue.value"),
+        "henry_atm_m3_mol": henry_selected,
+        "henry_selected": henry_selected,
+        "henry_estimated": _value_at(data, "henrysLawConstant.estimatedValue.value"),
+        "henry_experimental": _experimental_or_selected_value(data, "henrysLawConstant"),
         "henry_type": _value_at(data, "henrysLawConstant.selectedValue.valueType"),
-        "log_koc": _value_at(data, "logKoc.selectedValue.value"),
+        "log_koc": log_koc_selected,
+        "log_koc_selected": log_koc_selected,
+        "log_koc_estimated": _value_at(data, "logKoc.estimatedValue.value"),
+        "log_koc_experimental": _experimental_or_selected_value(data, "logKoc"),
         "log_koc_type": _value_at(data, "logKoc.selectedValue.valueType"),
         "biowin_ultimate": _biowin_model_value(data, "Ultimate Biodegradation Timeframe"),
         "biowin_primary": _biowin_model_value(data, "Primary Biodegradation Timeframe"),
@@ -463,6 +570,7 @@ def parse_table_result(df, source_name="uploaded_table"):
         parsed["source_row"] = idx + 2
         parsed["compound"] = _safe_value(row.get(mapped.get("compound"), pd.NA))
         parsed["smiles"] = _safe_value(row.get(mapped.get("smiles"), pd.NA))
+        parsed["cas"] = _safe_value(row.get(mapped.get("cas"), pd.NA))
         for key in ENDPOINT_KEYS:
             parsed[key] = _safe_numeric(row.get(mapped.get(key), pd.NA))
         rows.append(parsed)
@@ -490,6 +598,7 @@ def parse_text_result(text, source_name="uploaded_text"):
             "source_section": idx,
             "compound": _extract_label(section, [r"Chemical\s+Name\s*[:=]\s*(.+)"]),
             "smiles": _extract_label(section, [r"SMILES\s+Notation\s*[:=]\s*(.+)", r"SMILES\s*[:=]\s*(.+)"]),
+            "cas": _extract_label(section, [r"CAS(?:\s+Registry)?(?:\s+Number)?\s*[:=]\s*(.+)"]),
         }
         for key in ENDPOINT_KEYS:
             parsed[key] = _extract_numeric(section, TEXT_PATTERNS[key])
@@ -515,7 +624,7 @@ def merge_results_with_input(input_df, parsed_df):
     if parsed_df is None or parsed_df.empty:
         return build_empty_result_template(input_df)
 
-    clean_input = input_df[REQUIRED_COLUMNS].copy()
+    clean_input = input_df[input_columns_for_display(input_df)].copy()
     parsed = parsed_df.copy()
 
     for col in ["compound", "smiles"]:
@@ -547,9 +656,59 @@ def merge_results_with_input(input_df, parsed_df):
     return merged
 
 
-def build_result_workbook(input_df, parsed_df=None, merged_df=None, warnings_df=None):
+def slim_epi_report_columns(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    hidden_columns = [col for col in EPI_REPORT_HIDDEN_COMPAT_COLUMNS if col in df.columns]
+    if not hidden_columns:
+        return df
+    return df.drop(columns=hidden_columns)
+
+
+def build_epi_web_result_tables(core_df=None, raw_df=None, warnings_df=None):
+    core = slim_epi_report_columns(_normalize_table(core_df))
+    raw = _normalize_table(raw_df)
+    warnings = _normalize_warning_table(warnings_df)
+
+    properties_rows = []
+    degradation_rows = []
+    fate_rows = []
+    bioaccumulation_rows = []
+    ecosar_rows = []
+    metadata_rows = []
+
+    for _, raw_row in raw.iterrows():
+        data = _parse_raw_json(raw_row.get("raw_json"))
+        base = _base_epi_identity(raw_row, data)
+        properties_rows.append(_build_properties_row(base, data))
+        degradation_rows.append(_build_degradation_row(base, data))
+        fate_rows.append(_build_fate_transport_row(base, data))
+        bioaccumulation_rows.append(_build_bioaccumulation_row(base, data))
+        ecosar_rows.extend(_build_ecosar_rows(base, data))
+        metadata_rows.extend(_build_metadata_rows(base, data))
+
+    return {
+        "Core_Summary": core,
+        "Properties": slim_epi_report_columns(pd.DataFrame(properties_rows)),
+        "Degradation": pd.DataFrame(degradation_rows),
+        "Fate_Transport": pd.DataFrame(fate_rows),
+        "Bioaccumulation": pd.DataFrame(bioaccumulation_rows),
+        "ECOSAR_Aquatic_Toxicity": pd.DataFrame(ecosar_rows),
+        "Model_Metadata": pd.DataFrame(metadata_rows),
+        "Raw_API_JSON": raw,
+        "Warnings": warnings,
+    }
+
+
+def build_result_workbook(
+    input_df,
+    parsed_df=None,
+    merged_df=None,
+    warnings_df=None,
+    raw_df=None,
+    epi_tables=None,
+):
     buffer = io.BytesIO()
-    endpoints_df = pd.DataFrame(FATE_ENDPOINTS)
     if parsed_df is None:
         parsed_df = pd.DataFrame()
     if merged_df is None:
@@ -558,15 +717,266 @@ def build_result_workbook(input_df, parsed_df=None, merged_df=None, warnings_df=
         warnings_df = pd.DataFrame(columns=["source_file", "warning"])
     elif warnings_df.empty and len(warnings_df.columns) == 0:
         warnings_df = pd.DataFrame(columns=["source_file", "warning"])
+    if epi_tables is None:
+        epi_tables = build_epi_web_result_tables(merged_df, raw_df, warnings_df)
 
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        input_df[REQUIRED_COLUMNS].to_excel(writer, sheet_name="Validated_Input", index=False)
-        merged_df.to_excel(writer, sheet_name="Merged_EPISuite_Results", index=False)
-        parsed_df.to_excel(writer, sheet_name="Parsed_Raw_Results", index=False)
-        warnings_df.to_excel(writer, sheet_name="Parse_Warnings", index=False)
-        endpoints_df.to_excel(writer, sheet_name="Target_Endpoints", index=False)
+        input_df[input_columns_for_display(input_df)].to_excel(writer, sheet_name="Validated_Input", index=False)
+        for sheet_name in EPI_WEB_RESULT_SHEETS:
+            table = epi_tables.get(sheet_name, pd.DataFrame())
+            table.to_excel(writer, sheet_name=sheet_name, index=False)
+        if raw_df is None and parsed_df is not None and not parsed_df.empty:
+            parsed_df.to_excel(writer, sheet_name="Parsed_Raw_Results", index=False)
     buffer.seek(0)
     return buffer
+
+
+def _normalize_table(df):
+    if df is None:
+        return pd.DataFrame()
+    if df.empty and len(df.columns) == 0:
+        return pd.DataFrame()
+    return df.copy()
+
+
+def _normalize_warning_table(df):
+    if df is None:
+        return pd.DataFrame(columns=["compound", "smiles", "cas", "warning"])
+    warnings = df.copy()
+    if warnings.empty and len(warnings.columns) == 0:
+        return pd.DataFrame(columns=["compound", "smiles", "cas", "warning"])
+    if "error" in warnings.columns and "warning" not in warnings.columns:
+        warnings = warnings.rename(columns={"error": "warning"})
+    if "warning" not in warnings.columns:
+        warnings["warning"] = pd.NA
+    return warnings
+
+
+def _parse_raw_json(raw_json):
+    if not _clean_optional_text(raw_json):
+        return {}
+    try:
+        parsed = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _base_epi_identity(raw_row, data):
+    chemical = data.get("chemicalProperties", {})
+    return {
+        "compound": _clean_optional_text(raw_row.get("compound")),
+        "smiles": _clean_optional_text(raw_row.get("smiles")),
+        "cas": _clean_optional_text(raw_row.get("cas")),
+        "epi_name": chemical.get("name"),
+        "epi_cas": chemical.get("cas") or raw_row.get("epi_cas"),
+        "epi_smiles": chemical.get("smiles") or raw_row.get("epi_smiles"),
+    }
+
+
+def _build_properties_row(base, data):
+    chemical = data.get("chemicalProperties", {})
+    row = {
+        **base,
+        "epi_systematic_name": chemical.get("systematicName"),
+        "molecular_formula": chemical.get("molecularFormula"),
+        "molecular_weight": chemical.get("molecularWeight"),
+        "organic": chemical.get("organic"),
+        "flags": chemical.get("flags"),
+    }
+    for prefix, section in [
+        ("log_kow", "logKow"),
+        ("log_koa", "logKoa"),
+        ("melting_point", "meltingPoint"),
+        ("boiling_point", "boilingPoint"),
+        ("vapor_pressure", "vaporPressure"),
+        ("henry", "henrysLawConstant"),
+        ("log_koc", "logKoc"),
+        ("aerosol_adsorption_fraction", "aerosolAdsorptionFraction"),
+    ]:
+        row.update(_selected_estimated_experimental_columns(prefix, data, section))
+    row.update(
+        {
+            "water_solubility_waternt_selected": _value_at(data, "waterSolubilityFromWaterNt.selectedValue.value"),
+            "water_solubility_waternt_estimated": _value_at(data, "waterSolubilityFromWaterNt.estimatedValue.value"),
+            "water_solubility_waternt_experimental": _experimental_or_selected_value(data, "waterSolubilityFromWaterNt"),
+            "water_solubility_wskow_selected": _value_at(data, "waterSolubilityFromLogKow.selectedValue.value"),
+            "water_solubility_wskow_estimated": _value_at(data, "waterSolubilityFromLogKow.estimatedValue.value"),
+            "water_solubility_wskow_experimental": _experimental_or_selected_value(data, "waterSolubilityFromLogKow"),
+            "dermal_permeability_coefficient": _value_at(data, "dermalPermeability.permeabilityCoefficient.value"),
+            "dermal_absorbed_dose": _value_at(data, "dermalPermeability.absorbedDose.value"),
+            "dermal_lag_time": _value_at(data, "dermalPermeability.lagTime.value"),
+        }
+    )
+    return row
+
+
+def _build_degradation_row(base, data):
+    row = {
+        **base,
+        "atmosphere_half_life_selected": _value_at(data, "atmosphericHalfLife.selectedValue.value"),
+        "atmosphere_half_life_estimated": _value_at(data, "atmosphericHalfLife.estimatedValue.value"),
+        "atmosphere_oh_rate_constant": _value_at(
+            data,
+            "atmosphericHalfLife.estimatedHydroxylRadicalReactionRateConstant.value",
+        ),
+        "atmosphere_ozone_rate_constant": _value_at(
+            data,
+            "atmosphericHalfLife.estimatedOzoneReactionRateConstant.value",
+        ),
+        "atmosphere_no3_rate_constant": _value_at(
+            data,
+            "atmosphericHalfLife.estimatedNitrateRadicalReactionRateConstant.value",
+        ),
+    }
+    for model in data.get("biodegradationRate", {}).get("models", []):
+        name = _safe_column_name(model.get("name"))
+        if name:
+            row[f"biowin_{name}"] = model.get("value", pd.NA)
+            row[f"biowin_{name}_description"] = model.get("description", pd.NA)
+    row.update(
+        {
+            "hydrolysis_acid_rate_constant": _value_at(data, "hydrolysis.acidRateConstant.value"),
+            "hydrolysis_base_rate_constant": _value_at(data, "hydrolysis.baseRateConstant.value"),
+            "hydrolysis_neutral_rate_constant": _value_at(data, "hydrolysis.neutralRateConstant.value"),
+            "hydrocarbon_biodegradation_rate": _value_at(data, "hydrocarbonBiodegradationRate.estimatedValue.value"),
+        }
+    )
+    return row
+
+
+def _build_fate_transport_row(base, data):
+    row = {
+        **base,
+        "stp_total_removal_percent": _value_at(data, "sewageTreatmentModel.model.TotalRemoval.Percent"),
+        "stp_final_effluent_percent": _value_at(data, "sewageTreatmentModel.model.FinalEffluent.Percent"),
+        "river_volatilization_half_life_hours": _value_at(data, "waterVolatilization.riverHalfLifeHours"),
+        "lake_volatilization_half_life_hours": _value_at(data, "waterVolatilization.lakeHalfLifeHours"),
+        "level3_persistence_hours": _value_at(data, "fugacityModel.model.Persistence"),
+    }
+    for medium in ["Air", "Water", "Soil", "Sediment"]:
+        prefix = f"level3_{medium.lower()}"
+        row[f"{prefix}_percent"] = _fugacity_medium_value(data, medium, "MassAmount")
+        row[f"{prefix}_half_life_hours"] = _fugacity_medium_value(data, medium, "HalfLife")
+        row[f"{prefix}_reaction_time_hours"] = _fugacity_medium_value(data, medium, "ReactionTime")
+        row[f"{prefix}_advection_time_hours"] = _fugacity_medium_value(data, medium, "AdvectionTime")
+    return row
+
+
+def _build_bioaccumulation_row(base, data):
+    return {
+        **base,
+        "bcf": _value_at(data, "bioconcentration.bioconcentrationFactor"),
+        "log_bcf": _value_at(data, "bioconcentration.logBioconcentrationFactor"),
+        "baf": _value_at(data, "bioconcentration.bioaccumulationFactor"),
+        "log_baf": _value_at(data, "bioconcentration.logBioaccumulationFactor"),
+        "biotransformation_half_life_days": _value_at(data, "bioconcentration.biotransformationHalfLifeDays"),
+        "biotransformation_rate_constant": _value_at(data, "bioconcentration.biotransformationRateConstant"),
+        "experimental_bcf": _value_at(data, "bioconcentration.experimentalBioconcentrationFactor"),
+    }
+
+
+def _build_ecosar_rows(base, data):
+    rows = []
+    for idx, result in enumerate(data.get("ecosar", {}).get("modelResults", []), start=1):
+        rows.append(
+            {
+                **base,
+                "result_index": idx,
+                "qsar_class": _first_key(result, ["className", "class", "chemicalClass"]),
+                "organism": _first_key(result, ["organism", "species"]),
+                "duration": _first_key(result, ["duration", "exposureDuration"]),
+                "endpoint": _first_key(result, ["endpoint", "effect"]),
+                "concentration": _first_key(result, ["concentration", "value"]),
+                "units": _first_key(result, ["units", "unit"]),
+                "max_log_kow": _first_key(result, ["maxLogKow", "maximumLogKow"]),
+                "warnings": _json_or_text(_first_key(result, ["warnings", "warning", "alerts"])),
+            }
+        )
+    return rows
+
+
+def _build_metadata_rows(base, data):
+    rows = []
+    for label, section in [
+        ("LogKow", "logKow"),
+        ("WaterSolubility_WaterNT", "waterSolubilityFromWaterNt"),
+        ("WaterSolubility_WSKow", "waterSolubilityFromLogKow"),
+        ("VaporPressure", "vaporPressure"),
+        ("HenrysLawConstant", "henrysLawConstant"),
+        ("LogKoa", "logKoa"),
+        ("LogKoc", "logKoc"),
+        ("MeltingPoint", "meltingPoint"),
+        ("BoilingPoint", "boilingPoint"),
+        ("AtmosphericHalfLife", "atmosphericHalfLife"),
+        ("AerosolAdsorptionFraction", "aerosolAdsorptionFraction"),
+    ]:
+        section_data = data.get(section, {})
+        if not isinstance(section_data, dict) or not section_data:
+            continue
+        rows.append(
+            {
+                **base,
+                "model_section": label,
+                "selected_value": _value_at(section_data, "selectedValue.value"),
+                "selected_type": _value_at(section_data, "selectedValue.valueType"),
+                "selected_units": _value_at(section_data, "selectedValue.units"),
+                "estimated_value": _value_at(section_data, "estimatedValue.value"),
+                "experimental_value": _experimental_or_selected_value(data, section),
+                "has_model_output": bool(_value_at(section_data, "estimatedValue.model.output", default="")),
+                "analog_count": len(data.get("analogs", []) or []),
+            }
+        )
+    rows.append(
+        {
+            **base,
+            "model_section": "ECOSAR",
+            "selected_value": pd.NA,
+            "selected_type": pd.NA,
+            "selected_units": pd.NA,
+            "estimated_value": len(data.get("ecosar", {}).get("modelResults", []) or []),
+            "experimental_value": pd.NA,
+            "has_model_output": bool(data.get("ecosar", {}).get("output")),
+            "analog_count": len(data.get("analogs", []) or []),
+        }
+    )
+    return rows
+
+
+def _selected_estimated_experimental_columns(prefix, data, section):
+    return {
+        f"{prefix}_selected": _value_at(data, f"{section}.selectedValue.value"),
+        f"{prefix}_estimated": _value_at(data, f"{section}.estimatedValue.value"),
+        f"{prefix}_experimental": _experimental_or_selected_value(data, section),
+        f"{prefix}_type": _value_at(data, f"{section}.selectedValue.valueType"),
+        f"{prefix}_units": _value_at(data, f"{section}.selectedValue.units"),
+    }
+
+
+def _first_key(mapping, keys, default=pd.NA):
+    if not isinstance(mapping, dict):
+        return default
+    for key in keys:
+        value = mapping.get(key, default)
+        if not _is_missing(value):
+            return value
+    return default
+
+
+def _safe_column_name(value):
+    text = _clean_optional_text(value)
+    if not text:
+        return ""
+    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_")
+    return cleaned or ""
+
+
+def _json_or_text(value):
+    if _is_missing(value):
+        return pd.NA
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
 
 
 def extract_text(raw):
@@ -617,6 +1027,18 @@ def _safe_numeric(value):
     return float(match.group(1)) if match else pd.NA
 
 
+def _clean_optional_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"", "nan", "none", "<na>"} else text
+
+
 def _extract_numeric(text, patterns):
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.I | re.S)
@@ -665,9 +1087,48 @@ def _value_at(data, path, default=pd.NA):
 def _first_value(data, paths, default=pd.NA):
     for path in paths:
         value = _value_at(data, path, default=default)
-        if not pd.isna(value):
+        if not _is_missing(value):
             return value
     return default
+
+
+def _first_section_value(data, section_names, value_path, default=pd.NA):
+    for section_name in section_names:
+        value = _value_at(data, f"{section_name}.{value_path}", default=default)
+        if not _is_missing(value):
+            return value
+    return default
+
+
+def _experimental_or_selected_value(data, section_name, default=pd.NA):
+    experimental_value = _value_at(data, f"{section_name}.experimentalValue.value", default=default)
+    if not _is_missing(experimental_value):
+        return experimental_value
+
+    selected_type = _value_at(data, f"{section_name}.selectedValue.valueType", default="")
+    if str(selected_type).upper() == "EXPERIMENTAL":
+        return _value_at(data, f"{section_name}.selectedValue.value", default=default)
+    return default
+
+
+def _first_experimental_or_selected_value(data, section_names, default=pd.NA):
+    for section_name in section_names:
+        value = _experimental_or_selected_value(data, section_name, default=default)
+        if not _is_missing(value):
+            return value
+    return default
+
+
+def _is_missing(value):
+    if value is None or value is pd.NA:
+        return True
+    try:
+        result = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    if isinstance(result, bool):
+        return result
+    return False
 
 
 def _biowin_model_value(data, model_name):

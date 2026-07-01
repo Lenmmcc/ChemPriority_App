@@ -16,13 +16,16 @@ from src.episuite_io import (  # noqa: E402
     DEFAULT_EPI_WEB_API,
     FATE_ENDPOINTS,
     REQUIRED_COLUMNS,
+    build_epi_web_result_tables,
     build_input_zip,
     build_result_workbook,
+    input_columns_for_display,
     make_template_file,
     merge_results_with_input,
     normalize_input_columns,
     parse_uploaded_result,
     run_epi_web_batch,
+    slim_epi_report_columns,
     validate_input,
 )
 
@@ -35,10 +38,21 @@ INPUT_CACHE_KEYS = (
 RESULT_CACHE_KEYS = (
     "epi_web_results",
     "epi_web_errors",
+    "epi_raw_results",
+    "epi_web_tables",
     "epi_merged_results",
     "epi_parsed_results",
     "epi_parse_warnings",
 )
+
+DETAIL_RESULT_SHEETS = [
+    ("Properties", "理化性质"),
+    ("Degradation", "降解"),
+    ("Fate_Transport", "归趋/迁移"),
+    ("Bioaccumulation", "富集"),
+    ("ECOSAR_Aquatic_Toxicity", "ECOSAR"),
+    ("Model_Metadata", "模型元数据"),
+]
 
 
 def clear_result_cache():
@@ -52,6 +66,27 @@ def clear_cached_input():
     clear_result_cache()
 
 
+def render_epi_web_tables(epi_tables):
+    if not epi_tables:
+        return
+
+    st.subheader("分类结构化结果")
+    detail_tabs = st.tabs([label for _, label in DETAIL_RESULT_SHEETS])
+    for (sheet_name, _), tab in zip(DETAIL_RESULT_SHEETS, detail_tabs):
+        table = epi_tables.get(sheet_name)
+        with tab:
+            if table is not None and not table.empty:
+                st.dataframe(table, use_container_width=True)
+            else:
+                st.info("该类别没有可展示的结构化结果。")
+
+    raw_table = epi_tables.get("Raw_API_JSON")
+    if raw_table is not None and not raw_table.empty:
+        with st.expander("审计数据：Raw API JSON", expanded=False):
+            preview_cols = [col for col in ["compound", "smiles", "cas", "epi_cas", "epi_smiles", "raw_json"] if col in raw_table.columns]
+            st.dataframe(raw_table[preview_cols], use_container_width=True)
+
+
 st.set_page_config(
     page_title="EPI Suite 环境归趋预测 - ChemPriority",
     page_icon="🌊",
@@ -60,7 +95,7 @@ st.set_page_config(
 
 
 st.title("🌊 EPI Suite 环境归趋预测")
-st.caption("上传 compound + smiles 表格，通过 EPI Web Suite 网页端 API 批量计算环境归趋指标。")
+st.caption("上传 compound + smiles 表格，可选提供 cas；通过 EPI Web Suite 网页端 API 批量计算环境归趋指标。")
 st.markdown("---")
 
 left_col, right_col = st.columns([2, 1])
@@ -70,7 +105,7 @@ with left_col:
     uploaded_file = st.file_uploader(
         "上传 Excel 文件",
         type=["xlsx", "xls"],
-        help="文件至少需要包含 compound 和 smiles 两列。预测会由部署服务器调用 EPI Web Suite 网页端 API。",
+        help="文件至少需要包含 compound 和 smiles 两列；cas 可选。有 cas 时会与 smiles 一起提交，并同时保留估算值与实验/库值。",
     )
 
 with right_col:
@@ -98,7 +133,7 @@ cached_input_bytes = st.session_state.get("epi_input_bytes")
 cached_input_name = st.session_state.get("epi_input_name")
 
 if cached_input_bytes is None:
-    st.info("请先上传包含 compound 和 smiles 的 Excel 文件。")
+    st.info("请先上传包含 compound 和 smiles 的 Excel 文件；cas 可选。")
     st.stop()
 
 st.success(f"已加载输入文件：{cached_input_name}")
@@ -127,12 +162,15 @@ tab_input, tab_predict, tab_fallback, tab_parse, tab_output = st.tabs(
 
 with tab_input:
     st.subheader("待预测化合物")
-    st.dataframe(input_df[REQUIRED_COLUMNS], use_container_width=True)
+    st.dataframe(input_df[input_columns_for_display(input_df)], use_container_width=True)
     st.metric("化合物数量", len(input_df))
 
 with tab_predict:
     st.subheader("EPI Web Suite 自动预测")
-    st.write("点击后，系统会逐个调用 EPI Web Suite 网页端 API，并把结果整理成表格。")
+    st.write(
+        "点击后，系统会逐个调用 EPI Web Suite 网页端 API，并把结果整理成表格。"
+        "若输入包含 cas，会同时提交 smiles 与 cas；结果表会同时显示 selected、estimated 和 experimental 值。"
+    )
 
     api_url = st.text_input(
         "EPI Web Suite API 地址",
@@ -161,9 +199,12 @@ with tab_predict:
                 delay_seconds=float(delay_seconds),
                 progress_callback=update_progress,
             )
+            web_tables = build_epi_web_result_tables(web_results, raw_results, web_errors)
 
         st.session_state["epi_web_results"] = web_results
         st.session_state["epi_web_errors"] = web_errors
+        st.session_state["epi_raw_results"] = raw_results
+        st.session_state["epi_web_tables"] = web_tables
         st.session_state["epi_merged_results"] = web_results
         st.session_state["epi_parsed_results"] = web_results
         st.session_state["epi_parse_warnings"] = web_errors.rename(columns={"error": "warning"})
@@ -175,9 +216,11 @@ with tab_predict:
 
     web_results = st.session_state.get("epi_web_results")
     web_errors = st.session_state.get("epi_web_errors")
+    web_tables = st.session_state.get("epi_web_tables")
     if web_results is not None:
         st.subheader("网页端预测结果")
-        st.dataframe(web_results, use_container_width=True)
+        st.dataframe(slim_epi_report_columns(web_results), use_container_width=True)
+        render_epi_web_tables(web_tables)
     if web_errors is not None and not web_errors.empty:
         st.subheader("失败记录")
         st.dataframe(web_errors, use_container_width=True)
@@ -201,7 +244,7 @@ with tab_fallback:
             [
                 "1. `episuite_smiles_only.txt`：每行一个 SMILES，适合复制到 EPI Web Suite。",
                 "2. `episuite_named.smi`：SMILES 与化合物名称，用于保留名称映射。",
-                "3. `episuite_input.csv`：原始 compound + smiles 表。",
+                "3. `episuite_input.csv`：原始 compound + smiles + 可选 cas 表。",
                 "4. `README.txt`：后续上传结果的说明。",
             ]
         )
@@ -244,6 +287,8 @@ with tab_parse:
         st.session_state["epi_parsed_results"] = parsed_results
         st.session_state["epi_merged_results"] = merged_results
         st.session_state["epi_parse_warnings"] = parse_warnings
+        st.session_state.pop("epi_raw_results", None)
+        st.session_state.pop("epi_web_tables", None)
 
         st.success("结果文件解析完成。")
         st.subheader("合并后的环境归趋结果")
@@ -263,12 +308,16 @@ with tab_output:
     parsed_results = st.session_state.get("epi_parsed_results")
     merged_results = st.session_state.get("epi_merged_results")
     parse_warnings = st.session_state.get("epi_parse_warnings")
+    raw_results = st.session_state.get("epi_raw_results")
+    web_tables = st.session_state.get("epi_web_tables")
 
     workbook_buffer = build_result_workbook(
         input_df,
         parsed_df=parsed_results,
         merged_df=merged_results,
         warnings_df=parse_warnings,
+        raw_df=raw_results,
+        epi_tables=web_tables,
     )
 
     st.download_button(

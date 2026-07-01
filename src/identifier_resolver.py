@@ -55,6 +55,22 @@ WARNING_COLUMNS = [
 ]
 
 
+def build_epi_input_workbook(completed_df=None):
+    if completed_df is None:
+        completed_df = pd.DataFrame(columns=REQUIRED_IDENTIFIER_COLUMNS)
+
+    epi_input_df = _ensure_columns(
+        completed_df.copy(),
+        REQUIRED_IDENTIFIER_COLUMNS,
+    )[REQUIRED_IDENTIFIER_COLUMNS]
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        epi_input_df.to_excel(writer, sheet_name="EPISuite_Input", index=False)
+    buffer.seek(0)
+    return buffer
+
+
 def make_template_file():
     template_df = pd.DataFrame(
         {

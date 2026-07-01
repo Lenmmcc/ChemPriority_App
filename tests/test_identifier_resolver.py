@@ -8,6 +8,7 @@ import pandas as pd
 from src.echa_use import resolve_substance
 from src.identifier_resolver import (
     _best_echa_query,
+    build_epi_input_workbook,
     resolve_pubchem_by_cas,
     run_identifier_completion_batch,
     resolve_chemspider,
@@ -183,6 +184,33 @@ class IdentifierCompletionPubChemTests(unittest.TestCase):
         self.assertEqual(completed.loc[0, "pubchem_cid"], "702")
         resolve_by_cas.assert_called_once()
         resolve_by_smiles.assert_called_once()
+
+
+class IdentifierCompletionExportTests(unittest.TestCase):
+    def test_epi_input_workbook_contains_only_identifier_columns(self):
+        completed = pd.DataFrame(
+            {
+                "compound": ["Ethanol"],
+                "smiles": ["CCO"],
+                "pubchem_cid": ["702"],
+                "cas": ["64-17-5"],
+                "ec": ["200-578-6"],
+                "dtxsid": ["DTXSID9020584"],
+                "echa_id": ["100.000.526"],
+                "completion_status": ["已补全"],
+            }
+        )
+
+        workbook = build_epi_input_workbook(completed)
+        exported = pd.read_excel(workbook, sheet_name="EPISuite_Input")
+
+        self.assertEqual(
+            list(exported.columns),
+            ["compound", "smiles", "cas", "ec", "dtxsid", "echa_id"],
+        )
+        self.assertEqual(exported.loc[0, "compound"], "Ethanol")
+        self.assertEqual(exported.loc[0, "smiles"], "CCO")
+        self.assertNotIn("pubchem_cid", exported.columns)
 
 
 if __name__ == "__main__":
