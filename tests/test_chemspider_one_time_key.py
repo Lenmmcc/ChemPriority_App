@@ -46,3 +46,22 @@ class ChemSpiderPageSecurityTests(unittest.TestCase):
         self.assertIn('autocomplete="off"', page_source)
         self.assertNotIn("CHEMSPIDER_API_KEY", page_source)
         self.assertNotIn("st.secrets", page_source)
+
+
+class UseChartPageTests(unittest.TestCase):
+    def test_epa_functional_use_uses_split_predicted_and_reported_plots(self):
+        page_source = (
+            Path(__file__).resolve().parents[1]
+            / "pages"
+            / "4_化合物用途查询.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("generate_top_predicted_functional_use_lollipop_plot", page_source)
+        self.assertIn("generate_reported_functional_use_presence_plot", page_source)
+        self.assertIn("EPA CompTox 最高预测功能用途", page_source)
+        self.assertIn("EPA CompTox reported 功能用途证据", page_source)
+        self.assertIn('"chart_type": "top_predicted_lollipop"', page_source)
+        self.assertIn('"chart_type": "reported_presence"', page_source)
+        self.assertIn("EPA_Top_Predicted_Functional_Use", page_source)
+        self.assertIn("EPA_Reported_Functional_Use_Evidence", page_source)
+        self.assertNotIn("EPA CompTox Functional-Use Rose Plot", page_source)

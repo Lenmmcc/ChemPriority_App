@@ -164,7 +164,7 @@ class SourceOriginBatchTests(unittest.TestCase):
 
     @patch("src.source_origin.fetch_coconut_evidence", return_value=[])
     @patch("src.source_origin.fetch_chebi_evidence", return_value=[])
-    def test_predicted_comptox_functional_use_is_medium_confidence(self, fetch_chebi, fetch_coconut):
+    def test_predicted_comptox_functional_use_is_not_human_evidence(self, fetch_chebi, fetch_coconut):
         predicted_candidate = {
             "compound": "Example",
             "dtxsid": "DTXSID0000001",
@@ -176,15 +176,41 @@ class SourceOriginBatchTests(unittest.TestCase):
             "functional_use_source": "predicted",
         }
 
-        _, evidence, _ = run_source_origin_batch(
+        summary, evidence, _ = run_source_origin_batch(
             pd.DataFrame([{**_input_row("Example"), "dtxsid": "DTXSID0000001"}]),
             comptox_candidates_df=pd.DataFrame([predicted_candidate]),
             echa_candidates_df=pd.DataFrame(),
             delay_seconds=0,
         )
 
-        self.assertEqual(evidence.loc[0, "evidence_type"], "functional_use")
-        self.assertEqual(evidence.loc[0, "confidence"], "medium")
+        self.assertEqual(summary.loc[0, "来源属性"], "证据不足")
+        self.assertEqual(summary.loc[0, "人为源证据数"], 0)
+        self.assertTrue(evidence.empty)
+
+    @patch("src.source_origin.fetch_coconut_evidence", return_value=[])
+    @patch("src.source_origin.fetch_chebi_evidence", return_value=[])
+    def test_predicted_comptox_summary_column_is_not_human_evidence(self, fetch_chebi, fetch_coconut):
+        comptox_summary = pd.DataFrame(
+            [
+                {
+                    "compound": "Example",
+                    "matched_dtxsid": "DTXSID0000001",
+                    "预测化学功能用途": "芳香剂 (fragrance, p=0.910)",
+                }
+            ]
+        )
+
+        summary, evidence, _ = run_source_origin_batch(
+            pd.DataFrame([{**_input_row("Example"), "dtxsid": "DTXSID0000001"}]),
+            comptox_summary_df=comptox_summary,
+            comptox_candidates_df=pd.DataFrame(),
+            echa_candidates_df=pd.DataFrame(),
+            delay_seconds=0,
+        )
+
+        self.assertEqual(summary.loc[0, "来源属性"], "证据不足")
+        self.assertEqual(summary.loc[0, "人为源证据数"], 0)
+        self.assertTrue(evidence.empty)
 
     @patch("src.source_origin.time.sleep")
     @patch("src.source_origin._post_json")

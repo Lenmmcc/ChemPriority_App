@@ -299,6 +299,9 @@ def _human_evidence_for_row(
 def _comptox_candidate_evidence(row, candidates_df):
     evidence = []
     for _, candidate in _matching_rows(candidates_df, row).iterrows():
+        source_type = _clean_cell(candidate.get("source_type")) or "use"
+        if _is_predicted_comptox_functional_use(candidate, source_type):
+            continue
         label = _clean_cell(candidate.get("use_cn")) or _clean_cell(candidate.get("raw_use"))
         text = _first_text(
             candidate.get("raw_use"),
@@ -309,7 +312,6 @@ def _comptox_candidate_evidence(row, candidates_df):
         )
         if not label and not text:
             continue
-        source_type = _clean_cell(candidate.get("source_type")) or "use"
         dtxsid = _clean_cell(candidate.get("dtxsid")) or _clean_cell(row.get("dtxsid"))
         evidence.append(
             {
@@ -330,12 +332,19 @@ def _comptox_candidate_confidence(candidate, source_type):
     if source_type == "product_category":
         return "strong"
     if source_type == "functional_use":
-        functional_source = _clean_cell(candidate.get("functional_use_source")).lower()
-        probability = candidate.get("probability")
-        if "predicted" in functional_source or _clean_cell(probability):
-            return "medium"
         return "strong"
     return "medium"
+
+
+def _is_predicted_comptox_functional_use(candidate, source_type):
+    if source_type != "functional_use":
+        return False
+    functional_source = _clean_cell(candidate.get("functional_use_source")).lower()
+    if "pred" in functional_source:
+        return True
+    if "report" in functional_source or "collect" in functional_source:
+        return False
+    return bool(_clean_cell(candidate.get("probability")))
 
 
 def _comptox_summary_evidence(row, summary_df):
@@ -343,8 +352,7 @@ def _comptox_summary_evidence(row, summary_df):
     for _, summary in _matching_rows(summary_df, row).iterrows():
         for column, source_type in (
             ("产品用途类别", "product_category"),
-            ("化学功能用途", "functional_use"),
-            ("前五用途", "top_use_summary"),
+            ("已收集化学功能用途", "functional_use"),
         ):
             value = _clean_cell(summary.get(column))
             if not value:
@@ -388,24 +396,7 @@ def _echa_candidate_evidence(row, candidates_df):
 
 
 def _echa_summary_evidence(row, summary_df):
-    evidence = []
-    for _, summary in _matching_rows(summary_df, row).iterrows():
-        value = _clean_cell(summary.get("前五用途"))
-        if not value:
-            continue
-        evidence.append(
-            {
-                "source_group": "human",
-                "source_name": "ECHA CHEM",
-                "evidence_type": "reach_use_summary",
-                "evidence_label": "前五用途",
-                "evidence_text": value,
-                "matched_identifier": _clean_cell(summary.get("matched_echa_id")) or _clean_cell(row.get("echa_id")),
-                "confidence": "medium",
-                "record_url": _clean_cell(summary.get("ECHA搜索页面")),
-            }
-        )
-    return evidence
+    return []
 
 
 def _echa_dossier_evidence(row, dossiers_df):

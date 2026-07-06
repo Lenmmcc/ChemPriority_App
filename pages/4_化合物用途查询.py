@@ -20,7 +20,6 @@ from src.comptox_use import (  # noqa: E402
     DEFAULT_API_BASE as COMPTOX_DEFAULT_API_BASE,
     DEFAULT_DASHBOARD_BASE,
     REQUIRED_IDENTIFIER_COLUMNS as COMPTOX_REQUIRED_IDENTIFIER_COLUMNS,
-    TOP_N_DEFAULT as COMPTOX_TOP_N_DEFAULT,
     build_empty_summary_template as comptox_build_empty_summary_template,
     build_functional_use_table as comptox_build_functional_use_table,
     build_product_use_table as comptox_build_product_use_table,
@@ -33,7 +32,6 @@ from src.comptox_use import (  # noqa: E402
 from src.echa_use import (  # noqa: E402
     DEFAULT_ECHA_BASE,
     REQUIRED_IDENTIFIER_COLUMNS as ECHA_REQUIRED_IDENTIFIER_COLUMNS,
-    TOP_N_DEFAULT as ECHA_TOP_N_DEFAULT,
     build_empty_summary_template as echa_build_empty_summary_template,
     build_result_workbook as echa_build_result_workbook,
     make_template_file as make_echa_template_file,
@@ -68,10 +66,14 @@ from src.identifier_resolver import (  # noqa: E402
 from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
 from src.use_rose_plot import (  # noqa: E402
     build_epa_echa_combined_rose_data,
-    extract_use_rose_data,
+    extract_reported_functional_use_presence_data,
+    extract_candidate_use_plot_data,
+    extract_top_predicted_functional_use_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
     generate_combined_use_rose_plot,
+    generate_reported_functional_use_presence_plot,
+    generate_top_predicted_functional_use_lollipop_plot,
     generate_use_rose_plot,
 )
 
@@ -113,9 +115,8 @@ COMPTOX_SUMMARY_PREVIEW_COLUMNS = (
     "cas",
     "matched_dtxsid",
     "产品用途类别",
-    "化学功能用途",
-    "产品场景Top5",
-    "功能用途Top5",
+    "已收集化学功能用途",
+    "预测化学功能用途",
     "CompTox来源链接",
     "query_status",
     "query_notes",
@@ -491,7 +492,7 @@ with tab_epa:
     st.subheader("3. 查询用途类别")
     st.write(
         "系统会先把化合物匹配到 CompTox 的 DTXSID，再查询产品用途类别（产品场景）和化学功能用途（技术功能）。"
-        "产品场景和功能用途会分别生成 Top5，综合候选 Top5 仅用于兼容旧报告。"
+        "产品场景和功能用途会以完整明细保留；reported 功能用途仅保留为明细证据。"
     )
 
     if not comptox_valid:
@@ -529,13 +530,11 @@ with tab_epa:
             help="仅用于上方配置的自定义 API。",
         )
 
-    col_timeout, col_delay, col_top = st.columns(3)
+    col_timeout, col_delay = st.columns(2)
     with col_timeout:
         timeout_seconds = st.number_input("单个请求超时（秒）", min_value=10, max_value=180, value=45, step=5)
     with col_delay:
         delay_seconds = st.number_input("请求间隔（秒）", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
-    with col_top:
-        top_n = st.number_input("保留用途数量", min_value=1, max_value=10, value=COMPTOX_TOP_N_DEFAULT, step=1)
 
     dashboard_fallback = True
 
@@ -554,7 +553,6 @@ with tab_epa:
                 api_key=api_key.strip() or None,
                 timeout=int(timeout_seconds),
                 delay_seconds=float(delay_seconds),
-                top_n=int(top_n),
                 dashboard_fallback=dashboard_fallback,
                 progress_callback=update_progress,
             )
@@ -580,13 +578,20 @@ with tab_epa:
     candidates_df = st.session_state.get("comptox_use_candidates")
     errors_df = st.session_state.get("comptox_use_errors")
     product_use_df = comptox_build_product_use_table(candidates_df)
-    functional_use_df = comptox_build_functional_use_table(candidates_df)
+    predicted_functional_use_df = comptox_build_functional_use_table(
+        candidates_df,
+        functional_source="predicted",
+    )
+    reported_functional_use_df = comptox_build_functional_use_table(
+        candidates_df,
+        functional_source="reported",
+    )
 
     if summary_df is None:
         st.subheader("结果预览")
         show_dataframe(
             select_existing_columns(
-                comptox_build_empty_summary_template(comptox_input_df, top_n=COMPTOX_TOP_N_DEFAULT),
+                comptox_build_empty_summary_template(comptox_input_df),
                 COMPTOX_SUMMARY_PREVIEW_COLUMNS,
             )
         )
@@ -599,10 +604,15 @@ with tab_epa:
         st.caption("来自 CompTox product-use-categories 页面；表示化学物质出现在哪类产品或产品场景中。")
         show_dataframe(select_existing_columns(product_use_df, COMPTOX_PRODUCT_USE_PREVIEW_COLUMNS))
 
-    if not functional_use_df.empty:
-        st.subheader("化学功能用途")
-        st.caption("来自 CompTox chemical-functional-use 页面；表示化学物质在产品或工艺中的技术功能。predicted 记录保留预测概率。")
-        show_dataframe(select_existing_columns(functional_use_df, COMPTOX_FUNCTIONAL_USE_PREVIEW_COLUMNS))
+    if not predicted_functional_use_df.empty:
+        st.subheader("预测化学功能用途")
+        st.caption("来自 CompTox chemical-functional-use predicted 结果；预测概率不与 reported 证据相加。")
+        show_dataframe(select_existing_columns(predicted_functional_use_df, COMPTOX_FUNCTIONAL_USE_PREVIEW_COLUMNS))
+
+    if not reported_functional_use_df.empty:
+        st.subheader("已报道化学功能用途")
+        st.caption("来自 CompTox chemical-functional-use reported 结果；仅表示存在明确报道，evidence_count 固定为 1。")
+        show_dataframe(select_existing_columns(reported_functional_use_df, COMPTOX_FUNCTIONAL_USE_PREVIEW_COLUMNS))
 
     if candidates_df is not None and not candidates_df.empty:
         with st.expander("查看全部用途候选", expanded=False):
@@ -628,7 +638,7 @@ with tab_echa:
         help="默认使用 ECHA CHEM 当前公开站点。",
     )
 
-    col_timeout, col_delay, col_top, col_dossiers = st.columns(4)
+    col_timeout, col_delay, col_dossiers = st.columns(3)
     with col_timeout:
         echa_timeout_seconds = st.number_input(
             "ECHA 单个请求超时（秒）",
@@ -644,14 +654,6 @@ with tab_echa:
             max_value=10.0,
             value=0.5,
             step=0.1,
-        )
-    with col_top:
-        echa_top_n = st.number_input(
-            "ECHA 保留用途数量",
-            min_value=1,
-            max_value=10,
-            value=ECHA_TOP_N_DEFAULT,
-            step=1,
         )
     with col_dossiers:
         max_dossiers = st.number_input(
@@ -677,7 +679,6 @@ with tab_echa:
                 base_url=echa_base,
                 timeout=int(echa_timeout_seconds),
                 delay_seconds=float(echa_delay_seconds),
-                top_n=int(echa_top_n),
                 max_dossiers=int(max_dossiers),
                 progress_callback=update_echa_progress,
             )
@@ -707,9 +708,9 @@ with tab_echa:
 
     if echa_summary_df is None:
         st.subheader("结果预览")
-        show_dataframe(echa_build_empty_summary_template(echa_input_df, top_n=ECHA_TOP_N_DEFAULT))
+        show_dataframe(echa_build_empty_summary_template(echa_input_df))
     else:
-        st.subheader("前五用途结果")
+        st.subheader("ECHA 用途结果")
         show_dataframe(echa_summary_df)
 
     if echa_candidates_df is not None and not echa_candidates_df.empty:
@@ -882,100 +883,129 @@ with tab_source_origin:
             show_dataframe(source_origin_errors_df)
 
 with tab_rose:
-    st.subheader("7. 用途风玫瑰图")
+    st.subheader("7. 用途图表")
     st.write(
-        "根据 EPA 或 ECHA 的 Top 用途结果绘图。每个化合物一个极坐标子图，"
-        "每个用途扇区的角度按该用途证据数量占当前化合物 Top 用途证据总量的比例计算。"
+        "根据 EPA 或 ECHA 的完整用途明细绘图。EPA 产品场景和 ECHA 用途使用风玫瑰图；"
+        "EPA CompTox 功能用途分为最高预测概率图和 reported 证据标注图。"
     )
 
-    rose_sources = {}
-    comptox_summary_df = st.session_state.get("comptox_use_summary")
-    if isinstance(comptox_summary_df, pd.DataFrame) and not comptox_summary_df.empty:
-        rose_sources["EPA CompTox 产品场景"] = {
+    chart_sources = {}
+    comptox_candidates_df = st.session_state.get("comptox_use_candidates")
+    if isinstance(comptox_candidates_df, pd.DataFrame) and not comptox_candidates_df.empty:
+        chart_sources["EPA CompTox 产品场景"] = {
+            "chart_type": "rose",
             "source_label": "EPA PUC",
-            "summary_df": comptox_summary_df,
-            "use_prefix": "产品场景用途",
+            "candidates_df": comptox_candidates_df,
+            "source_type": "product_category",
+            "use_key": "raw",
             "title": "EPA CompTox Product-Use Category Rose Plot",
             "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
         }
-        rose_sources["EPA CompTox 功能用途"] = {
+        chart_sources["EPA CompTox 最高预测功能用途"] = {
+            "chart_type": "top_predicted_lollipop",
             "source_label": "EPA FC",
-            "summary_df": comptox_summary_df,
-            "use_prefix": "功能用途",
-            "title": "EPA CompTox Functional-Use Rose Plot",
-            "file_prefix": "EPA_Functional_Use_Rose_Plot",
+            "candidates_df": comptox_candidates_df,
+            "title": "EPA CompTox Top Predicted Functional Use",
+            "file_prefix": "EPA_Top_Predicted_Functional_Use",
+        }
+        chart_sources["EPA CompTox reported 功能用途证据"] = {
+            "chart_type": "reported_presence",
+            "source_label": "EPA FC reported",
+            "candidates_df": comptox_candidates_df,
+            "title": "EPA CompTox Reported Functional Use Evidence",
+            "file_prefix": "EPA_Reported_Functional_Use_Evidence",
         }
 
-    echa_summary_df = st.session_state.get("echa_use_summary")
-    if isinstance(echa_summary_df, pd.DataFrame) and not echa_summary_df.empty:
-        rose_sources["ECHA REACH"] = {
+    echa_candidates_df = st.session_state.get("echa_use_candidates")
+    if isinstance(echa_candidates_df, pd.DataFrame) and not echa_candidates_df.empty:
+        chart_sources["ECHA REACH"] = {
+            "chart_type": "rose",
             "source_label": "ECHA",
-            "summary_df": echa_summary_df,
+            "candidates_df": echa_candidates_df,
+            "use_key": "category",
             "title": "ECHA REACH Use Rose Plot",
             "file_prefix": "ECHA_Use_Rose_Plot",
         }
 
-    combined_rose_df = build_epa_echa_combined_rose_data(comptox_summary_df, echa_summary_df)
+    combined_rose_df = build_epa_echa_combined_rose_data(comptox_candidates_df, echa_candidates_df)
     if not combined_rose_df.empty:
-        rose_sources["EPA + ECHA Combined"] = {
+        chart_sources["EPA + ECHA Combined"] = {
+            "chart_type": "combined_rose",
             "source_label": "combined",
             "rose_df": combined_rose_df,
             "title": "EPA and ECHA Combined Use Plot",
             "file_prefix": "EPA_ECHA_Combined_Use_Plot",
         }
 
-    if not rose_sources:
-        st.info("请先完成 EPA CompTox 查询或 ECHA 查询。查询完成后，这里会显示用途风玫瑰图。")
+    if not chart_sources:
+        st.info("请先完成 EPA CompTox 查询或 ECHA 查询。查询完成后，这里会显示用途图表。")
     else:
         selected_source = st.radio(
             "选择图表数据来源",
-            options=list(rose_sources.keys()),
+            options=list(chart_sources.keys()),
             horizontal=True,
             key="use_rose_source",
         )
-        source_config = rose_sources[selected_source]
-        if source_config["source_label"] == "combined":
-            rose_df = source_config["rose_df"]
-        else:
-            rose_df = extract_use_rose_data(
-                source_config["summary_df"],
+        source_config = chart_sources[selected_source]
+        if source_config["chart_type"] == "combined_rose":
+            chart_df = source_config["rose_df"]
+        elif source_config["chart_type"] == "top_predicted_lollipop":
+            chart_df = extract_top_predicted_functional_use_data(
+                source_config["candidates_df"],
                 source_label=source_config["source_label"],
-                use_prefix=source_config.get("use_prefix", "用途"),
+            )
+        elif source_config["chart_type"] == "reported_presence":
+            chart_df = extract_reported_functional_use_presence_data(
+                source_config["candidates_df"],
+                source_label=source_config["source_label"],
+            )
+        else:
+            chart_df = extract_candidate_use_plot_data(
+                source_config["candidates_df"],
+                source_label=source_config["source_label"],
+                source_type=source_config.get("source_type"),
+                functional_source=source_config.get("functional_source"),
+                use_key=source_config.get("use_key", "category"),
             )
 
         if source_config.get("note"):
             st.info(source_config["note"])
 
-        if rose_df.empty:
+        if chart_df.empty:
             st.warning("当前结果中没有可用于绘图的用途数据。")
         else:
-            if rose_df["angle_basis"].eq("equal_fallback").any():
+            if "angle_basis" in chart_df.columns and chart_df["angle_basis"].eq("equal_fallback").any():
                 fallback_compounds = "、".join(
-                    sorted(rose_df.loc[rose_df["angle_basis"].eq("equal_fallback"), "compound"].unique())
+                    sorted(chart_df.loc[chart_df["angle_basis"].eq("equal_fallback"), "compound"].unique())
                 )
                 st.warning(
                     f"以下化合物缺少有效证据数量或证据总量为 0，已按用途数量等角度绘制：{fallback_compounds}"
                 )
 
             with st.expander("查看图表数据", expanded=False):
-                show_dataframe(
-                    rose_df[
-                        [
-                            "source",
-                            "compound_label",
-                            "rank",
-                            "use_label",
-                            "evidence_count",
-                            "angle_fraction",
-                            "angle_basis",
-                        ]
-                    ]
-                )
+                chart_columns = [
+                    "source",
+                    "compound_label",
+                    "use_label",
+                ]
+                if source_config["chart_type"] == "top_predicted_lollipop":
+                    chart_columns.extend(["display_label", "probability"])
+                elif source_config["chart_type"] == "reported_presence":
+                    chart_columns.append("presence")
+                else:
+                    chart_columns.append("evidence_count")
+                if "angle_fraction" in chart_df.columns:
+                    chart_columns.extend(["angle_fraction", "angle_basis"])
+                show_dataframe(chart_df[chart_columns])
 
-            if source_config["source_label"] == "combined":
-                fig = generate_combined_use_rose_plot(rose_df, source_config["title"])
+            if source_config["chart_type"] == "combined_rose":
+                fig = generate_combined_use_rose_plot(chart_df, source_config["title"])
+            elif source_config["chart_type"] == "top_predicted_lollipop":
+                fig = generate_top_predicted_functional_use_lollipop_plot(chart_df, source_config["title"])
+            elif source_config["chart_type"] == "reported_presence":
+                fig = generate_reported_functional_use_presence_plot(chart_df, source_config["title"])
             else:
-                fig = generate_use_rose_plot(rose_df, source_config["title"])
+                fig = generate_use_rose_plot(chart_df, source_config["title"])
             st.pyplot(fig)
 
             png_buffer = figure_to_png_bytes(fig)
@@ -1117,10 +1147,10 @@ with tab_notes:
                 "EPA 查询：",
                 "1. 优先使用输入表中的 `dtxsid`，否则用 CAS、compound、SMILES 去 CompTox 匹配。",
                 "2. 默认查询产品用途类别（PUC，产品场景）和化学功能用途（FC，技术功能）；产品用途关键词仅在配置可用自定义 EPA API 时可能返回。",
-                "3. 产品用途类别和化学功能用途分别显示为明细表；predicted 功能用途保留预测概率。",
+                "3. 产品用途类别、predicted 功能用途和 reported 功能用途分别显示为明细表；predicted 保留预测概率，reported 仅表示存在明确报道。",
                 "4. 将英文用途映射为中文类别，例如个人护理用品、化学品中间体、增塑剂、农药等。",
-                "5. 对产品场景和功能用途分别生成 Top5；综合候选 Top5 仅用于兼容旧报告，不能把不同证据数量纲直接比较。",
-                "6. 下载文件中 `Product_Use_Categories` 单独保存产品用途类别，`Functional_Uses` 单独保存化学功能用途，`Evidence_Metadata` 说明证据类型。",
+                "5. 产品场景和功能用途直接以完整明细保存；图表从明细聚合。",
+                "6. 下载文件中 `Product_Use_Categories` 单独保存产品用途类别，`Functional_Uses_Predicted` 和 `Functional_Uses_Reported` 分别保存功能用途，`Evidence_Metadata` 说明证据类型。",
                 "",
                 "ECHA 查询：",
                 "ECHA 查询会读取 ECHA CHEM 的物质匹配结果和 REACH dossier。结果中的中文用途类别来自 dossier 目录里的用途描述，",

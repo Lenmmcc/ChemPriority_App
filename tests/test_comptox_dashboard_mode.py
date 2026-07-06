@@ -9,6 +9,24 @@ from openpyxl import load_workbook
 from src import comptox_use
 
 
+COMPT0X_RANKING_COLUMNS = (
+    "产品场景Top5",
+    "功能用途Top5",
+    "综合候选Top5",
+    "前五用途",
+    "用途来源",
+    "用途1",
+    "用途1_英文证据",
+    "用途1_证据数量",
+    "产品场景用途1",
+    "产品场景用途1_英文证据",
+    "产品场景用途1_证据数量",
+    "功能用途1",
+    "功能用途1_英文证据",
+    "功能用途1_证据数量",
+)
+
+
 def _candidate(source_type, raw_use="cleaning agent", use_cn="清洁用品", **extra):
     return {
         "source_type": source_type,
@@ -129,13 +147,14 @@ class CompToxDashboardModeTests(unittest.TestCase):
             )
 
         self.assertEqual(summary_df.loc[0, "产品用途类别"], "Personal care products (1)")
-        self.assertEqual(summary_df.loc[0, "化学功能用途"], "香精香料 (Fragrance)")
+        self.assertEqual(summary_df.loc[0, "已收集化学功能用途"], "香精香料 (Fragrance)")
+        self.assertTrue(pd.isna(summary_df.loc[0, "预测化学功能用途"]))
         self.assertIn("product-use-categories/DTXSID0020153", summary_df.loc[0, "CompTox来源链接"])
         self.assertIn("chemical-functional-use/DTXSID0020153", summary_df.loc[0, "CompTox来源链接"])
         self.assertNotIn("CompTox产品用途页面", summary_df.columns)
         self.assertNotIn("CompTox功能用途页面", summary_df.columns)
 
-    def test_batch_summary_adds_source_specific_top5_columns(self):
+    def test_batch_summary_omits_top_ranking_columns(self):
         candidates = [
             _candidate(
                 "product_category",
@@ -166,13 +185,11 @@ class CompToxDashboardModeTests(unittest.TestCase):
             )
 
         self.assertEqual(summary_df.loc[0, "产品用途类别"], "Personal care products (12)；Cleaning products (3)")
-        self.assertEqual(summary_df.loc[0, "产品场景Top5"], "Personal care products；Cleaning products")
-        self.assertEqual(summary_df.loc[0, "功能用途Top5"], "芳香剂 (Fragrance)")
-        self.assertEqual(summary_df.loc[0, "产品场景用途1"], "Personal care products")
-        self.assertEqual(summary_df.loc[0, "功能用途1"], "芳香剂 (Fragrance)")
-        self.assertEqual(summary_df.loc[0, "综合候选Top5"], summary_df.loc[0, "前五用途"])
+        self.assertEqual(summary_df.loc[0, "预测化学功能用途"], "芳香剂 (Fragrance, p=0.910)")
+        for column in COMPT0X_RANKING_COLUMNS:
+            self.assertNotIn(column, summary_df.columns)
 
-    def test_product_top5_keeps_distinct_english_puc_scenarios(self):
+    def test_product_summary_keeps_all_distinct_english_puc_scenarios(self):
         candidates = [
             _candidate(
                 "product_category",
@@ -195,19 +212,9 @@ class CompToxDashboardModeTests(unittest.TestCase):
             )
 
         self.assertEqual(summary_df.loc[0, "产品用途类别"], "Cleaning products and household care:air freshener (32)；Cleaning products and household care:shoes:shoe polish or protectant (2)")
-        self.assertEqual(summary_df.loc[0, "产品场景用途1"], "Cleaning products and household care:air freshener")
-        self.assertEqual(
-            summary_df.loc[0, "产品场景用途1_英文证据"],
-            "Cleaning products and household care:air freshener",
-        )
-        self.assertEqual(summary_df.loc[0, "产品场景用途1_证据数量"], 32)
-        self.assertEqual(
-            summary_df.loc[0, "产品场景用途2"],
-            "Cleaning products and household care:shoes:shoe polish or protectant",
-        )
-        self.assertEqual(summary_df.loc[0, "产品场景用途2_证据数量"], 2)
+        self.assertNotIn("产品场景用途1", summary_df.columns)
 
-    def test_functional_top5_does_not_add_reported_count_to_predicted_probability(self):
+    def test_functional_summary_uses_predicted_only_and_preserves_reported_detail(self):
         candidates = [
             _candidate(
                 "functional_use",
@@ -227,16 +234,23 @@ class CompToxDashboardModeTests(unittest.TestCase):
             ),
         ]
         with patch.object(comptox_use, "fetch_use_candidates", return_value=(candidates, [])):
-            summary_df, _, _ = comptox_use.run_comptox_use_batch(
+            summary_df, candidates_df, _ = comptox_use.run_comptox_use_batch(
                 pd.DataFrame([{"compound": "p-Cymene", "dtxsid": "DTXSID3026645"}]),
                 api_base="",
                 delay_seconds=0,
             )
 
-        self.assertEqual(summary_df.loc[0, "功能用途1"], "调味剂 (Flavouring and nutrient)")
-        self.assertEqual(summary_df.loc[0, "功能用途1_证据数量"], 3)
-        self.assertEqual(summary_df.loc[0, "功能用途2"], "调味剂 (flavorant)")
-        self.assertEqual(summary_df.loc[0, "功能用途2_证据数量"], 0.2731)
+        self.assertEqual(summary_df.loc[0, "已收集化学功能用途"], "调味剂 (Flavouring and nutrient)")
+        self.assertEqual(summary_df.loc[0, "预测化学功能用途"], "调味剂 (flavorant, p=0.273)")
+        for column in COMPT0X_RANKING_COLUMNS:
+            self.assertNotIn(column, summary_df.columns)
+
+        functional_df = comptox_use.build_functional_use_table(candidates_df)
+        self.assertCountEqual(list(functional_df["来源类型"]), ["reported", "predicted"])
+        self.assertCountEqual(
+            list(zip(functional_df["来源类型"], functional_df["英文功能用途"])),
+            [("reported", "Flavouring and nutrient"), ("predicted", "flavorant")],
+        )
 
     def test_product_use_table_preserves_puc_hierarchy(self):
         candidates_df = pd.DataFrame(
@@ -288,6 +302,69 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertEqual(candidates[0]["functional_use_source"], "predicted")
         self.assertAlmostEqual(candidates[0]["probability"], 0.9126)
 
+    def test_reported_functional_use_synonyms_count_as_single_evidence_item(self):
+        candidates = comptox_use._extract_functional_use_candidates(
+            [
+                {
+                    "harmonizedFunctionalUse": "Intermediate",
+                    "reportedFunctionalUse": "intermediate",
+                },
+                {
+                    "harmonizedFunctionalUse": "Intermediate",
+                    "reportedFunctionalUse": "intermediates",
+                },
+            ],
+            "dashboard:functional_use",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["functional_use_source"], "reported")
+        self.assertEqual(candidates[0]["reported_use"], "intermediate | intermediates")
+        self.assertEqual(candidates[0]["evidence_count"], 1)
+
+    def test_functional_use_extraction_separates_reported_and_predicted_for_same_label(self):
+        candidates = comptox_use._extract_functional_use_candidates(
+            [
+                {
+                    "harmonizedFunctionalUse": "Intermediate",
+                    "reportedFunctionalUse": "intermediate",
+                },
+                {
+                    "harmonizedFunctionalUse": "Intermediate",
+                    "probability": 0.72,
+                },
+            ],
+            "dashboard:functional_use",
+        )
+
+        by_source = {candidate["functional_use_source"]: candidate for candidate in candidates}
+        self.assertEqual(set(by_source), {"reported", "predicted"})
+        self.assertEqual(by_source["reported"]["evidence_count"], 1)
+        self.assertTrue(pd.isna(by_source["reported"]["probability"]))
+        self.assertAlmostEqual(by_source["predicted"]["evidence_count"], 0.72)
+        self.assertAlmostEqual(by_source["predicted"]["probability"], 0.72)
+
+    def test_functional_use_extraction_splits_combined_reported_and_predicted_record(self):
+        candidates = comptox_use._extract_functional_use_candidates(
+            [
+                {
+                    "harmonizedFunctionalUse": "fragrance",
+                    "reportedFunctionalUse": "Fragrance",
+                    "probability": 0.91,
+                }
+            ],
+            "dashboard:functional_use",
+        )
+
+        by_source = {candidate["functional_use_source"]: candidate for candidate in candidates}
+        self.assertEqual(set(by_source), {"reported", "predicted"})
+        self.assertEqual(by_source["reported"]["reported_use"], "Fragrance")
+        self.assertEqual(by_source["reported"]["evidence_count"], 1)
+        self.assertTrue(pd.isna(by_source["reported"]["probability"]))
+        self.assertEqual(by_source["predicted"]["reported_use"], "")
+        self.assertAlmostEqual(by_source["predicted"]["evidence_count"], 0.91)
+        self.assertAlmostEqual(by_source["predicted"]["probability"], 0.91)
+
     def test_functional_use_translation_handles_predicted_use_labels(self):
         self.assertEqual(comptox_use.classify_use_cn("fragrance"), "芳香剂")
         self.assertEqual(comptox_use.classify_use_cn("flavorant"), "调味剂")
@@ -321,6 +398,46 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertEqual(functional_df.loc[0, "功能用途"], "其他用途：specialty_unmapped_use")
         self.assertEqual(functional_df.loc[0, "英文功能用途"], "specialty_unmapped_use")
 
+    def test_functional_use_table_can_filter_predicted_and_reported_rows(self):
+        candidates_df = pd.DataFrame(
+            [
+                {
+                    "compound": "Example",
+                    "dtxsid": "DTXSID0000001",
+                    "source_type": "functional_use",
+                    "source": "dashboard:functional_use",
+                    "raw_use": "fragrance",
+                    "use_cn": "芳香剂",
+                    "reported_use": "",
+                    "harmonized_use": "fragrance",
+                    "evidence_count": 0.91,
+                    "probability": 0.91,
+                    "functional_use_source": "predicted",
+                },
+                {
+                    "compound": "Example",
+                    "dtxsid": "DTXSID0000001",
+                    "source_type": "functional_use",
+                    "source": "dashboard:functional_use",
+                    "raw_use": "Fragrance",
+                    "use_cn": "芳香剂",
+                    "reported_use": "Fragrance",
+                    "harmonized_use": "Fragrance",
+                    "evidence_count": 1,
+                    "probability": pd.NA,
+                    "functional_use_source": "reported",
+                },
+            ]
+        )
+
+        predicted_df = comptox_use.build_functional_use_table(candidates_df, functional_source="predicted")
+        reported_df = comptox_use.build_functional_use_table(candidates_df, functional_source="reported")
+
+        self.assertEqual(predicted_df["来源类型"].tolist(), ["predicted"])
+        self.assertEqual(reported_df["来源类型"].tolist(), ["reported"])
+        self.assertEqual(predicted_df.loc[0, "reported_use"], "")
+        self.assertEqual(reported_df.loc[0, "reported_use"], "Fragrance")
+
     def test_batch_summary_shows_predicted_functional_use_probability(self):
         input_df = pd.DataFrame([{"compound": "2CB", "dtxsid": "DTXSID2069284"}])
         candidates = [
@@ -350,8 +467,9 @@ class CompToxDashboardModeTests(unittest.TestCase):
                 delay_seconds=0,
             )
 
+        self.assertTrue(pd.isna(summary_df.loc[0, "已收集化学功能用途"]))
         self.assertEqual(
-            summary_df.loc[0, "化学功能用途"],
+            summary_df.loc[0, "预测化学功能用途"],
             "芳香剂 (fragrance, p=0.913)；抗氧化剂 (antioxidant, p=0.368)",
         )
         self.assertIn("probability", candidates_df.columns)
@@ -372,7 +490,11 @@ class CompToxDashboardModeTests(unittest.TestCase):
             errors_df=pd.DataFrame(),
         )
         book = load_workbook(io.BytesIO(workbook.getvalue()), read_only=True)
-        self.assertIn("Functional_Uses", book.sheetnames)
+        self.assertIn("Use_Summary", book.sheetnames)
+        self.assertNotIn("Top5_Use_Summary", book.sheetnames)
+        self.assertNotIn("Functional_Uses", book.sheetnames)
+        self.assertIn("Functional_Uses_Predicted", book.sheetnames)
+        self.assertIn("Functional_Uses_Reported", book.sheetnames)
         self.assertIn("Product_Use_Categories", book.sheetnames)
         self.assertIn("Evidence_Metadata", book.sheetnames)
         self.assertEqual(

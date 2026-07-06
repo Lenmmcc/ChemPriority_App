@@ -38,7 +38,6 @@ PRODUCT_KEYWORD_ENDPOINT = "ccdapp2/product-cat-keyword/search/by-dtxsid"
 FUNCTIONAL_USE_ENDPOINT = "ccdapp2/exposure-chemical-func-use/search/by-dtxsid"
 CHEMICAL_SEARCH_ENDPOINT = "ccdapp1/search/chemical/equal-with-detail/"
 
-TOP_N_DEFAULT = 5
 DTXSID_RE = re.compile(r"\bDTXSID\d+\b", re.I)
 
 USE_SOURCE_LABELS = {
@@ -101,8 +100,8 @@ EVIDENCE_METADATA_ROWS = [
         "source_type": "functional_use",
         "中文名称": "化学功能用途",
         "EPA术语": "Chemical Functional Use / Function Category (FC)",
-        "说明": "描述化学物质在产品或工艺中的技术功能，例如溶剂、芳香剂、增塑剂。",
-        "证据数量含义": "reported 记录为合并记录数；predicted 记录为预测概率，不能与产品记录数直接比较。",
+        "说明": "描述化学物质在产品或工艺中的技术功能，例如溶剂、芳香剂、增塑剂；图表默认只使用 predicted 结果，reported 仅保留在明细表中。",
+        "证据数量含义": "predicted 记录为预测概率；reported 记录为是否存在明确报道，展示为 1，不与预测概率相加。",
         "默认来源": "CompTox Dashboard chemical-functional-use",
         "官方链接": "https://comptox.epa.gov/chemexpo/static/user_guide/glossary.html",
     },
@@ -245,7 +244,6 @@ def run_comptox_use_batch(
     api_key=None,
     timeout=45,
     delay_seconds=0.2,
-    top_n=TOP_N_DEFAULT,
     dashboard_fallback=True,
     progress_callback=None,
 ):
@@ -272,8 +270,6 @@ def run_comptox_use_batch(
                         row,
                         resolution,
                         [],
-                        [],
-                        top_n,
                         "未解析到 DTXSID",
                         query_note=query_note,
                     )
@@ -296,15 +292,12 @@ def run_comptox_use_batch(
                     timeout=timeout,
                     dashboard_fallback=dashboard_fallback,
                 )
-                ranked = rank_use_candidates(candidates, top_n=top_n)
-                status = "查询完成" if ranked else "未查到用途数据"
+                status = "查询完成" if candidates else "未查到用途数据"
                 summary_rows.append(
                     _summary_row(
                         row,
                         resolution,
-                        ranked,
                         candidates,
-                        top_n,
                         status,
                         query_note=query_note,
                     )
@@ -331,7 +324,7 @@ def run_comptox_use_batch(
                     )
         except Exception as exc:
             summary_rows.append(
-                _summary_row(row, {"dtxsid": pd.NA, "status": "失败"}, [], [], top_n, "查询失败")
+                _summary_row(row, {"dtxsid": pd.NA, "status": "失败"}, [], "查询失败")
             )
             error_rows.append(
                 {
@@ -517,104 +510,6 @@ def fetch_use_candidates(
     return candidates, warnings
 
 
-def rank_use_candidates(candidates, top_n=TOP_N_DEFAULT, source_types=None):
-    grouped = {}
-    for candidate in candidates:
-        if source_types is not None and candidate.get("source_type") not in source_types:
-            continue
-        source_type = candidate.get("source_type")
-        label_cn = _clean_cell(candidate.get("use_cn")) or "其他用途"
-        raw_label = _clean_cell(candidate.get("raw_use") or candidate.get("use_en")) or label_cn
-        if source_type == "product_category":
-            label_cn = raw_label
-        key = _rank_use_key(candidate, label_cn, raw_label)
-        if not key:
-            continue
-
-        evidence = _to_number(candidate.get("evidence_count"))
-        if pd.isna(evidence) or evidence <= 0:
-            evidence = 1
-
-        specificity = candidate.get("specificity")
-        if pd.isna(specificity):
-            specificity = 0
-
-        source_priority = {
-            "product_category": 3,
-            "functional_use": 2,
-            "product_keyword": 1,
-        }.get(source_type, 0)
-
-        if key not in grouped:
-            grouped[key] = {
-                "label_cn": label_cn,
-                "source_type": source_type,
-                "functional_use_source": _clean_cell(candidate.get("functional_use_source")),
-                "evidence_count": 0.0,
-                "max_single_evidence": 0.0,
-                "specificity": 0,
-                "source_priority": 0,
-                "sources": set(),
-                "details": set(),
-            }
-
-        group = grouped[key]
-        group["evidence_count"] += float(evidence)
-        group["max_single_evidence"] = max(group["max_single_evidence"], float(evidence))
-        group["specificity"] = max(group["specificity"], int(specificity or 0))
-        group["source_priority"] = max(group["source_priority"], source_priority)
-        group["sources"].add(USE_SOURCE_LABELS.get(source_type, source_type or ""))
-        if raw_label:
-            group["details"].add(str(raw_label))
-
-    ranked = sorted(
-        grouped.values(),
-        key=lambda item: (
-            item["evidence_count"],
-            item["max_single_evidence"],
-            item["source_priority"],
-            item["specificity"],
-            item["label_cn"],
-        ),
-        reverse=True,
-    )
-
-    output = []
-    for rank, item in enumerate(ranked[:top_n], start=1):
-        evidence = item["evidence_count"]
-        output.append(
-            {
-                "rank": rank,
-                "use_cn": _ranked_use_display_label(item),
-                "use_en": " | ".join(sorted(item["details"]))[:1000],
-                "evidence_count": int(evidence) if evidence.is_integer() else evidence,
-                "sources": "；".join(sorted(source for source in item["sources"] if source)),
-            }
-        )
-    return output
-
-
-def _rank_use_key(candidate, label_cn, raw_label):
-    source_type = candidate.get("source_type")
-    raw_key = _normalize_key(raw_label)
-    if source_type == "functional_use":
-        source = _clean_cell(candidate.get("functional_use_source")) or "reported"
-        return f"{source_type}|{source}|{raw_key or _normalize_key(label_cn)}"
-    if source_type == "product_category":
-        return f"{source_type}|{raw_key or _normalize_key(label_cn)}"
-    if label_cn == "其他用途":
-        return f"{source_type}|{raw_key}"
-    return f"{source_type}|{_normalize_key(label_cn)}"
-
-
-def _ranked_use_display_label(item):
-    details = sorted(_clean_cell(value) for value in item["details"] if _clean_cell(value))
-    raw = details[0] if len(details) == 1 else ""
-    if item.get("source_type") == "product_category" and len(details) > 1:
-        return item["label_cn"]
-    return _display_use_label(item["label_cn"], raw)
-
-
 def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_df=None):
     if summary_df is None:
         summary_df = pd.DataFrame()
@@ -642,9 +537,18 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_
         normalize_input_columns(input_df)[REQUIRED_IDENTIFIER_COLUMNS].to_excel(
             writer, sheet_name="Input", index=False
         )
-        summary_df.to_excel(writer, sheet_name="Top5_Use_Summary", index=False)
+        summary_df.to_excel(writer, sheet_name="Use_Summary", index=False)
         build_product_use_table(candidates_df).to_excel(writer, sheet_name="Product_Use_Categories", index=False)
-        build_functional_use_table(candidates_df).to_excel(writer, sheet_name="Functional_Uses", index=False)
+        build_functional_use_table(candidates_df, functional_source="predicted").to_excel(
+            writer,
+            sheet_name="Functional_Uses_Predicted",
+            index=False,
+        )
+        build_functional_use_table(candidates_df, functional_source="reported").to_excel(
+            writer,
+            sheet_name="Functional_Uses_Reported",
+            index=False,
+        )
         candidates_df.to_excel(writer, sheet_name="All_Use_Candidates", index=False)
         errors_df.to_excel(writer, sheet_name="Warnings", index=False)
         build_evidence_metadata_table().to_excel(writer, sheet_name="Evidence_Metadata", index=False)
@@ -653,19 +557,17 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_
     return buffer
 
 
-def build_empty_summary_template(input_df, top_n=TOP_N_DEFAULT):
+def build_empty_summary_template(input_df):
     clean_df = normalize_input_columns(input_df)
     return pd.DataFrame(
         [
-            _summary_row(row, {"dtxsid": pd.NA, "status": "待查询"}, [], [], top_n, "待查询")
+            _summary_row(row, {"dtxsid": pd.NA, "status": "待查询"}, [], "待查询")
             for _, row in clean_df.iterrows()
         ]
     )
 
 
-def _summary_row(row, resolution, ranked, candidates, top_n, status, query_note=""):
-    product_ranked = rank_use_candidates(candidates or [], top_n=top_n, source_types={"product_category"})
-    functional_ranked = rank_use_candidates(candidates or [], top_n=top_n, source_types={"functional_use"})
+def _summary_row(row, resolution, candidates, status, query_note=""):
     output = {
         "compound": _display_compound(row),
         "cas": _clean_cell(row.get("cas")),
@@ -678,18 +580,17 @@ def _summary_row(row, resolution, ranked, candidates, top_n, status, query_note=
         "query_status": status,
         "query_notes": query_note,
         "产品用途类别": _format_source_type_uses(candidates, "product_category"),
-        "化学功能用途": _format_source_type_uses(candidates, "functional_use"),
-        "产品场景Top5": _join_ranked_uses(product_ranked),
-        "功能用途Top5": _join_ranked_uses(functional_ranked),
-        "综合候选Top5": _join_ranked_uses(ranked),
+        "已收集化学功能用途": _format_source_type_uses(
+            candidates,
+            "functional_use",
+            functional_source="reported",
+        ),
+        "预测化学功能用途": _format_source_type_uses(
+            candidates,
+            "functional_use",
+            functional_source="predicted",
+        ),
     }
-
-    _add_ranked_use_columns(output, "用途", ranked, top_n)
-    _add_ranked_use_columns(output, "产品场景用途", product_ranked, top_n)
-    _add_ranked_use_columns(output, "功能用途", functional_ranked, top_n)
-
-    output["前五用途"] = _join_ranked_uses(ranked)
-    output["用途来源"] = "；".join(sorted({item["sources"] for item in ranked[:top_n] if item.get("sources")}))
     dtxsid = resolution.get("dtxsid")
     if isinstance(dtxsid, str) and DTXSID_RE.search(dtxsid):
         product_url = urllib.parse.urljoin(DEFAULT_DASHBOARD_BASE, f"chemical/product-use-categories/{dtxsid}")
@@ -704,23 +605,6 @@ def _summary_row(row, resolution, ranked, candidates, top_n, status, query_note=
     return output
 
 
-def _add_ranked_use_columns(output, prefix, ranked, top_n):
-    for idx in range(1, top_n + 1):
-        output[f"{prefix}{idx}"] = pd.NA
-        output[f"{prefix}{idx}_英文证据"] = pd.NA
-        output[f"{prefix}{idx}_证据数量"] = pd.NA
-
-    for item in ranked[:top_n]:
-        idx = item["rank"]
-        output[f"{prefix}{idx}"] = item["use_cn"]
-        output[f"{prefix}{idx}_英文证据"] = item["use_en"]
-        output[f"{prefix}{idx}_证据数量"] = item["evidence_count"]
-
-
-def _join_ranked_uses(ranked):
-    return "；".join(item["use_cn"] for item in ranked or [])
-
-
 def _format_evidence_count(value):
     number = _to_number(value)
     if pd.isna(number):
@@ -728,11 +612,17 @@ def _format_evidence_count(value):
     return str(int(number)) if float(number).is_integer() else f"{number:g}"
 
 
-def _format_source_type_uses(candidates, source_type, top_n=TOP_N_DEFAULT):
+def _format_source_type_uses(candidates, source_type, functional_source=None):
     grouped = {}
     for candidate in candidates or []:
         if candidate.get("source_type") != source_type:
             continue
+        if source_type == "functional_use" and functional_source:
+            is_predicted = _is_predicted_functional_use(candidate)
+            if functional_source == "predicted" and not is_predicted:
+                continue
+            if functional_source == "reported" and is_predicted:
+                continue
 
         label_cn = candidate.get("use_cn") or "其他用途"
         raw_label = (
@@ -790,9 +680,21 @@ def _format_source_type_uses(candidates, source_type, top_n=TOP_N_DEFAULT):
     if source_type == "product_category":
         return "；".join(
             f"{item['label']} ({_format_evidence_count(item['evidence_count'])})"
-            for item in ranked[:top_n]
+            for item in ranked
         )
-    return "；".join(item["label"] for item in ranked[:top_n])
+    return "；".join(item["label"] for item in ranked)
+
+
+def _is_predicted_functional_use(candidate):
+    source = _clean_cell(candidate.get("functional_use_source")).lower()
+    if "pred" in source:
+        return True
+    if "report" in source or "collect" in source:
+        return False
+    probability = _to_number(candidate.get("probability"))
+    if not pd.isna(probability):
+        return True
+    return "pred" in _functional_use_source_label(candidate).lower()
 
 
 def build_product_use_table(candidates_df):
@@ -837,7 +739,7 @@ def build_product_use_table(candidates_df):
     return output.drop(columns=["_sort_count"]).reset_index(drop=True)
 
 
-def build_functional_use_table(candidates_df):
+def build_functional_use_table(candidates_df, functional_source=None):
     if not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
         return pd.DataFrame(columns=FUNCTIONAL_USE_TABLE_COLUMNS)
     if "source_type" not in candidates_df.columns:
@@ -845,6 +747,13 @@ def build_functional_use_table(candidates_df):
 
     rows = []
     functional_rows = candidates_df[candidates_df["source_type"].eq("functional_use")]
+    if functional_source:
+        functional_rows = functional_rows[
+            functional_rows.apply(
+                lambda row: _functional_use_source_label(row) == functional_source,
+                axis=1,
+            )
+        ]
     for _, row in functional_rows.iterrows():
         dtxsid = _clean_cell(row.get("dtxsid"))
         probability = _to_number(row.get("probability"))
@@ -1051,39 +960,48 @@ def _extract_functional_use_candidates(data, source):
         probability = _to_number(
             _get_any(record, ["probability", "predictedProbability", "predictionProbability"])
         )
-        functional_use_source = _functional_use_source_from_record(record, source, probability)
         label = harmonized if not pd.isna(harmonized) and str(harmonized).strip() else reported
         label = _clean_cell(label)
         if not label:
             continue
         if _is_generic_use(label):
             continue
-        key = _normalize_key(label)
-        if key not in groups:
-            groups[key] = {
-                "label": label,
-                "harmonized": harmonized,
-                "reported_values": set(),
-                "count": 0,
-                "probability": pd.NA,
-                "functional_use_source": functional_use_source,
-            }
-        groups[key]["count"] += 1
-        if not pd.isna(probability):
+        functional_use_source = _functional_use_source_from_record(record, source, probability)
+        reported_text = _clean_cell(reported)
+
+        if functional_use_source == "predicted" and not pd.isna(probability):
+            key = ("predicted", _normalize_key(label))
+            if key not in groups:
+                groups[key] = {
+                    "label": label,
+                    "harmonized": harmonized,
+                    "reported_values": set(),
+                    "probability": pd.NA,
+                    "functional_use_source": "predicted",
+                }
             current_probability = groups[key]["probability"]
             if pd.isna(current_probability) or probability > current_probability:
                 groups[key]["probability"] = probability
-                groups[key]["functional_use_source"] = "predicted"
-        reported_text = _clean_cell(reported)
-        if reported_text:
-            groups[key]["reported_values"].add(reported_text)
+
+        if reported_text or functional_use_source != "predicted":
+            key = ("reported", _normalize_key(label))
+            if key not in groups:
+                groups[key] = {
+                    "label": label,
+                    "harmonized": harmonized,
+                    "reported_values": set(),
+                    "probability": pd.NA,
+                    "functional_use_source": "reported",
+                }
+            if reported_text:
+                groups[key]["reported_values"].add(reported_text)
 
     candidates = []
     for group in groups.values():
         label = group["label"]
         reported_joined = " | ".join(sorted(group["reported_values"])) if group["reported_values"] else pd.NA
         probability = group["probability"]
-        evidence_count = probability if not pd.isna(probability) else group["count"]
+        evidence_count = probability if not pd.isna(probability) else 1
         candidates.append(
             _candidate(
                 source_type="functional_use",

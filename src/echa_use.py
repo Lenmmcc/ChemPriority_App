@@ -20,7 +20,6 @@ DOSSIER_LIST_PATH = "api-dossier-list/v1/dossier"
 REGISTRATION_NUMBERS_PATH = "api-dossier-list/v1/dossier.registration.numbers"
 HTML_PAGES_PATH = "html-pages-prod/"
 
-TOP_N_DEFAULT = 5
 ECHA_ID_RE = re.compile(r"\b\d{3}\.\d{3}\.\d{3}\b")
 
 SUMMARY_COLUMNS = [
@@ -187,7 +186,6 @@ def run_echa_use_batch(
     base_url=DEFAULT_ECHA_BASE,
     timeout=90,
     delay_seconds=0.5,
-    top_n=TOP_N_DEFAULT,
     max_dossiers=1,
     progress_callback=None,
 ):
@@ -204,7 +202,7 @@ def run_echa_use_batch(
             resolution = resolve_substance(row, base_url=base_url, timeout=timeout)
             echa_id = resolution.get("echa_id")
             if not _clean_cell(echa_id):
-                summary_rows.append(_summary_row(row, resolution, [], top_n, "未匹配到 ECHA 物质"))
+                summary_rows.append(_summary_row(row, resolution, "未匹配到 ECHA 物质"))
                 warning_rows.append(_warning_row(row, echa_id, "substance_resolution", resolution.get("message", "")))
             else:
                 dossiers, dossier_warnings = fetch_reach_dossiers(
@@ -239,14 +237,13 @@ def run_echa_use_batch(
                     parsed_count = len(candidates) - parsed_count_before
                     dossier_rows.append(_dossier_row(row, echa_id, dossier, parsed_count, base_url))
 
-                ranked = rank_use_candidates(candidates, top_n=top_n)
-                status = "查询完成" if ranked else "未查到用途数据"
-                summary_rows.append(_summary_row(row, resolution, ranked, top_n, status, dossier_count=len(dossiers)))
+                status = "查询完成" if candidates else "未查到用途数据"
+                summary_rows.append(_summary_row(row, resolution, status, dossier_count=len(dossiers)))
 
                 for candidate in candidates:
                     candidate_rows.append({"compound": compound, "echa_id": echa_id, **candidate})
         except Exception as exc:
-            summary_rows.append(_summary_row(row, {"echa_id": pd.NA, "status": "失败"}, [], top_n, "查询失败"))
+            summary_rows.append(_summary_row(row, {"echa_id": pd.NA, "status": "失败"}, "查询失败"))
             warning_rows.append(_warning_row(row, row.get("echa_id"), "unexpected_error", str(exc)))
 
         if progress_callback:
@@ -255,7 +252,7 @@ def run_echa_use_batch(
             time.sleep(delay_seconds)
 
     return (
-        _ensure_columns(pd.DataFrame(summary_rows), _summary_columns(top_n)),
+        _ensure_columns(pd.DataFrame(summary_rows), _summary_columns()),
         _ensure_columns(pd.DataFrame(candidate_rows), CANDIDATE_COLUMNS),
         _ensure_columns(pd.DataFrame(dossier_rows), DOSSIER_COLUMNS),
         _ensure_columns(pd.DataFrame(warning_rows), WARNING_COLUMNS),
@@ -451,52 +448,9 @@ def classify_use_cn(*texts):
     return f"其他用途：{_clean_cell(texts[0])}" if texts and _clean_cell(texts[0]) else "未分类"
 
 
-def rank_use_candidates(candidates, top_n=TOP_N_DEFAULT):
-    grouped = {}
-    for candidate in candidates:
-        label = candidate.get("use_cn") or "未分类"
-        key = _normalize_key(label)
-        if not key:
-            continue
-        if key not in grouped:
-            grouped[key] = {
-                "use_cn": label,
-                "evidence_count": 0,
-                "raw_uses": set(),
-                "sections": set(),
-                "sources": set(),
-            }
-        grouped[key]["evidence_count"] += int(candidate.get("evidence_count") or 1)
-        if candidate.get("raw_use"):
-            grouped[key]["raw_uses"].add(str(candidate["raw_use"]))
-        if candidate.get("echa_use_section"):
-            grouped[key]["sections"].add(str(candidate["echa_use_section"]))
-        if candidate.get("source"):
-            grouped[key]["sources"].add(str(candidate["source"]))
-
-    ranked = sorted(
-        grouped.values(),
-        key=lambda item: (item["evidence_count"], len(item["raw_uses"]), item["use_cn"]),
-        reverse=True,
-    )
-    output = []
-    for rank, item in enumerate(ranked[: int(top_n or TOP_N_DEFAULT)], start=1):
-        output.append(
-            {
-                "rank": rank,
-                "use_cn": item["use_cn"],
-                "use_en": " | ".join(sorted(item["raw_uses"]))[:1000],
-                "evidence_count": item["evidence_count"],
-                "sources": "；".join(sorted(item["sources"])),
-                "sections": "；".join(sorted(item["sections"])),
-            }
-        )
-    return output
-
-
 def build_result_workbook(input_df, summary_df=None, candidates_df=None, dossiers_df=None, errors_df=None):
     if summary_df is None:
-        summary_df = pd.DataFrame(columns=_summary_columns(TOP_N_DEFAULT))
+        summary_df = pd.DataFrame(columns=_summary_columns())
     if candidates_df is None:
         candidates_df = pd.DataFrame(columns=CANDIDATE_COLUMNS)
     if dossiers_df is None:
@@ -513,7 +467,7 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, dossier
         normalize_input_columns(input_df)[REQUIRED_IDENTIFIER_COLUMNS].to_excel(
             writer, sheet_name="Input", index=False
         )
-        summary_df.to_excel(writer, sheet_name="ECHA_Top5_Use_Summary", index=False)
+        summary_df.to_excel(writer, sheet_name="ECHA_Use_Summary", index=False)
         candidates_df.to_excel(writer, sheet_name="ECHA_All_Use_Candidates", index=False)
         dossiers_df.to_excel(writer, sheet_name="ECHA_Dossiers", index=False)
         errors_df.to_excel(writer, sheet_name="ECHA_Warnings", index=False)
@@ -522,14 +476,14 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, dossier
     return buffer
 
 
-def build_empty_summary_template(input_df, top_n=TOP_N_DEFAULT):
+def build_empty_summary_template(input_df):
     clean_df = normalize_input_columns(input_df)
     return pd.DataFrame(
-        [_summary_row(row, {"echa_id": pd.NA, "status": "待查询"}, [], top_n, "待查询") for _, row in clean_df.iterrows()]
+        [_summary_row(row, {"echa_id": pd.NA, "status": "待查询"}, "待查询") for _, row in clean_df.iterrows()]
     )
 
 
-def _summary_row(row, resolution, ranked, top_n, status, dossier_count=0):
+def _summary_row(row, resolution, status, dossier_count=0):
     output = {
         "compound": _display_compound(row),
         "cas": _clean_cell(row.get("cas")),
@@ -543,17 +497,6 @@ def _summary_row(row, resolution, ranked, top_n, status, dossier_count=0):
         "match_status": resolution.get("status", pd.NA),
         "query_status": status,
     }
-    for idx in range(1, int(top_n or TOP_N_DEFAULT) + 1):
-        output[f"用途{idx}"] = pd.NA
-        output[f"用途{idx}_英文证据"] = pd.NA
-        output[f"用途{idx}_证据数量"] = pd.NA
-    for item in ranked[: int(top_n or TOP_N_DEFAULT)]:
-        idx = item["rank"]
-        output[f"用途{idx}"] = item["use_cn"]
-        output[f"用途{idx}_英文证据"] = item["use_en"]
-        output[f"用途{idx}_证据数量"] = item["evidence_count"]
-    output["前五用途"] = "；".join(item["use_cn"] for item in ranked[: int(top_n or TOP_N_DEFAULT)])
-    output["用途来源"] = "；".join(sorted({item["sources"] for item in ranked[: int(top_n or TOP_N_DEFAULT)] if item.get("sources")}))
     output["ECHA_dossier数量"] = dossier_count
     search_query = resolution.get("echa_id")
     if _is_missing(search_query) or not _clean_cell(search_query):
@@ -563,11 +506,9 @@ def _summary_row(row, resolution, ranked, top_n, status, dossier_count=0):
     return output
 
 
-def _summary_columns(top_n):
+def _summary_columns():
     columns = SUMMARY_COLUMNS.copy()
-    for idx in range(1, int(top_n or TOP_N_DEFAULT) + 1):
-        columns.extend([f"用途{idx}", f"用途{idx}_英文证据", f"用途{idx}_证据数量"])
-    columns.extend(["前五用途", "用途来源", "ECHA_dossier数量", "ECHA搜索页面", "notes"])
+    columns.extend(["ECHA_dossier数量", "ECHA搜索页面", "notes"])
     return columns
 
 
