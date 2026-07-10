@@ -10,6 +10,9 @@ from collections import defaultdict
 
 import pandas as pd
 
+from src.batch_runner import run_ordered_batch
+from src.query_cache import cached_call
+
 
 REQUIRED_IDENTIFIER_COLUMNS = ["compound", "cas", "smiles", "dtxsid"]
 
@@ -346,6 +349,104 @@ def run_comptox_use_batch(
     candidates_df = pd.DataFrame(candidate_rows)
     errors_df = pd.DataFrame(error_rows)
     return summary_df, candidates_df, errors_df
+
+
+_run_comptox_use_batch_sequential = run_comptox_use_batch
+
+
+def run_comptox_use_batch(
+    input_df,
+    api_base=DEFAULT_API_BASE,
+    api_key=None,
+    timeout=45,
+    delay_seconds=0.2,
+    dashboard_fallback=True,
+    progress_callback=None,
+    max_workers=1,
+    cache_enabled=True,
+):
+    if int(max_workers or 1) <= 1:
+        from src.query_cache import cache_control
+
+        with cache_control(cache_enabled):
+            return _run_comptox_use_batch_sequential(
+                input_df,
+                api_base=api_base,
+                api_key=api_key,
+                timeout=timeout,
+                delay_seconds=delay_seconds,
+                dashboard_fallback=dashboard_fallback,
+                progress_callback=progress_callback,
+            )
+
+    clean_df = normalize_input_columns(input_df)
+    items = list(clean_df.iterrows())
+    query_note = _query_scope_note(api_base, dashboard_fallback)
+
+    def process_row(item):
+        _, row = item
+        return _run_comptox_use_batch_sequential(
+            pd.DataFrame([row]),
+            api_base=api_base,
+            api_key=api_key,
+            timeout=timeout,
+            delay_seconds=0,
+            dashboard_fallback=dashboard_fallback,
+            progress_callback=None,
+        )
+
+    from src.query_cache import cache_control
+
+    with cache_control(cache_enabled):
+        batch_results = run_ordered_batch(
+            items,
+            process_row,
+            max_workers=max_workers,
+            delay_seconds=delay_seconds,
+            progress_callback=progress_callback,
+            label_func=lambda item: _display_compound(item[1]),
+        )
+
+    summary_frames = []
+    candidate_frames = []
+    error_frames = []
+    for result in batch_results:
+        if result.error is not None:
+            row = items[result.index][1]
+            compound = _display_compound(row)
+            summary_frames.append(
+                pd.DataFrame([
+                    _summary_row(
+                        row,
+                        {"dtxsid": pd.NA, "status": "失败"},
+                        [],
+                        "查询失败",
+                        query_note=query_note,
+                    )
+                ])
+            )
+            error_frames.append(
+                pd.DataFrame([
+                    {
+                        "compound": compound,
+                        "cas": _clean_cell(row.get("cas")),
+                        "smiles": _clean_cell(row.get("smiles")),
+                        "dtxsid": _clean_cell(row.get("dtxsid")),
+                        "stage": "batch_worker",
+                        "message": str(result.error),
+                    }
+                ])
+            )
+            continue
+        summary_df, candidates_df, errors_df = result.value
+        summary_frames.append(summary_df)
+        candidate_frames.append(candidates_df)
+        error_frames.append(errors_df)
+
+    summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+    candidates = pd.concat(candidate_frames, ignore_index=True) if candidate_frames else pd.DataFrame()
+    errors = pd.concat(error_frames, ignore_index=True) if error_frames else pd.DataFrame()
+    return summary, candidates, errors
 
 
 def resolve_dtxsid(row, api_base=DEFAULT_API_BASE, api_key=None, timeout=45):
@@ -1137,17 +1238,24 @@ def _api_get_json(path, params=None, api_base=DEFAULT_API_BASE, api_key=None, ti
         headers["x-api-key"] = key
 
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")[:500]
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"连接失败: {exc.reason}") from exc
 
-    text = raw.decode("utf-8", errors="replace")
-    return json.loads(text)
+    def fetch():
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"连接失败: {exc.reason}") from exc
+        return json.loads(raw.decode("utf-8", errors="replace"))
+
+    return cached_call(
+        "comptox_api",
+        "v1",
+        {"base": base, "path": path, "params": params},
+        fetch,
+    )
 
 
 def _dashboard_get_html(path, timeout=45):
@@ -1160,23 +1268,32 @@ def _dashboard_get_html(path, timeout=45):
         },
     )
     retryable_http_statuses = {429, 500, 502, 503, 504}
-    last_error = None
-    for attempt in range(1, DASHBOARD_REQUEST_ATTEMPTS + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
-            return raw.decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            if exc.code not in retryable_http_statuses:
-                raise RuntimeError(f"HTTP {exc.code}: {url}") from exc
-            last_error = RuntimeError(f"HTTP {exc.code}: {url}")
-        except urllib.error.URLError as exc:
-            last_error = RuntimeError(f"连接失败: {exc.reason}")
 
-        if attempt < DASHBOARD_REQUEST_ATTEMPTS:
-            time.sleep(DASHBOARD_RETRY_DELAY_SECONDS * attempt)
+    def fetch():
+        last_error = None
+        for attempt in range(1, DASHBOARD_REQUEST_ATTEMPTS + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    raw = response.read()
+                return raw.decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                if exc.code not in retryable_http_statuses:
+                    raise RuntimeError(f"HTTP {exc.code}: {url}") from exc
+                last_error = RuntimeError(f"HTTP {exc.code}: {url}")
+            except urllib.error.URLError as exc:
+                last_error = RuntimeError(f"连接失败: {exc.reason}")
 
-    raise last_error
+            if attempt < DASHBOARD_REQUEST_ATTEMPTS:
+                time.sleep(DASHBOARD_RETRY_DELAY_SECONDS * attempt)
+
+        raise last_error
+
+    return cached_call(
+        "comptox_dashboard_html",
+        "v1",
+        {"base": DEFAULT_DASHBOARD_BASE, "path": path},
+        fetch,
+    )
 
 
 def _api_is_configured(api_base):

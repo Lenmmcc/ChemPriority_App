@@ -1,10 +1,11 @@
 import re
+import textwrap
 import unicodedata
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Wedge
 from scipy.stats import spearmanr
 
 
@@ -36,6 +37,18 @@ COLOR_PALETTE = [
     "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
     "#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e",
 ]
+
+R_STYLE_TOXPI_LABELS = {
+    "peak_area": "Peak area",
+    "pbm": "PBM scores",
+    "df": "DF",
+}
+
+R_STYLE_TOXPI_COLORS = {
+    "Peak area": "#00A946",
+    "PBM scores": "#FF9600",
+    "DF": "#406CDC",
+}
 
 RENAME_DICT = {
     "hERG Blockers-hERG": "hERG",
@@ -419,6 +432,141 @@ def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, tox
     return fig
 
 
+def generate_r_style_toxpi_plot(
+    toxpi_agg,
+    custom_weights=None,
+    toxic_cols=None,
+    n_cols=5,
+    figsize=(10, 8),
+    label_wrap_width=None,
+):
+    """Draw the PA/PBM/DF ToxPi radial chart with the original R grid layout."""
+    toxic_cols = get_toxic_cols_from_frame(toxpi_agg, toxic_cols)
+    norm_weights_dict = normalize_weights(custom_weights, toxic_cols=toxic_cols)
+    metric_colors = _metric_colors(toxic_cols)
+    metric_labels = [_r_style_metric_label(col) for col in toxic_cols]
+
+    plot_df = toxpi_agg.copy()
+    if "toxpi" in plot_df.columns:
+        plot_df = plot_df.sort_values("toxpi", ascending=False, na_position="last")
+    plot_df = plot_df.reset_index(drop=True)
+
+    n_compounds = len(plot_df)
+    n_cols = max(1, int(n_cols))
+    n_rows = max(1, int(np.ceil(max(n_compounds, 1) / n_cols)))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.15)
+
+    x_spacing = 3.5
+    y_spacing = -5.2 if label_wrap_width else -4.5
+    inner_radius = 0.2
+    radius_scale = 1.2
+
+    start_angle = 0.0
+    angles = []
+    for col in toxic_cols:
+        width = norm_weights_dict[col] * 360.0
+        angles.append((col, start_angle, start_angle + width))
+        start_angle += width
+
+    for idx, row_data in plot_df.iterrows():
+        row = idx // n_cols
+        col = idx % n_cols
+        x = col * x_spacing
+        y = row * y_spacing
+
+        for toxic_col, theta1, theta2 in angles:
+            norm_col = f"norm_{toxic_col}"
+            norm_value = pd.to_numeric(pd.Series([row_data.get(norm_col, 0.0)]), errors="coerce").iloc[0]
+            norm_value = 0.0 if pd.isna(norm_value) else max(0.0, float(norm_value))
+            outer_radius = norm_value * radius_scale
+            if outer_radius <= inner_radius:
+                continue
+            label = _r_style_metric_label(toxic_col)
+            wedge = Wedge(
+                center=(x, y),
+                r=outer_radius,
+                theta1=theta1,
+                theta2=theta2,
+                width=outer_radius - inner_radius,
+                facecolor=R_STYLE_TOXPI_COLORS.get(label, metric_colors[toxic_col]),
+                edgecolor="white",
+                linewidth=0.3,
+            )
+            ax.add_patch(wedge)
+
+        compound_label = _portable_label(row_data.get("compound", ""), f"Compound {idx + 1}")
+        if label_wrap_width:
+            compound_label = _wrap_portable_label(compound_label, int(label_wrap_width))
+        label_fontsize = 7.2 if label_wrap_width else 8.5
+        ax.text(
+            x,
+            y - 2,
+            compound_label,
+            fontsize=label_fontsize,
+            ha="center",
+            va="center",
+            fontweight="bold",
+            linespacing=0.8,
+        )
+
+        label_lines = compound_label.count("\n") + 1
+        score_y = y - 2.5
+        if label_wrap_width:
+            score_y -= max(0, label_lines - 1) * 0.3
+        score = pd.to_numeric(pd.Series([row_data.get("toxpi", np.nan)]), errors="coerce").iloc[0]
+        score_label = "ToxPi: NA" if pd.isna(score) else f"ToxPi: {float(score):.2f}"
+        ax.text(
+            x,
+            score_y,
+            score_label,
+            fontsize=label_fontsize,
+            color="black",
+            fontweight="bold",
+            ha="center",
+            va="center",
+        )
+
+    x_max = (n_cols - 1) * x_spacing
+    y_min = (n_rows - 1) * y_spacing - 3.0
+    ax.set_xlim(-1.6, x_max + 1.6)
+    ax.set_ylim(y_min, 1.6)
+    ax.set_aspect("equal", adjustable="box")
+    ax.axis("off")
+
+    fig.suptitle("ToxPi Scores for Priority Pollutants", fontsize=12, y=0.96)
+    legend_handles = [
+        Patch(
+            facecolor=R_STYLE_TOXPI_COLORS.get(label, metric_colors[col]),
+            label=label,
+        )
+        for col, label in zip(toxic_cols, metric_labels)
+    ]
+    fig.legend(
+        handles=legend_handles,
+        title="Metric",
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.06),
+        ncol=min(len(legend_handles), n_cols),
+        fontsize=8.5,
+        title_fontsize=8.5,
+        frameon=False,
+        handletextpad=0.5,
+        columnspacing=1.2,
+    )
+    fig.text(
+        0.98,
+        0.02,
+        "Radial length = Normalized metric value | Angular width = Weight",
+        fontsize=7.5,
+        color="#333333",
+        ha="right",
+        va="bottom",
+    )
+    return fig
+
+
 def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
     compounds = toxpi_agg["compound"].values
     compound_labels = [
@@ -524,6 +672,17 @@ def _metric_colors(toxic_cols):
                 int(rgba[2] * 255),
             )
     return colors
+
+
+def _r_style_metric_label(column):
+    return R_STYLE_TOXPI_LABELS.get(str(column), _portable_label(column, str(column)))
+
+
+def _wrap_portable_label(label, width):
+    if width <= 0:
+        return label
+    lines = textwrap.wrap(label, width=width, break_long_words=True, break_on_hyphens=True)
+    return "\n".join(lines) if lines else label
 
 
 def _portable_label(value, fallback):

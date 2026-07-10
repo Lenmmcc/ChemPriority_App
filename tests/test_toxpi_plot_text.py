@@ -2,11 +2,16 @@ import io
 import unittest
 import warnings
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from src.toxpi_calc import (
     generate_multi_toxpi_plot,
+    generate_r_style_toxpi_plot,
     generate_toxpi_bar_plot,
     run_sensitivity_analysis,
 )
@@ -72,6 +77,58 @@ class ToxPiPlotTextTests(unittest.TestCase):
             any("\u4e00" <= char <= "\u9fff" for text in text_values for char in text),
             text_values,
         )
+
+    def test_r_style_toxpi_plot_uses_single_canvas_grid(self):
+        norm_peak_area = np.linspace(1.0, 0.35, 15)
+        norm_pbm = np.linspace(0.9, 0.3, 15)
+        norm_df = np.linspace(0.8, 0.25, 15)
+        toxpi_rows = pd.DataFrame(
+            {
+                "compound": [f"Compound {index:02d}" for index in range(15)],
+                "toxpi": (norm_peak_area * 0.4) + (norm_pbm * 0.4) + (norm_df * 0.2),
+                "norm_peak_area": norm_peak_area,
+                "norm_pbm": norm_pbm,
+                "norm_df": norm_df,
+            }
+        )
+        toxpi_rows.attrs["toxic_cols"] = ["peak_area", "pbm", "df"]
+
+        figure = generate_r_style_toxpi_plot(
+            toxpi_rows,
+            custom_weights={"peak_area": 0.4, "pbm": 0.4, "df": 0.2},
+            toxic_cols=["peak_area", "pbm", "df"],
+        )
+
+        try:
+            self.assertEqual(len(figure.axes), 1)
+            axis = figure.axes[0]
+            self.assertEqual(axis.name, "rectilinear")
+            self.assertEqual(tuple(round(value, 1) for value in figure.get_size_inches()), (10.0, 8.0))
+            self.assertEqual(len(axis.patches), 45)
+            self.assertGreater(axis.patches[0].r, axis.patches[-3].r)
+            self.assertAlmostEqual(axis.patches[0].r, 1.2)
+            self.assertAlmostEqual(axis.patches[-3].r, 0.42)
+
+            compound_texts = [text for text in axis.texts if text.get_text().startswith("Compound")]
+            score_texts = [text for text in axis.texts if text.get_text().startswith("ToxPi:")]
+            self.assertEqual(len(compound_texts), 15)
+            self.assertEqual(len(score_texts), 15)
+            self.assertEqual(compound_texts[0].get_position(), (0.0, -2.0))
+            self.assertEqual(compound_texts[4].get_position(), (14.0, -2.0))
+            self.assertEqual(compound_texts[5].get_position(), (0.0, -6.5))
+            self.assertEqual(score_texts[0].get_position(), (0.0, -2.5))
+
+            legend = figure.legends[0]
+            self.assertEqual(legend.get_title().get_text(), "Metric")
+            self.assertEqual([text.get_text() for text in legend.get_texts()], ["Peak area", "PBM scores", "DF"])
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                output = io.BytesIO()
+                figure.savefig(output, format="png", dpi=300)
+                self.assertGreater(len(output.getvalue()), 1_000)
+        finally:
+            plt.close(figure)
 
 
 if __name__ == "__main__":

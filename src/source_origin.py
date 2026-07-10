@@ -8,6 +8,7 @@ import urllib.request
 
 import pandas as pd
 
+from src.batch_runner import run_ordered_batch
 from src.comptox_use import (
     DEFAULT_API_BASE as DEFAULT_COMPTOX_API_BASE,
     DEFAULT_DASHBOARD_BASE,
@@ -15,6 +16,7 @@ from src.comptox_use import (
 )
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.identifier_resolver import normalize_input_columns
+from src.query_cache import cache_control, cached_call
 
 
 REQUIRED_IDENTIFIER_COLUMNS = ["compound", "cas", "ec", "smiles", "dtxsid", "echa_id"]
@@ -198,6 +200,96 @@ def run_source_origin_batch(
         _ensure_columns(pd.DataFrame(summary_rows), SUMMARY_COLUMNS),
         _ensure_columns(pd.DataFrame(evidence_rows), EVIDENCE_COLUMNS),
         _ensure_columns(pd.DataFrame(warning_rows), WARNING_COLUMNS),
+    )
+
+
+_run_source_origin_batch_sequential = run_source_origin_batch
+
+
+def run_source_origin_batch(
+    input_df,
+    comptox_summary_df=None,
+    comptox_candidates_df=None,
+    echa_summary_df=None,
+    echa_candidates_df=None,
+    echa_dossiers_df=None,
+    comptox_api_base=DEFAULT_COMPTOX_API_BASE,
+    comptox_api_key=None,
+    echa_base=DEFAULT_ECHA_BASE,
+    timeout=60,
+    delay_seconds=0.2,
+    progress_callback=None,
+    max_workers=1,
+    cache_enabled=True,
+):
+    if int(max_workers or 1) <= 1:
+        with cache_control(cache_enabled):
+            return _run_source_origin_batch_sequential(
+                input_df,
+                comptox_summary_df=comptox_summary_df,
+                comptox_candidates_df=comptox_candidates_df,
+                echa_summary_df=echa_summary_df,
+                echa_candidates_df=echa_candidates_df,
+                echa_dossiers_df=echa_dossiers_df,
+                comptox_api_base=comptox_api_base,
+                comptox_api_key=comptox_api_key,
+                echa_base=echa_base,
+                timeout=timeout,
+                delay_seconds=delay_seconds,
+                progress_callback=progress_callback,
+            )
+
+    clean_df = normalize_source_input_columns(input_df)
+    items = list(clean_df.iterrows())
+
+    def process_row(item):
+        _, row = item
+        return _run_source_origin_batch_sequential(
+            pd.DataFrame([row]),
+            comptox_summary_df=comptox_summary_df,
+            comptox_candidates_df=comptox_candidates_df,
+            echa_summary_df=echa_summary_df,
+            echa_candidates_df=echa_candidates_df,
+            echa_dossiers_df=echa_dossiers_df,
+            comptox_api_base=comptox_api_base,
+            comptox_api_key=comptox_api_key,
+            echa_base=echa_base,
+            timeout=timeout,
+            delay_seconds=0,
+            progress_callback=None,
+        )
+
+    with cache_control(cache_enabled):
+        batch_results = run_ordered_batch(
+            items,
+            process_row,
+            max_workers=max_workers,
+            delay_seconds=delay_seconds,
+            progress_callback=progress_callback,
+            label_func=lambda item: _display_compound(item[1]),
+        )
+
+    summary_frames = []
+    evidence_frames = []
+    warning_frames = []
+    for result in batch_results:
+        if result.error is not None:
+            row = items[result.index][1]
+            summary_frames.append(pd.DataFrame([_summary_row(row, [])]))
+            warning_frames.append(pd.DataFrame([_warning_row(row, "Source origin", "batch_worker", str(result.error))]))
+            continue
+        summary_df, evidence_df, warnings_df = result.value
+        summary_frames.append(summary_df)
+        evidence_frames.append(evidence_df)
+        warning_frames.append(warnings_df)
+
+    summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+    evidence = pd.concat(evidence_frames, ignore_index=True) if evidence_frames else pd.DataFrame()
+    warnings = pd.concat(warning_frames, ignore_index=True) if warning_frames else pd.DataFrame()
+    return (
+        _ensure_columns(summary, SUMMARY_COLUMNS),
+        _ensure_columns(evidence, EVIDENCE_COLUMNS),
+        _ensure_columns(warnings, WARNING_COLUMNS),
     )
 
 
@@ -709,20 +801,29 @@ def _natural_query_terms(row, include_cas=True):
 
 
 def _get_json(url, params=None, timeout=60):
-    url = _build_url(url, params=params)
+    built_url = _build_url(url, params=params)
     request = urllib.request.Request(
-        url,
+        built_url,
         headers={"Accept": "application/json", "User-Agent": "ChemPriority source-origin module"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")[:500]
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"连接失败: {exc.reason}") from exc
-    return json.loads(raw.decode("utf-8", errors="replace"))
+
+    def fetch():
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"连接失败: {exc.reason}") from exc
+        return json.loads(raw.decode("utf-8", errors="replace"))
+
+    return cached_call(
+        "source_origin_get",
+        "v1",
+        {"url": built_url},
+        fetch,
+    )
 
 
 def _get_json_with_retry(
@@ -753,15 +854,24 @@ def _post_json(url, payload, timeout=60):
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")[:500]
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"连接失败: {exc.reason}") from exc
-    return json.loads(raw.decode("utf-8", errors="replace"))
+
+    def fetch():
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"连接失败: {exc.reason}") from exc
+        return json.loads(raw.decode("utf-8", errors="replace"))
+
+    return cached_call(
+        "source_origin_post",
+        "v1",
+        {"url": url, "payload": payload},
+        fetch,
+    )
 
 
 def _post_json_with_retry(

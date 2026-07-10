@@ -60,6 +60,7 @@ REPORTED_FUNCTIONAL_PRESENCE_COLUMNS = [
 ]
 
 HIGH_CONFIDENCE_PROBABILITY_THRESHOLD = 0.8
+TOP_PREDICTED_PIE_MAX_CATEGORIES = 12
 
 
 def extract_use_rose_data(summary_df, source_label, use_prefix="用途"):
@@ -555,6 +556,84 @@ def generate_top_predicted_functional_use_lollipop_plot(plot_df, title):
     return fig
 
 
+def generate_top_predicted_functional_use_pie_plot(plot_df, title):
+    if plot_df is None or plot_df.empty:
+        raise ValueError("No top predicted functional-use data is available.")
+
+    summary = _summarize_top_predicted_functional_use(plot_df)
+    if summary.empty:
+        raise ValueError("No valid top predicted functional-use category is available.")
+
+    total_count = int(summary["compound_count"].sum())
+    counts = summary["compound_count"].astype(float).to_numpy()
+    color_map = _build_use_color_map(summary["use_key"].tolist())
+    colors = [color_map[value] for value in summary["use_key"]]
+
+    fig, ax = plt.subplots(figsize=(8.4, 6.2))
+    fig.subplots_adjust(left=0.05, right=0.72, top=0.86, bottom=0.10)
+
+    wedges, _, autotexts = ax.pie(
+        counts,
+        colors=colors,
+        startangle=90,
+        counterclock=False,
+        autopct=lambda pct: f"{pct:.1f}%" if pct >= 1.0 else "",
+        pctdistance=0.78,
+        wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 1.2},
+        textprops={"fontsize": 9, "fontweight": "bold", "color": "#111111"},
+    )
+    for autotext in autotexts:
+        autotext.set_fontsize(9)
+        autotext.set_fontweight("bold")
+
+    ax.text(
+        0,
+        0,
+        f"Total compounds\n{total_count}",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#111111",
+    )
+    ax.set_title(
+        _ascii_label(title, "Top Predicted Functional Use Distribution"),
+        fontsize=14,
+        fontweight="bold",
+        pad=18,
+    )
+    ax.set_aspect("equal")
+
+    legend_labels = [
+        f"{row.display_label} ({int(row.compound_count)}, {row.percent:.1f}%)"
+        for row in summary.itertuples(index=False)
+    ]
+    legend_handles = [
+        Patch(facecolor=color, edgecolor="white", label=label)
+        for color, label in zip(colors, legend_labels)
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="center right",
+        bbox_to_anchor=(0.98, 0.52),
+        frameon=False,
+        fontsize=9,
+        title="Functional use",
+        title_fontsize=10,
+        handletextpad=0.6,
+    )
+    fig.text(
+        0.98,
+        0.02,
+        "Slice size = number of compounds by top predicted functional use.",
+        ha="right",
+        va="bottom",
+        fontsize=8.5,
+        color="#333333",
+    )
+    return fig
+
+
 def generate_reported_functional_use_presence_plot(plot_df, title):
     if plot_df is None or plot_df.empty:
         raise ValueError("No reported functional-use evidence is available.")
@@ -667,6 +746,69 @@ def figure_to_pdf_bytes(fig):
     fig.savefig(buffer, format="pdf", dpi=300, bbox_inches="tight", facecolor="white")
     buffer.seek(0)
     return buffer
+
+
+def _summarize_top_predicted_functional_use(plot_df):
+    data = plot_df.copy()
+    data["_display_label"] = [
+        _ascii_label(
+            _first_clean(row.get("display_label"), row.get("use_label"), row.get("use_cn")),
+            f"Use category {position}",
+        )
+        for position, (_, row) in enumerate(data.iterrows(), start=1)
+    ]
+    data["_use_key"] = [
+        _normalize_label_key(_first_clean(row.get("use_label"), row.get("display_label"), row.get("use_cn")))
+        or f"use-category-{position}"
+        for position, (_, row) in enumerate(data.iterrows(), start=1)
+    ]
+    if "compound" in data.columns:
+        data["_compound_key"] = [
+            _normalize_label_key(value) or f"compound-{index + 1}"
+            for index, value in enumerate(data["compound"])
+        ]
+    else:
+        data["_compound_key"] = [f"compound-{index + 1}" for index in range(len(data))]
+
+    summary_rows = []
+    for index, (use_key, group) in enumerate(data.groupby("_use_key", sort=False), start=1):
+        display_label = _ascii_label(group["_display_label"].iloc[0], f"Use category {index}")
+        summary_rows.append(
+            {
+                "use_key": use_key,
+                "display_label": display_label,
+                "compound_count": int(group["_compound_key"].nunique()),
+            }
+        )
+
+    summary = pd.DataFrame(summary_rows)
+    if summary.empty:
+        return summary
+    summary = summary.sort_values(["compound_count", "display_label"], ascending=[False, True]).reset_index(drop=True)
+
+    max_categories = max(2, TOP_PREDICTED_PIE_MAX_CATEGORIES)
+    if len(summary) > max_categories:
+        kept = summary.head(max_categories - 1).copy()
+        other = summary.iloc[max_categories - 1 :]
+        summary = pd.concat(
+            [
+                kept,
+                pd.DataFrame(
+                    [
+                        {
+                            "use_key": "__other__",
+                            "display_label": "Others",
+                            "compound_count": int(other["compound_count"].sum()),
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+
+    total_count = float(summary["compound_count"].sum())
+    summary["percent"] = summary["compound_count"].astype(float) / total_count * 100 if total_count else 0.0
+    return summary
 
 
 def _empty_plot_data():

@@ -11,6 +11,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.batch_runner import run_ordered_batch
+from src.query_cache import cache_control, cached_call
+
 
 REQUIRED_COLUMNS = ["compound", "smiles"]
 OPTIONAL_COLUMNS = ["cas"]
@@ -344,6 +347,19 @@ def call_epi_web_api(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, cas=None):
     cas = _clean_optional_text(cas)
     if cas:
         request_params["cas"] = cas
+    return cached_call(
+        "epi_web_submit",
+        "v1",
+        {"api_url": api_url, "params": request_params},
+        lambda: _call_epi_web_api_uncached(smiles, api_url=api_url, timeout=timeout, cas=cas),
+    )
+
+
+def _call_epi_web_api_uncached(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, cas=None):
+    request_params = {"smiles": smiles}
+    cas = _clean_optional_text(cas)
+    if cas:
+        request_params["cas"] = cas
     params = urllib.parse.urlencode(request_params)
     separator = "&" if "?" in api_url else "?"
     url = f"{api_url}{separator}{params}"
@@ -365,17 +381,33 @@ def call_epi_web_api(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, cas=None):
         raise RuntimeError(f"无法连接 EPI Web Suite: {exc.reason}") from exc
 
 
-def run_epi_web_batch(input_df, api_url=DEFAULT_EPI_WEB_API, timeout=90, delay_seconds=0.2, progress_callback=None):
+def run_epi_web_batch(
+    input_df,
+    api_url=DEFAULT_EPI_WEB_API,
+    timeout=90,
+    delay_seconds=0.2,
+    progress_callback=None,
+    max_workers=1,
+    cache_enabled=True,
+):
     rows = []
     raw_rows = []
     errors = []
-    total = len(input_df)
+    items = list(input_df.iterrows())
 
-    for idx, (_, row) in enumerate(input_df.iterrows(), start=1):
+    def display_compound(item):
+        _, row = item
+        return str(row.get("compound", "")).strip()
+
+    def process_row(item):
+        _, row = item
         compound = str(row.get("compound", "")).strip()
         smiles = str(row.get("smiles", "")).strip()
         cas = _clean_optional_text(row.get("cas"))
         query_note = ""
+        row_rows = []
+        row_raw_rows = []
+        row_errors = []
         try:
             raw = call_epi_web_api(smiles, cas=cas, api_url=api_url, timeout=timeout)
         except Exception as exc:
@@ -386,21 +418,40 @@ def run_epi_web_batch(input_df, api_url=DEFAULT_EPI_WEB_API, timeout=90, delay_s
                     query_note = f"CAS 查询失败，已回退到 SMILES：{error_text}"
                 except Exception as fallback_exc:
                     fallback_error = f"{error_text}; SMILES 回退失败：{fallback_exc}"
-                    _append_failed_epi_row(rows, errors, compound, smiles, cas, fallback_error)
+                    _append_failed_epi_row(row_rows, row_errors, compound, smiles, cas, fallback_error)
                     raw = None
                     query_note = ""
             else:
-                _append_failed_epi_row(rows, errors, compound, smiles, cas, error_text)
+                _append_failed_epi_row(row_rows, row_errors, compound, smiles, cas, error_text)
                 raw = None
                 query_note = ""
 
         if raw is not None:
-            _append_successful_epi_row(rows, raw_rows, compound, smiles, cas, raw, query_note=query_note)
+            _append_successful_epi_row(row_rows, row_raw_rows, compound, smiles, cas, raw, query_note=query_note)
+        return row_rows, row_raw_rows, row_errors
 
-        if progress_callback:
-            progress_callback(idx, total, compound)
-        if delay_seconds > 0 and idx < total:
-            time.sleep(delay_seconds)
+    with cache_control(cache_enabled):
+        batch_results = run_ordered_batch(
+            items,
+            process_row,
+            max_workers=max_workers,
+            delay_seconds=delay_seconds,
+            progress_callback=progress_callback,
+            label_func=display_compound,
+        )
+
+    for result, item in zip(batch_results, items):
+        if result.error is not None:
+            _, row = item
+            compound = str(row.get("compound", "")).strip()
+            smiles = str(row.get("smiles", "")).strip()
+            cas = _clean_optional_text(row.get("cas"))
+            _append_failed_epi_row(rows, errors, compound, smiles, cas, str(result.error))
+            continue
+        row_rows, row_raw_rows, row_errors = result.value
+        rows.extend(row_rows)
+        raw_rows.extend(row_raw_rows)
+        errors.extend(row_errors)
 
     return pd.DataFrame(rows), pd.DataFrame(raw_rows), pd.DataFrame(errors)
 

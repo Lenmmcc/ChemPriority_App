@@ -64,16 +64,15 @@ from src.identifier_resolver import (  # noqa: E402
     validate_input as validate_resolver_input,
 )
 from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
+from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 from src.use_rose_plot import (  # noqa: E402
-    build_epa_echa_combined_rose_data,
     extract_reported_functional_use_presence_data,
     extract_candidate_use_plot_data,
     extract_top_predicted_functional_use_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
-    generate_combined_use_rose_plot,
     generate_reported_functional_use_presence_plot,
-    generate_top_predicted_functional_use_lollipop_plot,
+    generate_top_predicted_functional_use_pie_plot,
     generate_use_rose_plot,
 )
 
@@ -83,6 +82,25 @@ def show_dataframe(df):
         st.dataframe(df, width="stretch")
     except TypeError:
         st.dataframe(df, use_container_width=True)
+
+
+def render_speedup_settings(key_prefix, default_workers):
+    with st.expander("加速设置", expanded=False):
+        cache_enabled = st.checkbox("启用本地查询缓存", value=True, key=f"{key_prefix}_query_cache_enabled")
+        max_workers = st.number_input(
+            "并发数",
+            min_value=1,
+            max_value=8,
+            value=int(default_workers),
+            step=1,
+            key=f"{key_prefix}_query_max_workers",
+            help="默认使用保守并发；遇到外部服务限流时可调低。",
+        )
+        st.caption(f"缓存文件：{current_cache_path()}")
+        if st.button("清理本地查询缓存", key=f"{key_prefix}_clear_query_cache"):
+            clear_query_cache()
+            st.success("本地查询缓存已清理。")
+    return bool(cache_enabled), int(max_workers)
 
 
 INPUT_CACHE_KEYS = (
@@ -162,6 +180,64 @@ def select_existing_columns(df, columns):
     return df[[column for column in columns if column in df.columns]]
 
 
+def table_column_or_na(df, column):
+    if column in df.columns:
+        return df[column]
+    return pd.Series(pd.NA, index=df.index)
+
+
+def dataframe_to_excel_buffer(df, sheet_name="Sheet1"):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+    buffer.seek(0)
+    return buffer
+
+
+def build_reported_use_combined_table(comptox_candidates_df=None, echa_candidates_df=None):
+    frames = []
+
+    epa_reported = comptox_build_functional_use_table(
+        comptox_candidates_df,
+        functional_source="reported",
+    )
+    if not epa_reported.empty:
+        frames.append(
+            pd.DataFrame(
+                {
+                    "source": "EPA reported",
+                    "compound": epa_reported["compound"],
+                    "reported_use": epa_reported["英文功能用途"],
+                    "use_category": epa_reported["功能用途"],
+                    "evidence_count": epa_reported["evidence_count"],
+                    "source_link": epa_reported["CompTox功能用途链接"],
+                }
+            )
+        )
+
+    if isinstance(echa_candidates_df, pd.DataFrame) and not echa_candidates_df.empty:
+        echa = echa_candidates_df.copy()
+        reported_use = table_column_or_na(echa, "use_en")
+        if reported_use.isna().all():
+            reported_use = table_column_or_na(echa, "raw_use")
+        frames.append(
+            pd.DataFrame(
+                {
+                    "source": "ECHA reported",
+                    "compound": table_column_or_na(echa, "compound"),
+                    "reported_use": reported_use,
+                    "use_category": table_column_or_na(echa, "use_cn"),
+                    "evidence_count": table_column_or_na(echa, "evidence_count"),
+                    "source_link": table_column_or_na(echa, "record_url"),
+                }
+            )
+        )
+
+    if not frames:
+        return pd.DataFrame(columns=["source", "compound", "reported_use", "use_category", "evidence_count", "source_link"])
+    return pd.concat(frames, ignore_index=True)
+
+
 st.set_page_config(
     page_title="化合物用途查询 - ChemPriority",
     page_icon="🔎",
@@ -205,8 +281,8 @@ with right_col:
     )
 
 st.info(
-    "只有 SMILES 或 CAS 时，建议先运行“标识符补全”。系统会先用 PubChem 解析 CAS 或 SMILES，"
-    "再用 EPA/ECHA 补全用途查询所需的 DTXSID、CAS、EC 和 ECHA ID。"
+    "只有化合物名称时，建议先运行“标识符补全”。系统会默认用 PubChem、EPA CompTox 和 ECHA CHEM 分别按名称检索，"
+    "PubChem 结果优先用于 CID、SMILES 和 CAS，再用 EPA/ECHA 补全用途查询所需的 DTXSID、EC 和 ECHA ID。"
 )
 
 if uploaded_file is not None:
@@ -321,8 +397,8 @@ with tab_resolver:
     st.subheader("2. 标识符补全")
     st.write(
         "适用于只有 SMILES、CAS 或名称、缺少 EC/DTXSID/ECHA ID 的情况。"
-        "系统会先用 PubChem 解析 CAS 或 SMILES，再尝试 EPA 补 DTXSID/CAS，"
-        "最后按 ECHA ID、EC、CAS、SMILES、名称的顺序尝试补 ECHA ID。"
+        "有名称时会默认用 PubChem、EPA CompTox 和 ECHA CHEM 分别按名称检索；"
+        "PubChem 结果优先用于 CID、SMILES 和 CAS，EPA/ECHA 继续补 DTXSID、EC 和 ECHA ID。"
     )
 
     if not resolver_valid:
@@ -337,10 +413,10 @@ with tab_resolver:
             help="只有 SMILES 时，EPA 通常比 ECHA 更适合作为第一步匹配。",
         )
         use_pubchem_resolver = st.checkbox(
-            "使用 PubChem 从 CAS 或 SMILES 预补全",
+            "使用 PubChem 从名称/CAS/SMILES 预补全",
             value=True,
             key="resolver_use_pubchem",
-            help="优先用 CAS、没有 CAS 时用 SMILES，从 PubChem 获得 CID、SMILES、名称和可用同义标识符。",
+            help="有化合物名称时优先用名称；否则使用 CAS 或 SMILES，从 PubChem 获得 CID、SMILES、名称和可用同义标识符。",
         )
         use_chemspider_resolver = st.checkbox(
             "使用 ChemSpider 补全 CAS/名称",
@@ -399,6 +475,8 @@ with tab_resolver:
             key="resolver_pubchem_base",
         )
 
+    resolver_cache_enabled, resolver_max_workers = render_speedup_settings("resolver", 3)
+
     with st.form("resolver_run_form", clear_on_submit=True):
         raw_chemspider_api_key = ""
         if use_chemspider_resolver:
@@ -443,6 +521,8 @@ with tab_resolver:
                 use_chemspider=chemspider_options.enabled,
                 timeout=int(resolver_timeout_seconds),
                 delay_seconds=float(resolver_delay_seconds),
+                max_workers=int(resolver_max_workers),
+                cache_enabled=bool(resolver_cache_enabled),
                 progress_callback=update_resolver_progress,
             )
 
@@ -537,6 +617,7 @@ with tab_epa:
         delay_seconds = st.number_input("请求间隔（秒）", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
 
     dashboard_fallback = True
+    comptox_cache_enabled, comptox_max_workers = render_speedup_settings("comptox", 3)
 
     if st.button("开始查询用途", type="primary", disabled=not comptox_valid):
         progress_bar = st.progress(0)
@@ -554,6 +635,8 @@ with tab_epa:
                 timeout=int(timeout_seconds),
                 delay_seconds=float(delay_seconds),
                 dashboard_fallback=dashboard_fallback,
+                max_workers=int(comptox_max_workers),
+                cache_enabled=bool(comptox_cache_enabled),
                 progress_callback=update_progress,
             )
 
@@ -665,6 +748,8 @@ with tab_echa:
             help="数值越大证据越全，但 ECHA 查询会更慢。",
         )
 
+    echa_cache_enabled, echa_max_workers = render_speedup_settings("echa_use", 2)
+
     if st.button("开始 ECHA 查询用途", type="primary", disabled=not echa_valid):
         progress_bar = st.progress(0)
         status_box = st.empty()
@@ -680,6 +765,8 @@ with tab_echa:
                 timeout=int(echa_timeout_seconds),
                 delay_seconds=float(echa_delay_seconds),
                 max_dossiers=int(max_dossiers),
+                max_workers=int(echa_max_workers),
+                cache_enabled=bool(echa_cache_enabled),
                 progress_callback=update_echa_progress,
             )
 
@@ -754,6 +841,8 @@ with tab_echa_ghs:
             step=0.1,
         )
 
+    echa_ghs_cache_enabled, echa_ghs_max_workers = render_speedup_settings("echa_ghs", 2)
+
     if st.button("开始 ECHA GHS危害查询", type="primary", disabled=not echa_valid):
         progress_bar = st.progress(0)
         status_box = st.empty()
@@ -768,6 +857,8 @@ with tab_echa_ghs:
                 base_url=echa_base,
                 timeout=int(echa_ghs_timeout_seconds),
                 delay_seconds=float(echa_ghs_delay_seconds),
+                max_workers=int(echa_ghs_max_workers),
+                cache_enabled=bool(echa_ghs_cache_enabled),
                 progress_callback=update_echa_ghs_progress,
             )
 
@@ -830,6 +921,8 @@ with tab_source_origin:
             key="source_origin_delay_seconds",
         )
 
+    source_origin_cache_enabled, source_origin_max_workers = render_speedup_settings("source_origin", 2)
+
     if st.button("开始来源属性评估", type="primary", disabled=not source_origin_valid):
         progress_bar = st.progress(0)
         status_box = st.empty()
@@ -851,6 +944,8 @@ with tab_source_origin:
                 echa_base=echa_base,
                 timeout=int(source_origin_timeout_seconds),
                 delay_seconds=float(source_origin_delay_seconds),
+                max_workers=int(source_origin_max_workers),
+                cache_enabled=bool(source_origin_cache_enabled),
                 progress_callback=update_source_origin_progress,
             )
 
@@ -902,10 +997,10 @@ with tab_rose:
             "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
         }
         chart_sources["EPA CompTox 最高预测功能用途"] = {
-            "chart_type": "top_predicted_lollipop",
+            "chart_type": "top_predicted_pie",
             "source_label": "EPA FC",
             "candidates_df": comptox_candidates_df,
-            "title": "EPA CompTox Top Predicted Functional Use",
+            "title": "EPA CompTox Top Predicted Functional Use Distribution",
             "file_prefix": "EPA_Top_Predicted_Functional_Use",
         }
         chart_sources["EPA CompTox reported 功能用途证据"] = {
@@ -927,15 +1022,16 @@ with tab_rose:
             "file_prefix": "ECHA_Use_Rose_Plot",
         }
 
-    combined_rose_df = build_epa_echa_combined_rose_data(comptox_candidates_df, echa_candidates_df)
-    if not combined_rose_df.empty:
-        chart_sources["EPA + ECHA Combined"] = {
-            "chart_type": "combined_rose",
-            "source_label": "combined",
-            "rose_df": combined_rose_df,
-            "title": "EPA and ECHA Combined Use Plot",
-            "file_prefix": "EPA_ECHA_Combined_Use_Plot",
-        }
+    reported_combined_df = build_reported_use_combined_table(comptox_candidates_df, echa_candidates_df)
+    if not reported_combined_df.empty:
+        st.subheader("EPA reported + ECHA reported 合并表")
+        show_dataframe(reported_combined_df)
+        st.download_button(
+            "下载 EPA reported + ECHA reported 合并表",
+            data=dataframe_to_excel_buffer(reported_combined_df, sheet_name="Reported_Use_Combined"),
+            file_name="EPA_ECHA_Reported_Use_Combined.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     if not chart_sources:
         st.info("请先完成 EPA CompTox 查询或 ECHA 查询。查询完成后，这里会显示用途图表。")
@@ -947,9 +1043,7 @@ with tab_rose:
             key="use_rose_source",
         )
         source_config = chart_sources[selected_source]
-        if source_config["chart_type"] == "combined_rose":
-            chart_df = source_config["rose_df"]
-        elif source_config["chart_type"] == "top_predicted_lollipop":
+        if source_config["chart_type"] == "top_predicted_pie":
             chart_df = extract_top_predicted_functional_use_data(
                 source_config["candidates_df"],
                 source_label=source_config["source_label"],
@@ -988,7 +1082,7 @@ with tab_rose:
                     "compound_label",
                     "use_label",
                 ]
-                if source_config["chart_type"] == "top_predicted_lollipop":
+                if source_config["chart_type"] == "top_predicted_pie":
                     chart_columns.extend(["display_label", "probability"])
                 elif source_config["chart_type"] == "reported_presence":
                     chart_columns.append("presence")
@@ -998,10 +1092,8 @@ with tab_rose:
                     chart_columns.extend(["angle_fraction", "angle_basis"])
                 show_dataframe(chart_df[chart_columns])
 
-            if source_config["chart_type"] == "combined_rose":
-                fig = generate_combined_use_rose_plot(chart_df, source_config["title"])
-            elif source_config["chart_type"] == "top_predicted_lollipop":
-                fig = generate_top_predicted_functional_use_lollipop_plot(chart_df, source_config["title"])
+            if source_config["chart_type"] == "top_predicted_pie":
+                fig = generate_top_predicted_functional_use_pie_plot(chart_df, source_config["title"])
             elif source_config["chart_type"] == "reported_presence":
                 fig = generate_reported_functional_use_presence_plot(chart_df, source_config["title"])
             else:
@@ -1139,9 +1231,9 @@ with tab_notes:
             [
                 "标识符补全：",
                 "1. 优先保留输入表中已有的 CAS、EC、DTXSID 和 ECHA ID。",
-                "2. 使用 PubChem 优先从 CAS、没有 CAS 时从 SMILES 匹配 CID、SMILES、名称、EC 和 DTXSID。",
-                "3. 使用 EPA 尝试从 compound、CAS 或 SMILES 匹配 DTXSID 和 CAS。",
-                "4. 使用 ECHA 按 ECHA ID、EC、CAS、SMILES、名称顺序匹配 ECHA ID 和 EC。",
+                "2. 使用 PubChem 优先从名称、其次 CAS、再次 SMILES 匹配 CID、SMILES、名称、EC 和 DTXSID。",
+                "3. 有 compound 名称时，EPA 使用原始名称独立匹配 DTXSID；PubChem 已命中的 CAS/SMILES 不会阻止 EPA 检索。",
+                "4. 有 compound 名称时，ECHA 使用原始名称独立匹配 ECHA ID 和 EC；PubChem 已命中的 CAS/SMILES 不会阻止 ECHA 检索。",
                 "5. 补全完成后，EPA/ECHA 查询会自动使用补全后的标识符表。",
                 "",
                 "EPA 查询：",

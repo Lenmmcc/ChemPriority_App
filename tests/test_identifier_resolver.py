@@ -1,6 +1,9 @@
 import unittest
 import sys
+import json
+import tempfile
 import types
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -8,11 +11,14 @@ import pandas as pd
 from src.echa_use import resolve_substance
 from src.identifier_resolver import (
     _best_echa_query,
+    _pubchem_get_json,
     build_epi_input_workbook,
     resolve_pubchem_by_cas,
+    resolve_pubchem_by_name,
     run_identifier_completion_batch,
     resolve_chemspider,
 )
+from src.query_cache import use_cache_path
 
 
 class EchaSearchOrderTests(unittest.TestCase):
@@ -45,6 +51,87 @@ class EchaSearchOrderTests(unittest.TestCase):
 
 
 class PubChemCasTests(unittest.TestCase):
+    @patch("src.identifier_resolver.urllib.request.urlopen")
+    def test_pubchem_get_json_uses_query_cache(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = json.dumps({"IdentifierList": {"CID": [702]}}).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = _pubchem_get_json(
+                    "compound/name/Ethanol/cids/JSON",
+                    base_url="https://example.test/",
+                    timeout=1,
+                )
+                second = _pubchem_get_json(
+                    "compound/name/Ethanol/cids/JSON",
+                    base_url="https://example.test/",
+                    timeout=1,
+                )
+
+        self.assertEqual(first, {"IdentifierList": {"CID": [702]}})
+        self.assertEqual(second, {"IdentifierList": {"CID": [702]}})
+        urlopen.assert_called_once()
+
+    @patch("src.identifier_resolver._pubchem_get_json")
+    def test_resolve_pubchem_by_name_returns_cid_and_smiles(self, get_json):
+        get_json.side_effect = [
+            {"IdentifierList": {"CID": [702]}},
+            {
+                "PropertyTable": {
+                    "Properties": [
+                        {"IUPACName": "ethanol", "CanonicalSMILES": "CCO"}
+                    ]
+                }
+            },
+            {
+                "InformationList": {
+                    "Information": [{"Synonym": ["Ethanol", "64-17-5"]}]
+                }
+            },
+        ]
+
+        result = resolve_pubchem_by_name("Ethanol", base_url="https://example.test/")
+
+        self.assertEqual(result["pubchem_cid"], "702")
+        self.assertEqual(result["smiles"], "CCO")
+        self.assertEqual(result["cas"], "64-17-5")
+        self.assertEqual(result["status"], "Matched PubChem Name")
+        self.assertEqual(
+            get_json.call_args_list[0].args[0],
+            "compound/name/Ethanol/cids/JSON",
+        )
+
+    @patch("src.identifier_resolver._pubchem_get_json")
+    def test_resolve_pubchem_by_name_returns_formula_and_molecular_weight(self, get_json):
+        get_json.side_effect = [
+            {"IdentifierList": {"CID": [702]}},
+            {
+                "PropertyTable": {
+                    "Properties": [
+                        {
+                            "IUPACName": "ethanol",
+                            "CanonicalSMILES": "CCO",
+                            "MolecularFormula": "C2H6O",
+                            "MolecularWeight": 46.069,
+                        }
+                    ]
+                }
+            },
+            {
+                "InformationList": {
+                    "Information": [{"Synonym": ["Ethanol", "64-17-5"]}]
+                }
+            },
+        ]
+
+        result = resolve_pubchem_by_name("Ethanol", base_url="https://example.test/")
+
+        self.assertEqual(result["pubchem_formula"], "C2H6O")
+        self.assertEqual(result["pubchem_molecular_weight"], 46.069)
+        self.assertIn("MolecularFormula,MolecularWeight", get_json.call_args_list[1].args[0])
+
     @patch("src.identifier_resolver._pubchem_get_json")
     def test_resolve_pubchem_by_cas_returns_cid_and_smiles(self, get_json):
         get_json.side_effect = [
@@ -129,6 +216,168 @@ class ChemSpiderSelectionTests(unittest.TestCase):
 
 
 class IdentifierCompletionPubChemTests(unittest.TestCase):
+    @patch("src.identifier_resolver.resolve_pubchem_by_name")
+    def test_batch_uses_compound_name_before_other_pubchem_queries(self, resolve_by_name):
+        resolve_by_name.return_value = {
+            "pubchem_cid": "702",
+            "smiles": "CCO",
+            "pubchem_formula": "C2H6O",
+            "pubchem_molecular_weight": 46.069,
+            "preferred_name": "ethanol",
+            "cas": "64-17-5",
+            "ec": "",
+            "dtxsid": "",
+            "status": "Matched PubChem Name",
+            "message": "",
+        }
+
+        completed, warnings = run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"], "cas": ["7732-18-5"], "smiles": ["O"]}),
+            use_epa=False,
+            use_echa=False,
+            delay_seconds=0,
+        )
+
+        self.assertEqual(completed.loc[0, "pubchem_cid"], "702")
+        self.assertEqual(completed.loc[0, "pubchem_formula"], "C2H6O")
+        self.assertEqual(completed.loc[0, "pubchem_molecular_weight"], 46.069)
+        self.assertEqual(completed.loc[0, "pubchem_match_status"], "Matched PubChem Name")
+        self.assertEqual(completed.loc[0, "cas"], "7732-18-5")
+        self.assertEqual(completed.loc[0, "smiles"], "O")
+        self.assertTrue(warnings.empty)
+        resolve_by_name.assert_called_once_with(
+            "Ethanol",
+            base_url="https://pubchem.ncbi.nlm.nih.gov/rest/pug/",
+            timeout=60,
+        )
+
+    @patch("src.identifier_resolver.resolve_pubchem_by_cas")
+    @patch("src.identifier_resolver.resolve_pubchem_by_name")
+    def test_batch_falls_back_to_cas_when_name_has_no_cid(self, resolve_by_name, resolve_by_cas):
+        resolve_by_name.return_value = {
+            "pubchem_cid": "",
+            "status": "PubChem Name not matched",
+            "message": "No CID",
+        }
+        resolve_by_cas.return_value = {
+            "pubchem_cid": "702",
+            "smiles": "CCO",
+            "preferred_name": "ethanol",
+            "cas": "64-17-5",
+            "ec": "",
+            "dtxsid": "",
+            "status": "Matched PubChem CAS",
+            "message": "",
+        }
+
+        completed, _ = run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"], "cas": ["64-17-5"]}),
+            use_epa=False,
+            use_echa=False,
+            delay_seconds=0,
+        )
+
+        self.assertEqual(completed.loc[0, "pubchem_cid"], "702")
+        self.assertEqual(completed.loc[0, "pubchem_match_status"], "Matched PubChem CAS")
+        resolve_by_name.assert_called_once()
+        resolve_by_cas.assert_called_once()
+
+    @patch("src.identifier_resolver.resolve_substance")
+    @patch("src.identifier_resolver.resolve_dtxsid")
+    @patch("src.identifier_resolver.resolve_pubchem_by_name")
+    def test_batch_queries_default_sources_from_original_compound_name(
+        self, resolve_by_name, resolve_dtxsid, resolve_substance
+    ):
+        resolve_by_name.return_value = {
+            "pubchem_cid": "702",
+            "smiles": "CCO",
+            "preferred_name": "ethanol",
+            "cas": "64-17-5",
+            "ec": "",
+            "dtxsid": "",
+            "status": "Matched PubChem Name",
+            "message": "",
+        }
+        resolve_dtxsid.return_value = {
+            "dtxsid": "DTXSID9020584",
+            "matched_name": "Ethanol",
+            "matched_cas": "111-11-1",
+            "status": "Matched EPA Name",
+            "message": "",
+        }
+        resolve_substance.return_value = {
+            "echa_id": "100.000.526",
+            "matched_name": "Ethanol",
+            "matched_cas": "222-22-2",
+            "matched_ec": "200-578-6",
+            "status": "Matched ECHA Name",
+            "message": "",
+        }
+
+        completed, warnings = run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"]}),
+            use_pubchem=True,
+            use_epa=True,
+            use_echa=True,
+            delay_seconds=0,
+        )
+
+        epa_query = resolve_dtxsid.call_args.args[0]
+        echa_query = resolve_substance.call_args.args[0]
+        self.assertEqual(epa_query["compound"], "Ethanol")
+        self.assertEqual(epa_query["cas"], "")
+        self.assertEqual(epa_query["smiles"], "")
+        self.assertEqual(echa_query["compound"], "Ethanol")
+        self.assertEqual(echa_query["cas"], "")
+        self.assertEqual(echa_query["smiles"], "")
+        self.assertEqual(completed.loc[0, "cas"], "64-17-5")
+        self.assertEqual(completed.loc[0, "smiles"], "CCO")
+        self.assertEqual(completed.loc[0, "dtxsid"], "DTXSID9020584")
+        self.assertEqual(completed.loc[0, "ec"], "200-578-6")
+        self.assertEqual(completed.loc[0, "echa_id"], "100.000.526")
+        self.assertTrue(warnings.empty)
+
+    @patch("src.identifier_resolver.resolve_chemspider")
+    @patch("src.identifier_resolver.resolve_pubchem_by_name")
+    def test_batch_keeps_chemspider_optional_but_queries_it_when_enabled(
+        self, resolve_by_name, resolve_chemspider
+    ):
+        resolve_by_name.return_value = {
+            "pubchem_cid": "702",
+            "smiles": "CCO",
+            "preferred_name": "ethanol",
+            "cas": "64-17-5",
+            "ec": "",
+            "dtxsid": "",
+            "status": "Matched PubChem Name",
+            "message": "",
+        }
+        resolve_chemspider.return_value = {
+            "smiles": "CCO",
+            "cas": "111-11-1",
+            "preferred_name": "ethyl alcohol",
+            "status": "Matched ChemSpider",
+            "message": "",
+        }
+
+        completed, warnings = run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"]}),
+            use_epa=False,
+            use_echa=False,
+            use_pubchem=True,
+            use_chemspider=True,
+            chemspider_api_key="test-key",
+            delay_seconds=0,
+        )
+
+        self.assertEqual(resolve_chemspider.call_args.args[0]["compound"], "Ethanol")
+        self.assertEqual(completed.loc[0, "cas"], "64-17-5")
+        self.assertEqual(completed.loc[0, "smiles"], "CCO")
+        self.assertEqual(
+            completed.loc[0, "chemspider_match_status"], "Matched ChemSpider"
+        )
+        self.assertTrue(warnings.empty)
+
     @patch("src.identifier_resolver.resolve_pubchem_by_cas")
     def test_batch_fills_cid_and_smiles_from_cas(self, resolve_by_cas):
         resolve_by_cas.return_value = {

@@ -14,6 +14,7 @@ from src.use_rose_plot import (
     generate_combined_use_rose_plot,
     generate_reported_functional_use_presence_plot,
     generate_top_predicted_functional_use_lollipop_plot,
+    generate_top_predicted_functional_use_pie_plot,
     generate_use_bar_plot,
     generate_use_rose_plot,
 )
@@ -392,6 +393,115 @@ class UseRosePlotTests(unittest.TestCase):
         self.assertEqual(plot_df.loc[0, "compound"], "Compound A")
         self.assertEqual(plot_df.loc[0, "use_label"], "Intermediate")
         self.assertEqual(plot_df.loc[0, "presence"], 1)
+
+    def test_top_predicted_pie_plot_exports_with_ascii_only_text(self):
+        plot_df = pd.DataFrame(
+            [
+                {
+                    "compound": "中文化合物",
+                    "compound_label": "Compound 1",
+                    "use_cn": "芳香剂",
+                    "use_label": "fragrance",
+                    "display_label": "fragrance",
+                    "probability": 0.81,
+                    "status": "reported",
+                },
+                {
+                    "compound": "Compound 2",
+                    "compound_label": "Compound 2",
+                    "use_cn": "催化剂",
+                    "use_label": "catalyst",
+                    "display_label": "catalyst",
+                    "probability": 0.73,
+                    "status": "predicted",
+                },
+            ]
+        )
+        fig = None
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                fig = generate_top_predicted_functional_use_pie_plot(
+                    plot_df,
+                    "EPA CompTox Top Predicted Functional Use Distribution",
+                )
+                png_bytes = figure_to_png_bytes(fig)
+                pdf_bytes = figure_to_pdf_bytes(fig)
+
+            self.assertNotEqual(fig.axes[0].name, "polar")
+            self.assertGreaterEqual(len(fig.axes[0].patches), 2)
+            plot_text = [fig.axes[0].get_title()]
+            plot_text.extend(text.get_text() for text in fig.texts)
+            plot_text.extend(text.get_text() for text in fig.axes[0].texts)
+            plot_text.extend(
+                text.get_text()
+                for legend in fig.legends
+                for text in legend.get_texts()
+            )
+            self.assertTrue(all(text.isascii() for text in plot_text))
+            self.assertGreater(len(png_bytes.getvalue()), 1_000)
+            self.assertGreater(len(pdf_bytes.getvalue()), 1_000)
+        finally:
+            if fig is not None:
+                plt.close(fig)
+
+    def test_top_predicted_pie_plot_aggregates_by_functional_group(self):
+        plot_df = pd.DataFrame(
+            [
+                {
+                    "compound": "Compound A",
+                    "compound_label": "Compound A",
+                    "use_cn": "芳香剂",
+                    "use_label": "fragrance",
+                    "display_label": "fragrance",
+                    "probability": 0.91,
+                    "status": "reported",
+                },
+                {
+                    "compound": "Compound B",
+                    "compound_label": "Compound B",
+                    "use_cn": "芳香剂",
+                    "use_label": "fragrance",
+                    "display_label": "fragrance",
+                    "probability": 0.82,
+                    "status": "predicted",
+                },
+                {
+                    "compound": "Compound C",
+                    "compound_label": "Compound C",
+                    "use_cn": "催化剂",
+                    "use_label": "catalyst",
+                    "display_label": "catalyst",
+                    "probability": 0.73,
+                    "status": "predicted",
+                },
+            ]
+        )
+        fig = None
+
+        try:
+            fig = generate_top_predicted_functional_use_pie_plot(plot_df, "Top Predicted")
+            legend_labels = [
+                text.get_text()
+                for legend in fig.legends
+                for text in legend.get_texts()
+            ]
+            center_labels = [text.get_text() for text in fig.axes[0].texts]
+            horizontal_lines = [
+                line
+                for line in fig.axes[0].lines
+                if len(line.get_ydata()) == 2 and line.get_ydata()[0] == line.get_ydata()[1]
+            ]
+
+            self.assertEqual(len(fig.axes[0].patches), 2)
+            self.assertTrue(any("fragrance" in label and "66.7%" in label for label in legend_labels))
+            self.assertTrue(any("catalyst" in label and "33.3%" in label for label in legend_labels))
+            self.assertIn("Total compounds\n3", center_labels)
+            self.assertEqual(horizontal_lines, [])
+        finally:
+            if fig is not None:
+                plt.close(fig)
 
     def test_top_predicted_lollipop_plot_exports_with_ascii_only_text(self):
         plot_df = pd.DataFrame(

@@ -1,10 +1,15 @@
 import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 from openpyxl import load_workbook
 
+from src import source_origin
+from src.query_cache import use_cache_path
 from src.source_origin import build_result_workbook, fetch_coconut_evidence, run_source_origin_batch
 
 
@@ -58,6 +63,52 @@ def _natural_evidence(source_name="ChEBI", confidence="strong"):
 
 
 class SourceOriginBatchTests(unittest.TestCase):
+    @patch("src.source_origin.urllib.request.urlopen")
+    def test_get_json_uses_query_cache(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = json.dumps({"response": {"docs": []}}).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = source_origin._get_json(
+                    "https://example.test/search",
+                    params={"q": "ethanol"},
+                    timeout=1,
+                )
+                second = source_origin._get_json(
+                    "https://example.test/search",
+                    params={"q": "ethanol"},
+                    timeout=1,
+                )
+
+        self.assertEqual(first, {"response": {"docs": []}})
+        self.assertEqual(second, {"response": {"docs": []}})
+        urlopen.assert_called_once()
+
+    @patch("src.source_origin.urllib.request.urlopen")
+    def test_post_json_uses_query_cache(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = json.dumps({"data": {"data": []}}).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = source_origin._post_json(
+                    "https://example.test/api/search",
+                    {"query": "ethanol"},
+                    timeout=1,
+                )
+                second = source_origin._post_json(
+                    "https://example.test/api/search",
+                    {"query": "ethanol"},
+                    timeout=1,
+                )
+
+        self.assertEqual(first, {"data": {"data": []}})
+        self.assertEqual(second, {"data": {"data": []}})
+        urlopen.assert_called_once()
+
     @patch("src.source_origin.fetch_coconut_evidence", return_value=[])
     @patch("src.source_origin.fetch_chebi_evidence", return_value=[])
     def test_human_evidence_only_is_human_source(self, fetch_chebi, fetch_coconut):

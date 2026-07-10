@@ -4,6 +4,7 @@ import time
 
 import pandas as pd
 
+from src.batch_runner import run_ordered_batch
 from src.echa_use import (
     DEFAULT_ECHA_BASE,
     REQUIRED_IDENTIFIER_COLUMNS,
@@ -13,6 +14,7 @@ from src.echa_use import (
     resolve_substance,
     validate_input,
 )
+from src.query_cache import cache_control
 
 
 CNL_OVERVIEW_PATH = "api-cnl-inventory/prominent/overview/info/{echa_id}"
@@ -161,6 +163,75 @@ def run_echa_ghs_batch(
         _ensure_columns(pd.DataFrame(summary_rows), SUMMARY_COLUMNS),
         _ensure_columns(pd.DataFrame(classification_rows), CLASSIFICATION_COLUMNS),
         _ensure_columns(pd.DataFrame(warning_rows), WARNING_COLUMNS),
+    )
+
+
+_run_echa_ghs_batch_sequential = run_echa_ghs_batch
+
+
+def run_echa_ghs_batch(
+    input_df,
+    base_url=DEFAULT_ECHA_BASE,
+    timeout=90,
+    delay_seconds=0.5,
+    progress_callback=None,
+    max_workers=1,
+    cache_enabled=True,
+):
+    if int(max_workers or 1) <= 1:
+        with cache_control(cache_enabled):
+            return _run_echa_ghs_batch_sequential(
+                input_df,
+                base_url=base_url,
+                timeout=timeout,
+                delay_seconds=delay_seconds,
+                progress_callback=progress_callback,
+            )
+
+    clean_df = normalize_input_columns(input_df)
+    items = list(clean_df.iterrows())
+
+    def process_row(item):
+        _, row = item
+        return _run_echa_ghs_batch_sequential(
+            pd.DataFrame([row]),
+            base_url=base_url,
+            timeout=timeout,
+            delay_seconds=0,
+            progress_callback=None,
+        )
+
+    with cache_control(cache_enabled):
+        batch_results = run_ordered_batch(
+            items,
+            process_row,
+            max_workers=max_workers,
+            delay_seconds=delay_seconds,
+            progress_callback=progress_callback,
+            label_func=lambda item: _display_compound(item[1]),
+        )
+
+    summary_frames = []
+    classification_frames = []
+    warning_frames = []
+    for result in batch_results:
+        if result.error is not None:
+            row = items[result.index][1]
+            summary_frames.append(pd.DataFrame([_empty_summary_row(row, {"echa_id": pd.NA}, "查询失败", str(result.error))]))
+            warning_frames.append(pd.DataFrame([_warning_row(row, row.get("echa_id"), "batch_worker", str(result.error))]))
+            continue
+        summary_df, classifications_df, warnings_df = result.value
+        summary_frames.append(summary_df)
+        classification_frames.append(classifications_df)
+        warning_frames.append(warnings_df)
+
+    summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+    classifications = pd.concat(classification_frames, ignore_index=True) if classification_frames else pd.DataFrame()
+    warnings = pd.concat(warning_frames, ignore_index=True) if warning_frames else pd.DataFrame()
+    return (
+        _ensure_columns(summary, SUMMARY_COLUMNS),
+        _ensure_columns(classifications, CLASSIFICATION_COLUMNS),
+        _ensure_columns(warnings, WARNING_COLUMNS),
     )
 
 

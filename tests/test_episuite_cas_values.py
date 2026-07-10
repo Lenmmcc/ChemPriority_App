@@ -1,11 +1,14 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 from openpyxl import load_workbook
 
 from src import episuite_io
+from src.query_cache import cache_control, use_cache_path
 
 
 ETHANOL_CAS_AND_SMILES_RESPONSE = {
@@ -136,11 +139,35 @@ class EPISuiteCasValueTests(unittest.TestCase):
         response.read.return_value = json.dumps({"ok": True}).encode("utf-8")
         urlopen.return_value.__enter__.return_value = response
 
-        episuite_io.call_epi_web_api("CCO", cas="64-17-5", api_url="https://example.test/api/submit")
+        with cache_control(False):
+            episuite_io.call_epi_web_api("CCO", cas="64-17-5", api_url="https://example.test/api/submit")
 
         request = urlopen.call_args.args[0]
         self.assertIn("smiles=CCO", request.full_url)
         self.assertIn("cas=64-17-5", request.full_url)
+
+    @patch("src.episuite_io.urllib.request.urlopen")
+    def test_call_epi_web_api_reuses_cached_response(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = json.dumps({"ok": True}).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = episuite_io.call_epi_web_api(
+                    "CCO",
+                    cas="64-17-5",
+                    api_url="https://example.test/api/submit",
+                )
+                second = episuite_io.call_epi_web_api(
+                    "CCO",
+                    cas="64-17-5",
+                    api_url="https://example.test/api/submit",
+                )
+
+        self.assertEqual(first, {"ok": True})
+        self.assertEqual(second, {"ok": True})
+        urlopen.assert_called_once()
 
     def test_extract_epi_web_summary_keeps_selected_estimated_and_experimental_values(self):
         summary = episuite_io.extract_epi_web_summary(
@@ -199,6 +226,34 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertIn("CAS 查询失败，已回退到 SMILES", results.loc[0, "query_note"])
         self.assertIn("CAS 查询失败，已回退到 SMILES", raw_rows.loc[0, "query_note"])
         self.assertTrue(errors.empty)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    def test_run_epi_web_batch_keeps_order_and_isolates_parallel_row_failure(self, call_api):
+        def fake_call(smiles, **kwargs):
+            if smiles == "bad":
+                raise RuntimeError("network failed")
+            raw = dict(ETHANOL_CAS_AND_SMILES_RESPONSE)
+            raw["parameters"] = {"smiles": smiles}
+            return raw
+
+        call_api.side_effect = fake_call
+        input_df = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C", "D", "E"],
+                "smiles": ["a", "b", "bad", "d", "e"],
+            }
+        )
+
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
+            input_df,
+            delay_seconds=0,
+            max_workers=3,
+        )
+
+        self.assertEqual(results["compound"].tolist(), ["A", "B", "C", "D", "E"])
+        self.assertEqual(results.loc[2, "status"], "failed")
+        self.assertEqual(errors.loc[0, "compound"], "C")
+        self.assertEqual(len(raw_rows), 4)
 
     @patch("src.episuite_io.call_epi_web_api")
     def test_build_epi_web_result_tables_splits_raw_json_into_category_tables(self, call_api):

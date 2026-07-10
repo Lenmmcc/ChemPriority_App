@@ -1,11 +1,14 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 from openpyxl import load_workbook
 
 from src import echa_use
+from src.query_cache import use_cache_path
 
 
 def _resolution():
@@ -53,6 +56,31 @@ def _candidate(raw_use="Industrial use", use_cn="工业用途"):
 
 
 class EchaUseSummaryTests(unittest.TestCase):
+    @patch("src.echa_use.urllib.request.urlopen")
+    def test_get_text_uses_query_cache(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = b'{"items":[]}'
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = echa_use._get_text(
+                    "api-substance/v1/substance",
+                    params={"searchText": "ethanol"},
+                    base_url="https://example.test/",
+                    timeout=1,
+                )
+                second = echa_use._get_text(
+                    "api-substance/v1/substance",
+                    params={"searchText": "ethanol"},
+                    base_url="https://example.test/",
+                    timeout=1,
+                )
+
+        self.assertEqual(first, '{"items":[]}')
+        self.assertEqual(second, '{"items":[]}')
+        urlopen.assert_called_once()
+
     @patch("src.echa_use.extract_dossier_use_candidates")
     @patch("src.echa_use.fetch_dossier_html", return_value="<html></html>")
     @patch("src.echa_use.fetch_reach_dossiers")

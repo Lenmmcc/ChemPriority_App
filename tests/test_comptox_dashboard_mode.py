@@ -1,12 +1,16 @@
 import io
+import json
+import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 from openpyxl import load_workbook
 
 from src import comptox_use
+from src.query_cache import cache_control, use_cache_path
 
 
 COMPT0X_RANKING_COLUMNS = (
@@ -525,6 +529,7 @@ class CompToxDashboardModeTests(unittest.TestCase):
             return Response()
 
         with (
+            cache_control(False),
             patch.object(comptox_use.urllib.request, "urlopen", side_effect=urlopen),
             patch.object(comptox_use.time, "sleep") as sleep,
         ):
@@ -533,6 +538,56 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertEqual(page, "dashboard page")
         self.assertEqual(len(calls), 2)
         sleep.assert_called_once_with(comptox_use.DASHBOARD_RETRY_DELAY_SECONDS)
+
+    @patch("src.comptox_use.urllib.request.urlopen")
+    def test_dashboard_html_uses_query_cache(self, urlopen):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b"dashboard page"
+
+        urlopen.return_value = Response()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = comptox_use._dashboard_get_html("chemical/example", timeout=1)
+                second = comptox_use._dashboard_get_html("chemical/example", timeout=1)
+
+        self.assertEqual(first, "dashboard page")
+        self.assertEqual(second, "dashboard page")
+        urlopen.assert_called_once()
+
+    @patch("src.comptox_use.urllib.request.urlopen")
+    def test_api_json_uses_query_cache_without_api_key_in_key(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = json.dumps({"items": [1]}).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = comptox_use._api_get_json(
+                    "chemical",
+                    params={"q": "ethanol"},
+                    api_base="https://example.test/api/",
+                    api_key="secret-a",
+                    timeout=1,
+                )
+                second = comptox_use._api_get_json(
+                    "chemical",
+                    params={"q": "ethanol"},
+                    api_base="https://example.test/api/",
+                    api_key="secret-b",
+                    timeout=1,
+                )
+
+        self.assertEqual(first, {"items": [1]})
+        self.assertEqual(second, {"items": [1]})
+        urlopen.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -56,11 +56,11 @@ class UseChartPageTests(unittest.TestCase):
             / "4_化合物用途查询.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("generate_top_predicted_functional_use_lollipop_plot", page_source)
+        self.assertIn("generate_top_predicted_functional_use_pie_plot", page_source)
         self.assertIn("generate_reported_functional_use_presence_plot", page_source)
         self.assertIn("EPA CompTox 最高预测功能用途", page_source)
         self.assertIn("EPA CompTox reported 功能用途证据", page_source)
-        self.assertIn('"chart_type": "top_predicted_lollipop"', page_source)
+        self.assertIn('"chart_type": "top_predicted_pie"', page_source)
         self.assertIn('"chart_type": "reported_presence"', page_source)
         self.assertIn("EPA_Top_Predicted_Functional_Use", page_source)
         self.assertIn("EPA_Reported_Functional_Use_Evidence", page_source)

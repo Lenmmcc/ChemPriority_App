@@ -28,6 +28,7 @@ from src.episuite_io import (  # noqa: E402
     slim_epi_report_columns,
     validate_input,
 )
+from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 
 
 INPUT_CACHE_KEYS = (
@@ -183,6 +184,22 @@ with tab_predict:
     with col_delay:
         delay_seconds = st.number_input("请求间隔（秒）", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
 
+    with st.expander("加速设置", expanded=False):
+        cache_enabled = st.checkbox("启用本地查询缓存", value=True, key="epi_query_cache_enabled")
+        max_workers = st.number_input(
+            "并发数",
+            min_value=1,
+            max_value=8,
+            value=3,
+            step=1,
+            key="epi_query_max_workers",
+            help="默认 3 个并发请求；遇到外部服务限流时可调低。",
+        )
+        st.caption(f"缓存文件：{current_cache_path()}")
+        if st.button("清理本地查询缓存", key="epi_clear_query_cache"):
+            clear_query_cache()
+            st.success("本地查询缓存已清理。")
+
     if st.button("开始网页端预测", type="primary"):
         progress_bar = st.progress(0)
         status_box = st.empty()
@@ -197,6 +214,8 @@ with tab_predict:
                 api_url=api_url,
                 timeout=int(timeout_seconds),
                 delay_seconds=float(delay_seconds),
+                max_workers=int(max_workers),
+                cache_enabled=bool(cache_enabled),
                 progress_callback=update_progress,
             )
             web_tables = build_epi_web_result_tables(web_results, raw_results, web_errors)

@@ -18,6 +18,8 @@ from src.echa_use import (
     normalize_input_columns as normalize_echa_input_columns,
     resolve_substance,
 )
+from src.batch_runner import run_ordered_batch
+from src.query_cache import cache_control, cached_call
 
 
 REQUIRED_IDENTIFIER_COLUMNS = ["compound", "smiles", "cas", "ec", "dtxsid", "echa_id"]
@@ -30,6 +32,8 @@ RESOLVED_COLUMNS = [
     "compound",
     "smiles",
     "pubchem_cid",
+    "pubchem_formula",
+    "pubchem_molecular_weight",
     "cas",
     "ec",
     "dtxsid",
@@ -140,13 +144,14 @@ def run_identifier_completion_batch(
 
     for pos, (_, row) in enumerate(clean_df.iterrows(), start=1):
         working = _row_dict(row)
+        source_working = dict(working)
         notes = []
         pubchem_status = ""
         chemspider_status = ""
         epa_status = ""
         echa_status = ""
 
-        if use_pubchem and (working["cas"] or working["smiles"]):
+        if use_pubchem and (working["compound"] or working["cas"] or working["smiles"]):
             try:
                 pubchem_resolution = _resolve_pubchem_for_working(
                     working,
@@ -155,6 +160,8 @@ def run_identifier_completion_batch(
                 )
                 pubchem_status = _clean_cell(pubchem_resolution.get("status"))
                 _update_if_empty(working, "pubchem_cid", pubchem_resolution.get("pubchem_cid"))
+                _update_if_empty(working, "pubchem_formula", pubchem_resolution.get("pubchem_formula"))
+                _update_if_empty(working, "pubchem_molecular_weight", pubchem_resolution.get("pubchem_molecular_weight"))
                 _update_if_empty(working, "smiles", pubchem_resolution.get("smiles"))
                 _update_if_empty(working, "cas", pubchem_resolution.get("cas"))
                 _update_if_empty(working, "ec", pubchem_resolution.get("ec"))
@@ -171,11 +178,10 @@ def run_identifier_completion_batch(
         if (
             use_chemspider
             and chemspider_api_key
-            and _needs_chemspider_enrichment(working)
         ):
             try:
                 chemspider_resolution = resolve_chemspider(
-                    working, api_key=chemspider_api_key
+                    source_working, api_key=chemspider_api_key
                 )
                 chemspider_status = _clean_cell(chemspider_resolution.get("status"))
                 _update_if_empty(working, "smiles", chemspider_resolution.get("smiles"))
@@ -194,10 +200,10 @@ def run_identifier_completion_batch(
                 epa_resolution = resolve_dtxsid(
                     pd.Series(
                         {
-                            "compound": working["compound"],
-                            "cas": working["cas"],
-                            "smiles": working["smiles"],
-                            "dtxsid": working["dtxsid"],
+                            "compound": source_working["compound"],
+                            "cas": source_working["cas"],
+                            "smiles": source_working["smiles"],
+                            "dtxsid": source_working["dtxsid"],
                         }
                     ),
                     api_base=comptox_api_base,
@@ -218,7 +224,7 @@ def run_identifier_completion_batch(
 
         if use_echa:
             try:
-                echa_query = _best_echa_query(working)
+                echa_query = _best_echa_query(source_working)
                 echa_resolution = resolve_substance(
                     pd.Series(echa_query),
                     base_url=echa_base,
@@ -242,6 +248,8 @@ def run_identifier_completion_batch(
                 "compound": working["compound"] or working["resolved_name"],
                 "smiles": working["smiles"],
                 "pubchem_cid": working["pubchem_cid"],
+                "pubchem_formula": working["pubchem_formula"],
+                "pubchem_molecular_weight": working["pubchem_molecular_weight"],
                 "cas": working["cas"],
                 "ec": working["ec"],
                 "dtxsid": working["dtxsid"],
@@ -267,6 +275,92 @@ def run_identifier_completion_batch(
     )
 
 
+_run_identifier_completion_batch_sequential = run_identifier_completion_batch
+
+
+def run_identifier_completion_batch(
+    input_df,
+    comptox_api_base=COMPTOX_DEFAULT_API_BASE,
+    comptox_api_key=None,
+    echa_base=DEFAULT_ECHA_BASE,
+    use_epa=True,
+    use_echa=True,
+    use_pubchem=True,
+    pubchem_base=DEFAULT_PUBCHEM_BASE,
+    chemspider_api_key=None,
+    use_chemspider=False,
+    timeout=60,
+    delay_seconds=0.2,
+    progress_callback=None,
+    max_workers=1,
+    cache_enabled=True,
+):
+    if int(max_workers or 1) <= 1:
+        with cache_control(cache_enabled):
+            return _run_identifier_completion_batch_sequential(
+                input_df,
+                comptox_api_base=comptox_api_base,
+                comptox_api_key=comptox_api_key,
+                echa_base=echa_base,
+                use_epa=use_epa,
+                use_echa=use_echa,
+                use_pubchem=use_pubchem,
+                pubchem_base=pubchem_base,
+                chemspider_api_key=chemspider_api_key,
+                use_chemspider=use_chemspider,
+                timeout=timeout,
+                delay_seconds=delay_seconds,
+                progress_callback=progress_callback,
+            )
+
+    clean_df = normalize_input_columns(input_df)
+    items = list(clean_df.iterrows())
+
+    def process_row(item):
+        _, row = item
+        return _run_identifier_completion_batch_sequential(
+            pd.DataFrame([row]),
+            comptox_api_base=comptox_api_base,
+            comptox_api_key=comptox_api_key,
+            echa_base=echa_base,
+            use_epa=use_epa,
+            use_echa=use_echa,
+            use_pubchem=use_pubchem,
+            pubchem_base=pubchem_base,
+            chemspider_api_key=chemspider_api_key,
+            use_chemspider=use_chemspider,
+            timeout=timeout,
+            delay_seconds=0,
+            progress_callback=None,
+        )
+
+    with cache_control(cache_enabled):
+        batch_results = run_ordered_batch(
+            items,
+            process_row,
+            max_workers=max_workers,
+            delay_seconds=delay_seconds,
+            progress_callback=progress_callback,
+            label_func=lambda item: _display_compound(item[1]),
+        )
+
+    completed_frames = []
+    warning_frames = []
+    for result in batch_results:
+        if result.error is not None:
+            row = items[result.index][1]
+            warning_frames.append(pd.DataFrame([_warning_row(row, "batch_worker", str(result.error))]))
+            completed_frames.append(build_empty_completed_template(pd.DataFrame([row])))
+            continue
+        completed_df, warnings_df = result.value
+        completed_frames.append(completed_df)
+        warning_frames.append(warnings_df)
+
+    completed = pd.concat(completed_frames, ignore_index=True) if completed_frames else pd.DataFrame()
+    warnings = pd.concat(warning_frames, ignore_index=True) if warning_frames else pd.DataFrame()
+    return _ensure_columns(completed, RESOLVED_COLUMNS), _ensure_columns(warnings, WARNING_COLUMNS)
+
+
 def build_result_workbook(input_df, completed_df=None, warnings_df=None):
     if completed_df is None:
         completed_df = pd.DataFrame(columns=RESOLVED_COLUMNS)
@@ -276,8 +370,8 @@ def build_result_workbook(input_df, completed_df=None, warnings_df=None):
     guide_df = pd.DataFrame(
         [
             {"字段": "compound", "说明": "输入或补全得到的化合物名称。"},
-            {"字段": "smiles", "说明": "输入 SMILES，或由 PubChem 根据匹配的 CAS 补全。"},
-            {"字段": "pubchem_cid", "说明": "由 PubChem 根据 CAS 或 SMILES 查询补全的 Compound ID。"},
+            {"字段": "smiles", "说明": "输入 SMILES，或由 PubChem 根据匹配的名称、CAS 或 SMILES 补全。"},
+            {"字段": "pubchem_cid", "说明": "由 PubChem 根据名称、CAS 或 SMILES 查询补全的 Compound ID。"},
             {"字段": "cas", "说明": "CAS Registry Number，优先来自输入，其次来自 EPA 或 ECHA 匹配。"},
             {"字段": "ec", "说明": "ECHA/欧盟 EC 号，主要来自 ECHA 匹配。"},
             {"字段": "dtxsid", "说明": "EPA CompTox 使用的 DSSTox Substance ID。"},
@@ -334,16 +428,14 @@ def _row_dict(row):
         "compound": _clean_cell(row.get("compound")),
         "smiles": _clean_cell(row.get("smiles")),
         "pubchem_cid": "",
+        "pubchem_formula": "",
+        "pubchem_molecular_weight": "",
         "cas": _clean_cell(row.get("cas")),
         "ec": _clean_cell(row.get("ec")),
         "dtxsid": _clean_cell(row.get("dtxsid")),
         "echa_id": _clean_cell(row.get("echa_id")),
         "resolved_name": "",
     }
-
-
-def _needs_chemspider_enrichment(working):
-    return not all(_clean_cell(working.get(key)) for key in ("cas", "resolved_name"))
 
 
 def resolve_chemspider(working, api_key):
@@ -380,10 +472,25 @@ def _best_echa_query(working):
 
 
 def _resolve_pubchem_for_working(working, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
+    compound = _clean_cell(working.get("compound"))
     cas = _clean_cell(working.get("cas"))
     smiles = _clean_cell(working.get("smiles"))
-    cas_resolution = None
-    cas_error = None
+    last_resolution = None
+    errors = []
+
+    if compound:
+        try:
+            name_resolution = resolve_pubchem_by_name(
+                compound,
+                base_url=base_url,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            errors.append(f"Name: {exc}")
+        else:
+            last_resolution = name_resolution
+            if _clean_cell(name_resolution.get("pubchem_cid")):
+                return name_resolution
 
     if cas:
         try:
@@ -393,26 +500,41 @@ def _resolve_pubchem_for_working(working, base_url=DEFAULT_PUBCHEM_BASE, timeout
                 timeout=timeout,
             )
         except Exception as exc:
-            cas_error = exc
+            errors.append(f"CAS: {exc}")
         else:
+            last_resolution = cas_resolution
             if _clean_cell(cas_resolution.get("pubchem_cid")):
                 return cas_resolution
 
     if smiles:
         try:
-            return resolve_pubchem_by_smiles(
+            smiles_resolution = resolve_pubchem_by_smiles(
                 smiles,
                 base_url=base_url,
                 timeout=timeout,
             )
         except Exception as exc:
-            if cas_error:
-                raise RuntimeError(f"CAS: {cas_error}; SMILES: {exc}") from exc
-            raise
+            errors.append(f"SMILES: {exc}")
+        else:
+            last_resolution = smiles_resolution
+            return smiles_resolution
 
-    if cas_error:
-        raise cas_error
-    return cas_resolution or {"status": "No PubChem query", "message": ""}
+    if errors and last_resolution is None:
+        raise RuntimeError("; ".join(errors))
+    return last_resolution or {"status": "No PubChem query", "message": ""}
+
+
+def resolve_pubchem_by_name(name, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
+    name = _clean_cell(name)
+    if not name:
+        return {"status": "No name provided", "message": ""}
+
+    cid_data = _pubchem_get_json(
+        f"compound/name/{urllib.parse.quote(name, safe='')}/cids/JSON",
+        base_url=base_url,
+        timeout=timeout,
+    )
+    return _resolution_from_pubchem_cids(cid_data, "Name", base_url, timeout)
 
 
 def resolve_pubchem_by_cas(cas, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
@@ -437,6 +559,8 @@ def _resolution_from_pubchem_cids(cid_data, source_label, base_url, timeout):
     if not cids:
         return {
             "pubchem_cid": "",
+            "pubchem_formula": "",
+            "pubchem_molecular_weight": "",
             "smiles": "",
             "preferred_name": "",
             "cas": "",
@@ -452,6 +576,8 @@ def _resolution_from_pubchem_cids(cid_data, source_label, base_url, timeout):
     dtxsid = _first_regex_match(synonyms, DTXSID_RE)
     return {
         "pubchem_cid": cid,
+        "pubchem_formula": _clean_cell(properties.get("MolecularFormula")),
+        "pubchem_molecular_weight": properties.get("MolecularWeight", ""),
         "smiles": _clean_cell(
             properties.get("CanonicalSMILES")
             or properties.get("ConnectivitySMILES")
@@ -468,7 +594,7 @@ def _resolution_from_pubchem_cids(cid_data, source_label, base_url, timeout):
 def _fetch_pubchem_properties(cid, base_url, timeout):
     try:
         prop_data = _pubchem_get_json(
-            f"compound/cid/{urllib.parse.quote(cid, safe='')}/property/IUPACName,CanonicalSMILES/JSON",
+            f"compound/cid/{urllib.parse.quote(cid, safe='')}/property/IUPACName,CanonicalSMILES,MolecularFormula,MolecularWeight/JSON",
             base_url=base_url,
             timeout=timeout,
         )
@@ -517,15 +643,24 @@ def _pubchem_get_json(path, params=None, base_url=DEFAULT_PUBCHEM_BASE, timeout=
             "User-Agent": "ChemPriority identifier resolver",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")[:500]
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"连接失败: {exc.reason}") from exc
-    return json.loads(raw.decode("utf-8", errors="replace"))
+
+    def fetch():
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"连接失败: {exc.reason}") from exc
+        return json.loads(raw.decode("utf-8", errors="replace"))
+
+    return cached_call(
+        "pubchem_pug_rest",
+        "v1",
+        {"base_url": base_url, "path": path, "params": params},
+        fetch,
+    )
 
 
 def _first_regex_match(values, pattern):
@@ -547,7 +682,7 @@ def _first_text(values):
 def _update_if_empty(target, key, value):
     text = _clean_cell(value)
     if text and not _clean_cell(target.get(key)):
-        target[key] = text
+        target[key] = text if isinstance(value, str) else value
 
 
 def _completion_status(working):
