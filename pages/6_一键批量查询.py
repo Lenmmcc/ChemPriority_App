@@ -13,6 +13,23 @@ from src.auto_query_workflow import (
     run_auto_query_workflow,
 )
 from src.query_cache import clear_query_cache, current_cache_path
+from src.upload_state import cached_uploads, clear_uploads, store_uploads, upload_bytes
+
+
+INPUT_CACHE_KEYS = (
+    "auto_query_input_files",
+    "auto_query_input_signature",
+)
+RESULT_CACHE_KEYS = (
+    "auto_query_workflow_result",
+    "auto_query_workflow_charts",
+    "auto_query_workflow_zip",
+)
+
+
+def clear_auto_query_state():
+    clear_uploads(st.session_state, (*INPUT_CACHE_KEYS, *RESULT_CACHE_KEYS))
+    st.session_state.pop("auto_query_upload", None)
 
 
 st.set_page_config(
@@ -43,14 +60,32 @@ uploaded_file = st.file_uploader(
     type=["xlsx", "xls"],
     accept_multiple_files=False,
     help="当前按 Sheet1 / 第一个工作表读取，默认识别 Name、NIST Lib Hit Formula、Avg TIC 和 Group Area 列。",
+    key="auto_query_upload",
 )
 
-if uploaded_file is None:
+if uploaded_file is not None:
+    active_uploads, input_changed = store_uploads(
+        st.session_state,
+        "auto_query_input_files",
+        "auto_query_input_signature",
+        [uploaded_file],
+    )
+    if input_changed:
+        clear_uploads(st.session_state, RESULT_CACHE_KEYS)
+else:
+    active_uploads = cached_uploads(st.session_state, "auto_query_input_files")
+
+if not active_uploads:
     st.info("请先上传 Excel 文件。")
     st.stop()
 
+st.success("已加载输入文件。")
+if st.button("清空当前数据", key="auto_clear_cached_input"):
+    clear_auto_query_state()
+    st.rerun()
+
 try:
-    input_df = read_input_workbook(io.BytesIO(uploaded_file.getvalue()))
+    input_df = read_input_workbook(io.BytesIO(upload_bytes(active_uploads[0])))
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")
     st.stop()

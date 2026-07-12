@@ -43,6 +43,7 @@ from src.r_screening_replica.downstream import (  # noqa: E402
     build_pov_lrtp_input,
 )
 from src.r_screening_replica.plots import save_boxplot_log_transformed, save_compound_bubble_plot  # noqa: E402
+from src.upload_state import cached_uploads, clear_uploads, store_uploads, upload_bytes, upload_name  # noqa: E402
 import src.toxpi_calc as toxpi_calc  # noqa: E402
 
 if not hasattr(toxpi_calc, "generate_r_style_toxpi_plot"):
@@ -51,7 +52,6 @@ generate_r_style_toxpi_plot = toxpi_calc.generate_r_style_toxpi_plot
 
 
 STATE_KEYS = (
-    "cp_screening_signature",
     "cp_screening_front",
     "cp_screening_downstream",
     "cp_screening_workbook",
@@ -60,6 +60,11 @@ STATE_KEYS = (
     "cp_screening_radial_png",
     "cp_screening_radial_pdf",
     "cp_screening_radial_plot_version",
+)
+
+INPUT_CACHE_KEYS = (
+    "cp_screening_input_files",
+    "cp_screening_input_signature",
 )
 
 PER_SAMPLE_FRONT_HALF_FIGURES = [
@@ -84,6 +89,12 @@ STANDARD_CAS_COL = "CAS_input"
 def clear_workflow_state():
     for key in STATE_KEYS:
         st.session_state.pop(key, None)
+
+
+def clear_cached_input():
+    clear_uploads(st.session_state, INPUT_CACHE_KEYS)
+    st.session_state.pop("cp_screening_upload", None)
+    clear_workflow_state()
 
 
 def show_dataframe(df):
@@ -160,23 +171,14 @@ def render_figure_paths(owner_id, figure_paths, figure_specs):
                     )
 
 
-def uploaded_signature(uploaded_files):
-    hasher = hashlib.sha256()
-    for uploaded in uploaded_files:
-        data = uploaded.getvalue()
-        hasher.update(uploaded.name.encode("utf-8", errors="ignore"))
-        hasher.update(str(len(data)).encode("ascii"))
-        hasher.update(hashlib.sha256(data).digest())
-    return hasher.hexdigest()
-
-
 def parse_uploaded_workbooks(uploaded_files):
     samples = []
     for uploaded in uploaded_files:
-        data = uploaded.getvalue()
+        data = upload_bytes(uploaded)
+        file_name = upload_name(uploaded)
         frame = pd.read_excel(io.BytesIO(data))
         frame.columns = [str(column).strip() for column in frame.columns]
-        samples.append({"name": Path(uploaded.name).stem, "file_name": uploaded.name, "bytes": data, "data": frame})
+        samples.append({"name": Path(file_name).stem, "file_name": file_name, "bytes": data, "data": frame})
     return samples
 
 
@@ -691,19 +693,32 @@ uploaded_files = st.file_uploader(
     type=["xlsx", "xls"],
     accept_multiple_files=True,
     help="DF 按上传的 Excel 文件数作为样品总数计算；每个文件名默认作为 sample_id。",
+    key="cp_screening_upload",
 )
 
-if not uploaded_files:
+if uploaded_files:
+    active_uploads, input_changed = store_uploads(
+        st.session_state,
+        "cp_screening_input_files",
+        "cp_screening_input_signature",
+        uploaded_files,
+    )
+    if input_changed:
+        clear_workflow_state()
+else:
+    active_uploads = cached_uploads(st.session_state, "cp_screening_input_files")
+
+if not active_uploads:
     st.info("请上传至少 1 个 Excel 文件。若需要 DF，建议一次上传多个样品 Excel。")
     st.stop()
 
-signature = uploaded_signature(uploaded_files)
-if st.session_state.get("cp_screening_signature") != signature:
-    clear_workflow_state()
-    st.session_state["cp_screening_signature"] = signature
+st.success(f"已加载输入文件：{len(active_uploads)} 个。")
+if st.button("清空当前数据", key="cp_screening_clear_cached_input"):
+    clear_cached_input()
+    st.rerun()
 
 try:
-    samples = parse_uploaded_workbooks(uploaded_files)
+    samples = parse_uploaded_workbooks(active_uploads)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")
     st.stop()
