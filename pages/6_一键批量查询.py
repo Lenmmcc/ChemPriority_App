@@ -152,6 +152,36 @@ def _result_dashboard_groups(result, charts):
     return groups
 
 
+def _is_audit_table(table_name):
+    return table_name.endswith(("_Errors", "_Warnings", "_Raw_Results")) or table_name in {
+        "Structure_Preparation",
+        "ECHA_Use_Dossiers",
+        "ECHA_GHS_Classifications",
+    }
+
+
+def _render_result_dashboard(result, charts):
+    groups = _result_dashboard_groups(result, charts)
+    if not groups:
+        return
+
+    st.subheader("结果总览")
+    tabs = st.tabs([group["label"] for group in groups])
+    for tab, group in zip(tabs, groups):
+        with tab:
+            for table_name in group["table_names"]:
+                table = result.tables[table_name]
+                if _is_audit_table(table_name):
+                    with st.expander(table_name, expanded=False):
+                        _show_dataframe(table)
+                else:
+                    st.caption(table_name)
+                    _show_dataframe(table)
+            for chart_key in group["chart_keys"]:
+                chart = charts[chart_key]
+                st.image(chart.png, caption=chart.title)
+
+
 uploaded_file = st.file_uploader(
     "上传统一格式 Excel 文件",
     type=["xlsx", "xls"],
@@ -368,16 +398,7 @@ if result is not None:
         _render_structure_preparation_summary(structure_preparation)
 
     charts = st.session_state.get("auto_query_workflow_charts") or {}
-    if charts:
-        st.subheader("图表预览")
-        selected_chart = st.selectbox(
-            "选择图表",
-            list(charts.keys()),
-            format_func=lambda key: charts[key].title,
-        )
-        st.image(charts[selected_chart].png, caption=charts[selected_chart].title)
-    else:
-        st.info("当前结果没有可生成的用途图表；ZIP 仍会包含结果工作簿。")
+    _render_result_dashboard(result, charts)
 
     package = st.session_state.get("auto_query_workflow_zip")
     if package is not None:
