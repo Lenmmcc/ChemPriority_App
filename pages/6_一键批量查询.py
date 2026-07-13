@@ -75,6 +75,113 @@ def _render_structure_preparation_summary(prepared_df):
             _show_dataframe(prepared_df.loc[mask])
 
 
+def _result_dashboard_groups(result, charts):
+    definitions = [
+        (
+            "screening",
+            "本地筛查",
+            [
+                "Structure_Preparation",
+                "Input_Check",
+                "Elemental_Ratios_DBE",
+                "Category_Summary",
+                "DF_Table",
+                "Sample_Peak_Area",
+                "Group_Area_Raw_Long",
+                "Group_Area_Mean_By_Sample",
+            ],
+            (),
+        ),
+        ("identifier", "标识符补全", ["Identifier_Completion", "Identifier_Warnings"], ()),
+        ("epi", "EPI Suite", ["EPI_Results", "EPI_Raw_Results", "EPI_Errors"], ()),
+        (
+            "comptox",
+            "EPA CompTox",
+            ["CompTox_Summary", "CompTox_Candidates", "CompTox_Errors"],
+            ("EPA_",),
+        ),
+        (
+            "echa",
+            "ECHA",
+            [
+                "ECHA_Use_Summary",
+                "ECHA_Use_Candidates",
+                "ECHA_Use_Dossiers",
+                "ECHA_Use_Errors",
+                "ECHA_GHS_Summary",
+                "ECHA_GHS_Classifications",
+                "ECHA_GHS_Errors",
+            ],
+            ("ECHA_",),
+        ),
+        (
+            "source",
+            "来源属性",
+            ["Source_Origin_Summary", "Source_Origin_Evidence", "Source_Origin_Errors"],
+            (),
+        ),
+        (
+            "toxpi",
+            "Pov-LRTP / PBM / ToxPi",
+            ["Pov_LRTP_Input", "Pov_LRTP", "ToxPi_Input", "ToxPi_Normalized", "ToxPi_Results"],
+            (),
+        ),
+    ]
+    available_charts = charts or {}
+    groups = []
+    for key, label, table_candidates, chart_prefixes in definitions:
+        table_names = [
+            name
+            for name in table_candidates
+            if isinstance(result.tables.get(name), pd.DataFrame) and not result.tables[name].empty
+        ]
+        chart_keys = [
+            chart_key
+            for chart_key in available_charts
+            if any(chart_key.startswith(prefix) for prefix in chart_prefixes)
+        ]
+        if table_names or chart_keys:
+            groups.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "table_names": table_names,
+                    "chart_keys": chart_keys,
+                }
+            )
+    return groups
+
+
+def _is_audit_table(table_name):
+    return table_name.endswith(("_Errors", "_Warnings", "_Raw_Results")) or table_name in {
+        "Structure_Preparation",
+        "ECHA_Use_Dossiers",
+        "ECHA_GHS_Classifications",
+    }
+
+
+def _render_result_dashboard(result, charts):
+    groups = _result_dashboard_groups(result, charts)
+    if not groups:
+        return
+
+    st.subheader("结果总览")
+    tabs = st.tabs([group["label"] for group in groups])
+    for tab, group in zip(tabs, groups):
+        with tab:
+            for table_name in group["table_names"]:
+                table = result.tables[table_name]
+                if _is_audit_table(table_name):
+                    with st.expander(table_name, expanded=False):
+                        _show_dataframe(table)
+                else:
+                    st.caption(table_name)
+                    _show_dataframe(table)
+            for chart_key in group["chart_keys"]:
+                chart = charts[chart_key]
+                st.image(chart.png, caption=chart.title)
+
+
 uploaded_file = st.file_uploader(
     "上传统一格式 Excel 文件",
     type=["xlsx", "xls"],
@@ -291,16 +398,7 @@ if result is not None:
         _render_structure_preparation_summary(structure_preparation)
 
     charts = st.session_state.get("auto_query_workflow_charts") or {}
-    if charts:
-        st.subheader("图表预览")
-        selected_chart = st.selectbox(
-            "选择图表",
-            list(charts.keys()),
-            format_func=lambda key: charts[key].title,
-        )
-        st.image(charts[selected_chart].png, caption=charts[selected_chart].title)
-    else:
-        st.info("当前结果没有可生成的用途图表；ZIP 仍会包含结果工作簿。")
+    _render_result_dashboard(result, charts)
 
     package = st.session_state.get("auto_query_workflow_zip")
     if package is not None:
