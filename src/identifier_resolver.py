@@ -40,6 +40,10 @@ RESOLVED_COLUMNS = [
     "echa_id",
     "resolved_name",
     "pubchem_match_status",
+    "name_query_status",
+    "smiles_query_status",
+    "primary_identity_source",
+    "identity_conflict",
     "chemspider_match_status",
     "epa_match_status",
     "echa_match_status",
@@ -147,30 +151,38 @@ def run_identifier_completion_batch(
         source_working = dict(working)
         notes = []
         pubchem_status = ""
+        name_query_status = ""
+        smiles_query_status = ""
+        primary_identity_source = ""
+        identity_conflict = ""
         chemspider_status = ""
         epa_status = ""
         echa_status = ""
 
         if use_pubchem and (working["compound"] or working["cas"] or working["smiles"]):
             try:
-                pubchem_resolution = _resolve_pubchem_for_working(
+                pubchem_resolution, identity_warnings = _resolve_pubchem_for_working(
                     working,
                     base_url=pubchem_base,
                     timeout=timeout,
                 )
+                warning_rows.extend(identity_warnings)
                 pubchem_status = _clean_cell(pubchem_resolution.get("status"))
-                _update_if_empty(working, "pubchem_cid", pubchem_resolution.get("pubchem_cid"))
-                _update_if_empty(working, "pubchem_formula", pubchem_resolution.get("pubchem_formula"))
-                _update_if_empty(working, "pubchem_molecular_weight", pubchem_resolution.get("pubchem_molecular_weight"))
-                _update_if_empty(working, "smiles", pubchem_resolution.get("smiles"))
-                _update_if_empty(working, "cas", pubchem_resolution.get("cas"))
-                _update_if_empty(working, "ec", pubchem_resolution.get("ec"))
-                _update_if_empty(working, "dtxsid", pubchem_resolution.get("dtxsid"))
-                _update_if_empty(working, "resolved_name", pubchem_resolution.get("preferred_name"))
-                pubchem_message = _clean_cell(pubchem_resolution.get("message"))
-                notes.append(pubchem_message)
-                if not _clean_cell(pubchem_resolution.get("pubchem_cid")) and pubchem_message:
-                    warning_rows.append(_warning_row(row, "pubchem_resolution", pubchem_message))
+                name_query_status = _clean_cell(pubchem_resolution.get("name_query_status"))
+                smiles_query_status = _clean_cell(pubchem_resolution.get("smiles_query_status"))
+                primary_identity_source = _clean_cell(pubchem_resolution.get("primary_identity_source"))
+                identity_conflict = _clean_cell(pubchem_resolution.get("identity_conflict"))
+                _merge_pubchem_resolution(
+                    working,
+                    pubchem_resolution,
+                    overwrite_identity=primary_identity_source == "SMILES",
+                )
+                pubchem_messages = _resolution_messages(pubchem_resolution)
+                notes.extend(pubchem_messages)
+                if not _resolution_has_stable_identity(pubchem_resolution) and pubchem_messages:
+                    warning_rows.append(
+                        _warning_row(row, "pubchem_resolution", "; ".join(pubchem_messages))
+                    )
             except Exception as exc:
                 pubchem_status = "PubChem 补全失败"
                 warning_rows.append(_warning_row(row, "pubchem_resolution", str(exc)))
@@ -200,10 +212,10 @@ def run_identifier_completion_batch(
                 epa_resolution = resolve_dtxsid(
                     pd.Series(
                         {
-                            "compound": source_working["compound"],
-                            "cas": source_working["cas"],
-                            "smiles": source_working["smiles"],
-                            "dtxsid": source_working["dtxsid"],
+                            "compound": working["resolved_name"] or working["compound"],
+                            "cas": working["cas"],
+                            "smiles": working["smiles"],
+                            "dtxsid": working["dtxsid"],
                         }
                     ),
                     api_base=comptox_api_base,
@@ -224,7 +236,7 @@ def run_identifier_completion_batch(
 
         if use_echa:
             try:
-                echa_query = _best_echa_query(source_working)
+                echa_query = _best_echa_query(working)
                 echa_resolution = resolve_substance(
                     pd.Series(echa_query),
                     base_url=echa_base,
@@ -256,6 +268,10 @@ def run_identifier_completion_batch(
                 "echa_id": working["echa_id"],
                 "resolved_name": working["resolved_name"],
                 "pubchem_match_status": pubchem_status,
+                "name_query_status": name_query_status,
+                "smiles_query_status": smiles_query_status,
+                "primary_identity_source": primary_identity_source,
+                "identity_conflict": identity_conflict,
                 "chemspider_match_status": chemspider_status,
                 "epa_match_status": epa_status,
                 "echa_match_status": echa_status,
@@ -471,57 +487,108 @@ def _best_echa_query(working):
     }
 
 
-def _resolve_pubchem_for_working(working, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
-    compound = _clean_cell(working.get("compound"))
-    cas = _clean_cell(working.get("cas"))
-    smiles = _clean_cell(working.get("smiles"))
-    last_resolution = None
-    errors = []
-
+def build_identifier_query_variants(row: pd.Series) -> list[dict]:
+    """Build independent PubChem queries from the supplied name and SMILES."""
+    variants = []
+    compound = _clean_cell(row.get("compound"))
+    smiles = _clean_cell(row.get("smiles"))
     if compound:
-        try:
-            name_resolution = resolve_pubchem_by_name(
-                compound,
-                base_url=base_url,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            errors.append(f"Name: {exc}")
-        else:
-            last_resolution = name_resolution
-            if _clean_cell(name_resolution.get("pubchem_cid")):
-                return name_resolution
-
-    if cas:
-        try:
-            cas_resolution = resolve_pubchem_by_cas(
-                cas,
-                base_url=base_url,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            errors.append(f"CAS: {exc}")
-        else:
-            last_resolution = cas_resolution
-            if _clean_cell(cas_resolution.get("pubchem_cid")):
-                return cas_resolution
-
+        variants.append({"query_source": "名称", "query_value": compound})
     if smiles:
-        try:
-            smiles_resolution = resolve_pubchem_by_smiles(
-                smiles,
-                base_url=base_url,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            errors.append(f"SMILES: {exc}")
-        else:
-            last_resolution = smiles_resolution
-            return smiles_resolution
+        variants.append({"query_source": "SMILES", "query_value": smiles})
+    return variants
 
-    if errors and last_resolution is None:
-        raise RuntimeError("; ".join(errors))
-    return last_resolution or {"status": "No PubChem query", "message": ""}
+
+def _resolve_pubchem_variants(working, base_url, timeout):
+    resolutions = {"名称": None, "SMILES": None}
+    for variant in build_identifier_query_variants(pd.Series(working)):
+        query_source = variant["query_source"]
+        try:
+            if query_source == "名称":
+                resolution = resolve_pubchem_by_name(
+                    variant["query_value"], base_url=base_url, timeout=timeout
+                )
+            else:
+                resolution = resolve_pubchem_by_smiles(
+                    variant["query_value"], base_url=base_url, timeout=timeout
+                )
+        except Exception as exc:
+            resolution = {
+                "status": f"PubChem {query_source} 补全失败",
+                "message": str(exc),
+            }
+        resolutions[query_source] = resolution
+    return resolutions["名称"], resolutions["SMILES"]
+
+
+def merge_identifier_resolutions(source_row, name_resolution, smiles_resolution) -> tuple[dict, list[dict]]:
+    """Select a stable SMILES identity and surface name/structure conflicts."""
+    name_resolution = dict(name_resolution or {})
+    smiles_resolution = dict(smiles_resolution or {})
+    name_stable = _resolution_has_stable_identity(name_resolution)
+    smiles_stable = _resolution_has_stable_identity(smiles_resolution)
+
+    if smiles_stable:
+        primary = dict(smiles_resolution)
+        primary_source = "SMILES"
+    elif name_stable:
+        primary = dict(name_resolution)
+        primary_source = "名称"
+    else:
+        primary = dict(smiles_resolution or name_resolution)
+        primary_source = ""
+
+    primary["name_query_status"] = _clean_cell(name_resolution.get("status"))
+    primary["smiles_query_status"] = _clean_cell(smiles_resolution.get("status"))
+    primary["primary_identity_source"] = primary_source
+
+    if name_stable and smiles_stable and not _resolutions_describe_same_entity(
+        name_resolution, smiles_resolution
+    ):
+        primary["identity_conflict"] = "是"
+        return primary, [
+            _warning_row(source_row, "identity_conflict", "名称与 SMILES 命中不同化学实体")
+        ]
+
+    primary["identity_conflict"] = ""
+    if name_stable and smiles_stable:
+        _fill_empty_descriptive_fields(primary, name_resolution)
+    return primary, []
+
+
+def _resolve_pubchem_for_working(working, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
+    name_resolution, smiles_resolution = _resolve_pubchem_variants(
+        working, base_url=base_url, timeout=timeout
+    )
+    merged_resolution, warnings = merge_identifier_resolutions(
+        working, name_resolution, smiles_resolution
+    )
+    if _resolution_has_stable_identity(merged_resolution):
+        return merged_resolution, warnings
+
+    cas = _clean_cell(working.get("cas"))
+    if not cas:
+        return merged_resolution, warnings
+
+    try:
+        cas_resolution = resolve_pubchem_by_cas(cas, base_url=base_url, timeout=timeout)
+    except Exception as exc:
+        cas_resolution = {"status": "PubChem CAS 补全失败", "message": str(exc)}
+
+    if _resolution_has_stable_identity(cas_resolution):
+        cas_resolution = dict(cas_resolution)
+        cas_resolution["name_query_status"] = merged_resolution["name_query_status"]
+        cas_resolution["smiles_query_status"] = merged_resolution["smiles_query_status"]
+        cas_resolution["primary_identity_source"] = "CAS"
+        cas_resolution["identity_conflict"] = ""
+        return cas_resolution, warnings
+
+    for message in _resolution_messages(cas_resolution):
+        if message not in _resolution_messages(merged_resolution):
+            merged_resolution["message"] = "; ".join(
+                filter(None, [_clean_cell(merged_resolution.get("message")), message])
+            )
+    return merged_resolution, warnings
 
 
 def resolve_pubchem_by_name(name, base_url=DEFAULT_PUBCHEM_BASE, timeout=60):
@@ -683,6 +750,53 @@ def _update_if_empty(target, key, value):
     text = _clean_cell(value)
     if text and not _clean_cell(target.get(key)):
         target[key] = text if isinstance(value, str) else value
+
+
+def _merge_pubchem_resolution(working, resolution, overwrite_identity=False):
+    for key in ("pubchem_formula", "pubchem_molecular_weight"):
+        _update_if_empty(working, key, resolution.get(key))
+    _update_if_empty(working, "resolved_name", resolution.get("preferred_name"))
+
+    for key in ("pubchem_cid", "smiles", "cas", "ec", "dtxsid"):
+        value = resolution.get(key)
+        if overwrite_identity and _clean_cell(value):
+            working[key] = value
+        else:
+            _update_if_empty(working, key, value)
+
+
+def _resolution_has_stable_identity(resolution):
+    return any(_resolution_identity_values(resolution).values())
+
+
+def _resolution_identity_values(resolution):
+    resolution = resolution or {}
+    smiles = {
+        _clean_cell(resolution.get(key))
+        for key in ("canonical_smiles", "isomeric_smiles", "CanonicalSMILES", "IsomericSMILES", "smiles")
+        if _clean_cell(resolution.get(key))
+    }
+    return {
+        "pubchem_cid": {_clean_cell(resolution.get("pubchem_cid"))} - {""},
+        "cas": {_clean_cell(resolution.get("cas"))} - {""},
+        "smiles": smiles,
+    }
+
+
+def _resolutions_describe_same_entity(name_resolution, smiles_resolution):
+    name_values = _resolution_identity_values(name_resolution)
+    smiles_values = _resolution_identity_values(smiles_resolution)
+    return any(name_values[key] & smiles_values[key] for key in name_values)
+
+
+def _fill_empty_descriptive_fields(primary, name_resolution):
+    for key in ("pubchem_formula", "pubchem_molecular_weight", "preferred_name"):
+        _update_if_empty(primary, key, name_resolution.get(key))
+
+
+def _resolution_messages(resolution):
+    message = _clean_cell((resolution or {}).get("message"))
+    return [message] if message else []
 
 
 def _completion_status(working):
