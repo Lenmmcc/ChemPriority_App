@@ -75,6 +75,83 @@ def _render_structure_preparation_summary(prepared_df):
             _show_dataframe(prepared_df.loc[mask])
 
 
+def _result_dashboard_groups(result, charts):
+    definitions = [
+        (
+            "screening",
+            "本地筛查",
+            [
+                "Structure_Preparation",
+                "Input_Check",
+                "Elemental_Ratios_DBE",
+                "Category_Summary",
+                "DF_Table",
+                "Sample_Peak_Area",
+                "Group_Area_Raw_Long",
+                "Group_Area_Mean_By_Sample",
+            ],
+            (),
+        ),
+        ("identifier", "标识符补全", ["Identifier_Completion", "Identifier_Warnings"], ()),
+        ("epi", "EPI Suite", ["EPI_Results", "EPI_Raw_Results", "EPI_Errors"], ()),
+        (
+            "comptox",
+            "EPA CompTox",
+            ["CompTox_Summary", "CompTox_Candidates", "CompTox_Errors"],
+            ("EPA_",),
+        ),
+        (
+            "echa",
+            "ECHA",
+            [
+                "ECHA_Use_Summary",
+                "ECHA_Use_Candidates",
+                "ECHA_Use_Dossiers",
+                "ECHA_Use_Errors",
+                "ECHA_GHS_Summary",
+                "ECHA_GHS_Classifications",
+                "ECHA_GHS_Errors",
+            ],
+            ("ECHA_",),
+        ),
+        (
+            "source",
+            "来源属性",
+            ["Source_Origin_Summary", "Source_Origin_Evidence", "Source_Origin_Errors"],
+            (),
+        ),
+        (
+            "toxpi",
+            "Pov-LRTP / PBM / ToxPi",
+            ["Pov_LRTP_Input", "Pov_LRTP", "ToxPi_Input", "ToxPi_Normalized", "ToxPi_Results"],
+            (),
+        ),
+    ]
+    available_charts = charts or {}
+    groups = []
+    for key, label, table_candidates, chart_prefixes in definitions:
+        table_names = [
+            name
+            for name in table_candidates
+            if isinstance(result.tables.get(name), pd.DataFrame) and not result.tables[name].empty
+        ]
+        chart_keys = [
+            chart_key
+            for chart_key in available_charts
+            if any(chart_key.startswith(prefix) for prefix in chart_prefixes)
+        ]
+        if table_names or chart_keys:
+            groups.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "table_names": table_names,
+                    "chart_keys": chart_keys,
+                }
+            )
+    return groups
+
+
 uploaded_file = st.file_uploader(
     "上传统一格式 Excel 文件",
     type=["xlsx", "xls"],

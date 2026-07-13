@@ -332,6 +332,19 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn("Auto_Query_Workflow_Results.zip", page_text)
         self.assertIn("application/zip", page_text)
 
+    def test_page_6_groups_results_into_module_dashboard_tabs(self):
+        with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
+            page_text = page_file.read()
+
+        self.assertIn("def _result_dashboard_groups", page_text)
+        self.assertIn('"本地筛查"', page_text)
+        self.assertIn('"标识符补全"', page_text)
+        self.assertIn('"EPI Suite"', page_text)
+        self.assertIn('"EPA CompTox"', page_text)
+        self.assertIn('"ECHA"', page_text)
+        self.assertIn('"来源属性"', page_text)
+        self.assertIn('"Pov-LRTP / PBM / ToxPi"', page_text)
+
 
 def _example_comptox_candidates():
     return pd.DataFrame(
