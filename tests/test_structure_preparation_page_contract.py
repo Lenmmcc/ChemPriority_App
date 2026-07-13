@@ -25,6 +25,45 @@ class StructurePreparationPageContractTests(unittest.TestCase):
             with self.subTest(page=prefix):
                 self.assertIn("Structure_Preparation", source)
 
+    def test_epi_summary_renders_before_input_normalization_and_validation(self):
+        source = _page_source("3")
+
+        prepare = source.index("prepared_input_df = prepare_structure_dataframe(raw_input_df)")
+        summary = source.index("render_structure_preparation_summary(prepared_input_df)")
+        normalizer = source.index("input_df = normalize_input_columns(prepared_input_df)")
+        validator = source.index("is_valid, message = validate_input(input_df)")
+
+        self.assertLess(prepare, summary)
+        self.assertLess(summary, normalizer)
+        self.assertLess(summary, validator)
+
+    def test_use_summary_renders_before_resolver_and_query_normalizers(self):
+        source = _page_source("4")
+
+        prepare = source.index('st.session_state["use_query_structure_prepared_df"] = prepare_structure_dataframe(raw_input_df)')
+        summary = source.index("render_structure_preparation_summary(prepared_input_df)")
+        resolver_normalizer = source.index("resolver_input_df = normalize_resolver_input_columns(prepared_input_df)")
+        all_invalid_guard = source.index("if not resolver_valid and not comptox_valid and not echa_valid:")
+
+        self.assertLess(prepare, summary)
+        self.assertLess(summary, resolver_normalizer)
+        self.assertLess(summary, all_invalid_guard)
+
+    def test_screening_upload_summary_precedes_front_half_normalization(self):
+        source = _page_source("0")
+        preview_start = source.index("def build_upload_structure_preparation_preview(")
+        preview_end = source.index("def normalize_samples_for_mappings", preview_start)
+        preview_source = source[preview_start:preview_end]
+
+        self.assertLess(
+            preview_source.index("prepare_structure_dataframe("),
+            preview_source.index("summarize_structure_preparation(prepared)"),
+        )
+        self.assertLess(
+            source.index("build_upload_structure_preparation_preview(samples, sample_mappings)"),
+            source.index("front_state = collect_front_half("),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

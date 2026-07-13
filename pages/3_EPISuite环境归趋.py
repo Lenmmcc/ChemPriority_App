@@ -168,6 +168,13 @@ if st.button("清空当前数据", key="epi_clear_cached_input"):
 try:
     raw_input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
     prepared_input_df = prepare_structure_dataframe(raw_input_df)
+except Exception as exc:
+    st.error(f"Excel 读取失败：{exc}")
+    st.stop()
+
+render_structure_preparation_summary(prepared_input_df)
+
+try:
     input_df = normalize_input_columns(prepared_input_df)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")
@@ -180,7 +187,6 @@ if not is_valid:
     st.stop()
 
 st.success(message)
-render_structure_preparation_summary(prepared_input_df)
 
 tab_input, tab_predict, tab_fallback, tab_parse, tab_output = st.tabs(
     ["输入数据", "网页端预测", "备用输入包", "解析外部结果", "结果下载"]

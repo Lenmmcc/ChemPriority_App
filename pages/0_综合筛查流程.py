@@ -345,6 +345,26 @@ def render_sample_mapping_tabs(samples):
     return sample_mappings
 
 
+def build_upload_structure_preparation_preview(samples, sample_mappings):
+    summaries = []
+    audits = []
+    for sample in samples:
+        mapping = sample_mappings.get(sample["name"]) or sample_mapping_defaults(sample)
+        prepared = prepare_structure_dataframe(
+            sample["data"],
+            mol_column=mapping.get("mol_column"),
+            smiles_column=mapping.get("smiles_col"),
+        )
+        summaries.append({"sample_id": sample["name"], **summarize_structure_preparation(prepared)})
+        audit = prepared.copy()
+        audit.insert(0, "sample_id", sample["name"])
+        audits.append(audit)
+    return (
+        pd.DataFrame(summaries),
+        pd.concat(audits, ignore_index=True) if audits else pd.DataFrame(),
+    )
+
+
 def normalize_samples_for_mappings(samples, sample_mappings):
     normalized_samples = []
     selected_peak_cols = []
@@ -775,6 +795,14 @@ with tab_upload:
 
     st.markdown("**每个 Excel 的列映射**")
     sample_mappings = render_sample_mapping_tabs(samples)
+    upload_structure_summary, upload_structure_audit = build_upload_structure_preparation_preview(samples, sample_mappings)
+    st.subheader("结构准备汇总")
+    show_dataframe(upload_structure_summary)
+    if not upload_structure_audit.empty:
+        audit_mask = upload_structure_audit["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | upload_structure_audit["parse_status"].eq("解析失败")
+        if audit_mask.any():
+            with st.expander("查看结构准备审计记录", expanded=False):
+                show_dataframe(upload_structure_audit.loc[audit_mask])
 
 with tab_front:
     st.subheader("2. 化学类型图、DBE图、VK图与 DF")
@@ -810,14 +838,6 @@ with tab_front:
         show_dataframe(front_state["df_table"])
         st.subheader("Sample_Peak_Area")
         show_dataframe(front_state["sample_peak_area"])
-        st.subheader("结构准备汇总")
-        show_dataframe(front_state["structure_preparation_summary"])
-        structure_audit = front_state["structure_preparation_audit"]
-        if not structure_audit.empty:
-            audit_mask = structure_audit["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | structure_audit["parse_status"].eq("解析失败")
-            if audit_mask.any():
-                with st.expander("查看结构准备审计记录", expanded=False):
-                    show_dataframe(structure_audit.loc[audit_mask])
         if not front_state["warnings"].empty:
             st.warning(f"化学类型图、DBE图、VK图与 DF 有 {len(front_state['warnings'])} 条提示或失败。")
             show_dataframe(front_state["warnings"])

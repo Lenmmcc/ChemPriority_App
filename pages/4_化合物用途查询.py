@@ -360,6 +360,8 @@ if st.session_state.get("use_query_structure_input_signature") != input_signatur
     st.session_state["use_query_structure_input_signature"] = input_signature
 prepared_input_df = st.session_state["use_query_structure_prepared_df"]
 
+render_structure_preparation_summary(prepared_input_df)
+
 resolver_input_df = normalize_resolver_input_columns(prepared_input_df)
 resolver_valid, resolver_message = validate_resolver_input(resolver_input_df)
 
@@ -403,8 +405,6 @@ if source_origin_valid:
     st.success(source_origin_message)
 else:
     st.warning(f"来源属性输入检查未通过：{source_origin_message}")
-
-render_structure_preparation_summary(prepared_input_df)
 
 tab_input, tab_resolver, tab_epa, tab_echa, tab_echa_ghs, tab_source_origin, tab_rose, tab_output, tab_notes = st.tabs(
     [
