@@ -56,6 +56,58 @@ def _candidate(raw_use="Industrial use", use_cn="工业用途"):
 
 
 class EchaUseSummaryTests(unittest.TestCase):
+    @patch("src.echa_use.extract_dossier_use_candidates")
+    @patch("src.echa_use.fetch_dossier_html", return_value="<html></html>")
+    @patch("src.echa_use.fetch_reach_dossiers", return_value=([_dossier()], []))
+    @patch("src.echa_use.resolve_substance")
+    def test_batch_keeps_divergent_name_and_smiles_echa_groups_with_conflict_warning(
+        self, resolve_substance, fetch_dossiers, fetch_html, extract_candidates
+    ):
+        resolve_substance.side_effect = [
+            {**_resolution(), "echa_id": "100.001.111", "status": "通过 compound 匹配"},
+            {**_resolution(), "echa_id": "100.001.222", "status": "通过 smiles 匹配"},
+        ]
+        extract_candidates.side_effect = [
+            [_candidate("Name use", "名称用途")],
+            [_candidate("SMILES use", "结构用途")],
+        ]
+
+        summary_df, candidates_df, _, warnings_df = echa_use.run_echa_use_batch(
+            pd.DataFrame(
+                [
+                    {
+                        "compound": "Example name",
+                        "cas": "50-00-0",
+                        "ec": "200-001-8",
+                        "smiles": "CCO",
+                        "echa_id": "100.001.999",
+                    }
+                ]
+            ),
+            delay_seconds=0,
+        )
+
+        self.assertEqual(resolve_substance.call_count, 2)
+        name_query = resolve_substance.call_args_list[0].args[0]
+        smiles_query = resolve_substance.call_args_list[1].args[0]
+        self.assertEqual(name_query["compound"], "Example name")
+        self.assertEqual(name_query["smiles"], "")
+        self.assertEqual(name_query["cas"], "")
+        self.assertEqual(name_query["ec"], "")
+        self.assertEqual(name_query["echa_id"], "")
+        self.assertEqual(smiles_query["compound"], "")
+        self.assertEqual(smiles_query["smiles"], "CCO")
+        self.assertEqual(smiles_query["cas"], "")
+        self.assertEqual(smiles_query["ec"], "")
+        self.assertEqual(smiles_query["echa_id"], "")
+        self.assertEqual(summary_df["query_source"].tolist(), ["名称", "SMILES"])
+        self.assertEqual(candidates_df["echa_id"].tolist(), ["100.001.111", "100.001.222"])
+        self.assertEqual(candidates_df["query_source"].tolist(), ["名称", "SMILES"])
+        self.assertEqual(candidates_df["is_primary_identity"].tolist(), [False, True])
+        conflict_warnings = warnings_df[warnings_df["stage"].eq("identity_conflict")]
+        self.assertEqual(len(conflict_warnings), 1)
+        self.assertEqual(conflict_warnings.iloc[0]["query_source"], "名称 | SMILES")
+
     @patch("src.echa_use.urllib.request.urlopen")
     def test_get_text_uses_query_cache(self, urlopen):
         response = unittest.mock.MagicMock()

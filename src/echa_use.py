@@ -37,6 +37,9 @@ SUMMARY_COLUMNS = [
     "matched_ec",
     "match_status",
     "query_status",
+    "query_source",
+    "query_value",
+    "is_primary_identity",
 ]
 
 CANDIDATE_COLUMNS = [
@@ -58,6 +61,9 @@ CANDIDATE_COLUMNS = [
     "last_updated_date",
     "record_url",
     "dossier_url",
+    "query_source",
+    "query_value",
+    "is_primary_identity",
 ]
 
 DOSSIER_COLUMNS = [
@@ -80,6 +86,8 @@ WARNING_COLUMNS = [
     "ec",
     "smiles",
     "echa_id",
+    "query_source",
+    "query_value",
     "stage",
     "message",
 ]
@@ -184,6 +192,46 @@ def validate_input(df):
     return True, f"ECHA 输入数据检查通过，共 {usable_rows} 个可查询化合物。"
 
 
+def build_use_query_variants(row) -> list[dict]:
+    """Build independent name, SMILES, or identifier queries for one source row."""
+    source = dict(row)
+    compound = _clean_cell(source.get("compound"))
+    smiles = _clean_cell(source.get("smiles"))
+
+    def variant(query_source, query_value, **overrides):
+        query = dict(source)
+        query.update(overrides)
+        query["query_source"] = query_source
+        query["query_value"] = query_value
+        return query
+
+    if compound and smiles:
+        return [
+            variant("名称", compound, smiles="", cas="", ec="", echa_id=""),
+            variant("SMILES", smiles, compound="", cas="", ec="", echa_id=""),
+        ]
+
+    for field in ("echa_id", "ec", "cas"):
+        value = _clean_cell(source.get(field))
+        if value:
+            return [variant("输入标识", value)]
+    if compound:
+        return [variant("名称", compound)]
+    if smiles:
+        return [variant("SMILES", smiles)]
+    return [variant("输入标识", "")]
+
+
+def _variant_identity_conflict(outcomes):
+    identities = {
+        outcome["query_source"]: _clean_cell(outcome["resolution"].get("echa_id"))
+        for outcome in outcomes
+    }
+    name_identity = identities.get("名称", "")
+    smiles_identity = identities.get("SMILES", "")
+    return bool(name_identity and smiles_identity and name_identity != smiles_identity)
+
+
 def run_echa_use_batch(
     input_df,
     base_url=DEFAULT_ECHA_BASE,
@@ -201,23 +249,42 @@ def run_echa_use_batch(
 
     for pos, (_, row) in enumerate(clean_df.iterrows(), start=1):
         compound = _display_compound(row)
-        try:
-            resolution = resolve_substance(row, base_url=base_url, timeout=timeout)
-            echa_id = resolution.get("echa_id")
-            if not _clean_cell(echa_id):
-                summary_rows.append(_summary_row(row, resolution, "未匹配到 ECHA 物质"))
-                warning_rows.append(_warning_row(row, echa_id, "substance_resolution", resolution.get("message", "")))
-            else:
+        outcomes = []
+        for variant in build_use_query_variants(row):
+            query_source = variant["query_source"]
+            query_value = variant["query_value"]
+            query_row = pd.Series(variant)
+            try:
+                resolution = resolve_substance(query_row, base_url=base_url, timeout=timeout)
+                echa_id = resolution.get("echa_id")
+                if not _clean_cell(echa_id):
+                    outcomes.append(
+                        {
+                            "query_source": query_source,
+                            "query_value": query_value,
+                            "resolution": resolution,
+                            "echa_id": echa_id,
+                            "candidates": [],
+                            "dossiers": [],
+                            "warnings": [
+                                ("substance_resolution", resolution.get("message", ""))
+                            ],
+                            "status": "未匹配到 ECHA 物质",
+                        }
+                    )
+                    continue
+
                 dossiers, dossier_warnings = fetch_reach_dossiers(
                     echa_id,
                     base_url=base_url,
                     timeout=timeout,
                     max_dossiers=max_dossiers,
                 )
-                for warning in dossier_warnings:
-                    warning_rows.append(_warning_row(row, echa_id, warning["stage"], warning["message"]))
-
+                warnings = [
+                    (warning["stage"], warning["message"]) for warning in dossier_warnings
+                ]
                 candidates = []
+                parsed_dossiers = []
                 for dossier in dossiers:
                     parsed_count_before = len(candidates)
                     try:
@@ -236,18 +303,93 @@ def run_echa_use_batch(
                             )
                         )
                     except Exception as exc:
-                        warning_rows.append(_warning_row(row, echa_id, "dossier_html", str(exc)))
+                        warnings.append(("dossier_html", str(exc)))
                     parsed_count = len(candidates) - parsed_count_before
-                    dossier_rows.append(_dossier_row(row, echa_id, dossier, parsed_count, base_url))
+                    parsed_dossiers.append((dossier, parsed_count))
+                outcomes.append(
+                    {
+                        "query_source": query_source,
+                        "query_value": query_value,
+                        "resolution": resolution,
+                        "echa_id": echa_id,
+                        "candidates": candidates,
+                        "dossiers": parsed_dossiers,
+                        "warnings": warnings,
+                        "status": "查询完成" if candidates else "未查到用途数据",
+                    }
+                )
+            except Exception as exc:
+                outcomes.append(
+                    {
+                        "query_source": query_source,
+                        "query_value": query_value,
+                        "resolution": {"echa_id": pd.NA, "status": "失败"},
+                        "echa_id": pd.NA,
+                        "candidates": [],
+                        "dossiers": [],
+                        "warnings": [("unexpected_error", str(exc))],
+                        "status": "查询失败",
+                    }
+                )
 
-                status = "查询完成" if candidates else "未查到用途数据"
-                summary_rows.append(_summary_row(row, resolution, status, dossier_count=len(dossiers)))
-
-                for candidate in candidates:
-                    candidate_rows.append({"compound": compound, "echa_id": echa_id, **candidate})
-        except Exception as exc:
-            summary_rows.append(_summary_row(row, {"echa_id": pd.NA, "status": "失败"}, "查询失败"))
-            warning_rows.append(_warning_row(row, row.get("echa_id"), "unexpected_error", str(exc)))
+        identity_conflict = _variant_identity_conflict(outcomes)
+        for outcome in outcomes:
+            is_primary_identity = bool(
+                _clean_cell(outcome["echa_id"])
+                and (not identity_conflict or outcome["query_source"] == "SMILES")
+            )
+            summary_rows.append(
+                _summary_row(
+                    row,
+                    outcome["resolution"],
+                    outcome["status"],
+                    dossier_count=len(outcome["dossiers"]),
+                    query_source=outcome["query_source"],
+                    query_value=outcome["query_value"],
+                    is_primary_identity=is_primary_identity,
+                )
+            )
+            for dossier, parsed_count in outcome["dossiers"]:
+                dossier_rows.append(
+                    _dossier_row(row, outcome["echa_id"], dossier, parsed_count, base_url)
+                )
+            for candidate in outcome["candidates"]:
+                candidate_rows.append(
+                    {
+                        "compound": compound,
+                        "echa_id": outcome["echa_id"],
+                        **candidate,
+                        "query_source": outcome["query_source"],
+                        "query_value": outcome["query_value"],
+                        "is_primary_identity": is_primary_identity,
+                    }
+                )
+            for stage, message in outcome["warnings"]:
+                warning_rows.append(
+                    _warning_row(
+                        row,
+                        outcome["echa_id"],
+                        stage,
+                        message,
+                        query_source=outcome["query_source"],
+                        query_value=outcome["query_value"],
+                    )
+                )
+        if identity_conflict:
+            warning_rows.append(
+                _warning_row(
+                    row,
+                    "",
+                    "identity_conflict",
+                    "名称与 SMILES 命中不同 ECHA ID，已保留两组用途证据并将 SMILES 标为主身份。",
+                    query_source="名称 | SMILES",
+                    query_value=" | ".join(
+                        outcome["query_value"]
+                        for outcome in outcomes
+                        if outcome["query_source"] in {"名称", "SMILES"}
+                    ),
+                )
+            )
 
         if progress_callback:
             progress_callback(pos, total, compound)
@@ -317,8 +459,34 @@ def run_echa_use_batch(
     for result in batch_results:
         if result.error is not None:
             row = items[result.index][1]
-            summary_frames.append(pd.DataFrame([_summary_row(row, {"echa_id": pd.NA, "status": "失败"}, "查询失败")]))
-            warning_frames.append(pd.DataFrame([_warning_row(row, row.get("echa_id"), "batch_worker", str(result.error))]))
+            variant = build_use_query_variants(row)[0]
+            summary_frames.append(
+                pd.DataFrame(
+                    [
+                        _summary_row(
+                            row,
+                            {"echa_id": pd.NA, "status": "失败"},
+                            "查询失败",
+                            query_source=variant["query_source"],
+                            query_value=variant["query_value"],
+                        )
+                    ]
+                )
+            )
+            warning_frames.append(
+                pd.DataFrame(
+                    [
+                        _warning_row(
+                            row,
+                            row.get("echa_id"),
+                            "batch_worker",
+                            str(result.error),
+                            query_source=variant["query_source"],
+                            query_value=variant["query_value"],
+                        )
+                    ]
+                )
+            )
             continue
         summary_df, candidates_df, dossiers_df, warnings_df = result.value
         summary_frames.append(summary_df)
@@ -562,13 +730,24 @@ def build_empty_summary_template(input_df):
     )
 
 
-def _summary_row(row, resolution, status, dossier_count=0):
+def _summary_row(
+    row,
+    resolution,
+    status,
+    dossier_count=0,
+    query_source="",
+    query_value="",
+    is_primary_identity=False,
+):
     output = {
         "compound": _display_compound(row),
         "cas": _clean_cell(row.get("cas")),
         "ec": _clean_cell(row.get("ec")),
         "smiles": _clean_cell(row.get("smiles")),
         "input_echa_id": _clean_cell(row.get("echa_id")),
+        "query_source": query_source,
+        "query_value": query_value,
+        "is_primary_identity": is_primary_identity,
         "matched_echa_id": resolution.get("echa_id", pd.NA),
         "matched_name": resolution.get("matched_name", pd.NA),
         "matched_cas": resolution.get("matched_cas", pd.NA),
@@ -693,13 +872,15 @@ def _dossier_row(row, echa_id, dossier, parsed_use_count, base_url):
     }
 
 
-def _warning_row(row, echa_id, stage, message):
+def _warning_row(row, echa_id, stage, message, query_source="", query_value=""):
     return {
         "compound": _display_compound(row),
         "cas": _clean_cell(row.get("cas")),
         "ec": _clean_cell(row.get("ec")),
         "smiles": _clean_cell(row.get("smiles")),
         "echa_id": _clean_cell(echa_id),
+        "query_source": query_source,
+        "query_value": query_value,
         "stage": stage,
         "message": message,
     }

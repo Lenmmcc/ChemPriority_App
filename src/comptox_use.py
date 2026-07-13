@@ -77,7 +77,16 @@ FUNCTIONAL_USE_TABLE_COLUMNS = [
     "CompTox功能用途链接",
 ]
 
-WARNING_COLUMNS = ["compound", "cas", "smiles", "dtxsid", "stage", "message"]
+WARNING_COLUMNS = [
+    "compound",
+    "cas",
+    "smiles",
+    "dtxsid",
+    "query_source",
+    "query_value",
+    "stage",
+    "message",
+]
 
 EVIDENCE_METADATA_COLUMNS = [
     "source_type",
@@ -241,6 +250,47 @@ def validate_input(df):
     return True, f"输入数据检查通过，共 {usable_rows} 个可查询化合物。"
 
 
+def build_use_query_variants(row) -> list[dict]:
+    """Build independent name, SMILES, or identifier queries for one source row."""
+    source = dict(row)
+    compound = _clean_cell(source.get("compound"))
+    smiles = _clean_cell(source.get("smiles"))
+
+    def variant(query_source, query_value, **overrides):
+        query = dict(source)
+        query.update(overrides)
+        query["query_source"] = query_source
+        query["query_value"] = query_value
+        return query
+
+    if compound and smiles:
+        return [
+            variant("名称", compound, smiles="", cas="", dtxsid=""),
+            variant("SMILES", smiles, compound="", cas="", dtxsid=""),
+        ]
+
+    for field in ("dtxsid", "cas"):
+        value = _clean_cell(source.get(field))
+        if value:
+            return [variant("输入标识", value)]
+    if compound:
+        return [variant("名称", compound)]
+    if smiles:
+        return [variant("SMILES", smiles)]
+    return [variant("输入标识", "")]
+
+
+def _variant_identity_conflict(outcomes, identity_field):
+    """Return whether independent name and SMILES resolutions identify different entities."""
+    identities = {
+        outcome["query_source"]: _clean_cell(outcome["resolution"].get(identity_field))
+        for outcome in outcomes
+    }
+    name_identity = identities.get("名称", "")
+    smiles_identity = identities.get("SMILES", "")
+    return bool(name_identity and smiles_identity and name_identity != smiles_identity)
+
+
 def run_comptox_use_batch(
     input_df,
     api_base=DEFAULT_API_BASE,
@@ -259,35 +309,38 @@ def run_comptox_use_batch(
 
     for pos, (_, row) in enumerate(clean_df.iterrows(), start=1):
         compound = _display_compound(row)
-        try:
-            resolution = resolve_dtxsid(
-                row,
-                api_base=api_base,
-                api_key=api_key,
-                timeout=timeout,
-            )
-            dtxsid = resolution.get("dtxsid")
-            if _is_missing(dtxsid) or not _clean_cell(dtxsid):
-                summary_rows.append(
-                    _summary_row(
-                        row,
-                        resolution,
-                        [],
-                        "未解析到 DTXSID",
-                        query_note=query_note,
+        outcomes = []
+        for variant in build_use_query_variants(row):
+            query_source = variant["query_source"]
+            query_value = variant["query_value"]
+            query_row = pd.Series(variant)
+            try:
+                resolution = resolve_dtxsid(
+                    query_row,
+                    api_base=api_base,
+                    api_key=api_key,
+                    timeout=timeout,
+                )
+                dtxsid = resolution.get("dtxsid")
+                if _is_missing(dtxsid) or not _clean_cell(dtxsid):
+                    outcomes.append(
+                        {
+                            "query_source": query_source,
+                            "query_value": query_value,
+                            "resolution": resolution,
+                            "dtxsid": dtxsid,
+                            "candidates": [],
+                            "warnings": [
+                                {
+                                    "stage": "identifier_resolution",
+                                    "message": resolution.get("message", "CompTox 未返回可用 DTXSID。"),
+                                }
+                            ],
+                            "status": "未解析到 DTXSID",
+                        }
                     )
-                )
-                error_rows.append(
-                    {
-                        "compound": compound,
-                        "cas": _clean_cell(row.get("cas")),
-                        "smiles": _clean_cell(row.get("smiles")),
-                        "dtxsid": _clean_cell(row.get("dtxsid")),
-                        "stage": "identifier_resolution",
-                        "message": resolution.get("message", "CompTox 未返回可用 DTXSID。"),
-                    }
-                )
-            else:
+                    continue
+
                 candidates, warnings = fetch_use_candidates(
                     dtxsid,
                     api_base=api_base,
@@ -295,48 +348,87 @@ def run_comptox_use_batch(
                     timeout=timeout,
                     dashboard_fallback=dashboard_fallback,
                 )
-                status = "查询完成" if candidates else "未查到用途数据"
-                summary_rows.append(
-                    _summary_row(
-                        row,
-                        resolution,
-                        candidates,
-                        status,
-                        query_note=query_note,
-                    )
+                outcomes.append(
+                    {
+                        "query_source": query_source,
+                        "query_value": query_value,
+                        "resolution": resolution,
+                        "dtxsid": dtxsid,
+                        "candidates": candidates,
+                        "warnings": warnings,
+                        "status": "查询完成" if candidates else "未查到用途数据",
+                    }
+                )
+            except Exception as exc:
+                outcomes.append(
+                    {
+                        "query_source": query_source,
+                        "query_value": query_value,
+                        "resolution": {"dtxsid": pd.NA, "status": "失败"},
+                        "dtxsid": pd.NA,
+                        "candidates": [],
+                        "warnings": [{"stage": "unexpected_error", "message": str(exc)}],
+                        "status": "查询失败",
+                    }
                 )
 
-                for candidate in candidates:
-                    candidate_row = {
-                        "compound": compound,
-                        "dtxsid": dtxsid,
-                        **candidate,
-                    }
-                    candidate_rows.append(candidate_row)
-
-                for warning in warnings:
-                    error_rows.append(
-                        {
-                            "compound": compound,
-                            "cas": _clean_cell(row.get("cas")),
-                            "smiles": _clean_cell(row.get("smiles")),
-                            "dtxsid": dtxsid,
-                            "stage": warning.get("stage", "use_query"),
-                            "message": warning.get("message", ""),
-                        }
-                    )
-        except Exception as exc:
-            summary_rows.append(
-                _summary_row(row, {"dtxsid": pd.NA, "status": "失败"}, [], "查询失败")
+        identity_conflict = _variant_identity_conflict(outcomes, "dtxsid")
+        for outcome in outcomes:
+            is_primary_identity = bool(
+                _clean_cell(outcome["dtxsid"])
+                and (not identity_conflict or outcome["query_source"] == "SMILES")
             )
+            summary_rows.append(
+                _summary_row(
+                    row,
+                    outcome["resolution"],
+                    outcome["candidates"],
+                    outcome["status"],
+                    query_note=query_note,
+                    query_source=outcome["query_source"],
+                    query_value=outcome["query_value"],
+                    is_primary_identity=is_primary_identity,
+                )
+            )
+            for candidate in outcome["candidates"]:
+                candidate_rows.append(
+                    {
+                        "compound": compound,
+                        "dtxsid": outcome["dtxsid"],
+                        **candidate,
+                        "query_source": outcome["query_source"],
+                        "query_value": outcome["query_value"],
+                        "is_primary_identity": is_primary_identity,
+                    }
+                )
+            for warning in outcome["warnings"]:
+                error_rows.append(
+                    {
+                        "compound": compound,
+                        "cas": _clean_cell(row.get("cas")),
+                        "smiles": _clean_cell(row.get("smiles")),
+                        "dtxsid": _clean_cell(outcome["dtxsid"]),
+                        "query_source": outcome["query_source"],
+                        "query_value": outcome["query_value"],
+                        "stage": warning.get("stage", "use_query"),
+                        "message": warning.get("message", ""),
+                    }
+                )
+        if identity_conflict:
             error_rows.append(
                 {
                     "compound": compound,
                     "cas": _clean_cell(row.get("cas")),
                     "smiles": _clean_cell(row.get("smiles")),
-                    "dtxsid": _clean_cell(row.get("dtxsid")),
-                    "stage": "unexpected_error",
-                    "message": str(exc),
+                    "dtxsid": "",
+                    "query_source": "名称 | SMILES",
+                    "query_value": " | ".join(
+                        outcome["query_value"]
+                        for outcome in outcomes
+                        if outcome["query_source"] in {"名称", "SMILES"}
+                    ),
+                    "stage": "identity_conflict",
+                    "message": "名称与 SMILES 命中不同 DTXSID，已保留两组用途证据并将 SMILES 标为主身份。",
                 }
             )
 
@@ -347,7 +439,7 @@ def run_comptox_use_batch(
 
     summary_df = pd.DataFrame(summary_rows)
     candidates_df = pd.DataFrame(candidate_rows)
-    errors_df = pd.DataFrame(error_rows)
+    errors_df = pd.DataFrame(error_rows, columns=WARNING_COLUMNS)
     return summary_df, candidates_df, errors_df
 
 
@@ -414,6 +506,7 @@ def run_comptox_use_batch(
         if result.error is not None:
             row = items[result.index][1]
             compound = _display_compound(row)
+            variant = build_use_query_variants(row)[0]
             summary_frames.append(
                 pd.DataFrame([
                     _summary_row(
@@ -422,6 +515,8 @@ def run_comptox_use_batch(
                         [],
                         "查询失败",
                         query_note=query_note,
+                        query_source=variant["query_source"],
+                        query_value=variant["query_value"],
                     )
                 ])
             )
@@ -432,6 +527,8 @@ def run_comptox_use_batch(
                         "cas": _clean_cell(row.get("cas")),
                         "smiles": _clean_cell(row.get("smiles")),
                         "dtxsid": _clean_cell(row.get("dtxsid")),
+                        "query_source": variant["query_source"],
+                        "query_value": variant["query_value"],
                         "stage": "batch_worker",
                         "message": str(result.error),
                     }
@@ -668,12 +765,24 @@ def build_empty_summary_template(input_df):
     )
 
 
-def _summary_row(row, resolution, candidates, status, query_note=""):
+def _summary_row(
+    row,
+    resolution,
+    candidates,
+    status,
+    query_note="",
+    query_source="",
+    query_value="",
+    is_primary_identity=False,
+):
     output = {
         "compound": _display_compound(row),
         "cas": _clean_cell(row.get("cas")),
         "smiles": _clean_cell(row.get("smiles")),
         "input_dtxsid": _clean_cell(row.get("dtxsid")),
+        "query_source": query_source,
+        "query_value": query_value,
+        "is_primary_identity": is_primary_identity,
         "matched_dtxsid": resolution.get("dtxsid", pd.NA),
         "matched_name": resolution.get("matched_name", pd.NA),
         "matched_cas": resolution.get("matched_cas", pd.NA),

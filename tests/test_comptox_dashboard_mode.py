@@ -50,6 +50,54 @@ def _candidate(source_type, raw_use="cleaning agent", use_cn="清洁用品", **e
 
 
 class CompToxDashboardModeTests(unittest.TestCase):
+    @patch("src.comptox_use.fetch_use_candidates")
+    @patch("src.comptox_use.resolve_dtxsid")
+    def test_batch_queries_name_and_smiles_variants_with_provenance(
+        self, resolve_dtxsid, fetch_use_candidates
+    ):
+        resolve_dtxsid.side_effect = [
+            {"dtxsid": "DTXSID0000001", "status": "通过名称匹配", "message": ""},
+            {"dtxsid": "DTXSID0000002", "status": "通过 SMILES 匹配", "message": ""},
+        ]
+        fetch_use_candidates.side_effect = [
+            ([_candidate("product_category", raw_use="name evidence")], []),
+            ([_candidate("product_category", raw_use="smiles evidence")], []),
+        ]
+
+        summary_df, candidates_df, errors_df = comptox_use.run_comptox_use_batch(
+            pd.DataFrame(
+                [
+                    {
+                        "compound": "Example name",
+                        "cas": "50-00-0",
+                        "smiles": "CCO",
+                        "dtxsid": "DTXSID0099999",
+                    }
+                ]
+            ),
+            api_base="",
+            delay_seconds=0,
+        )
+
+        self.assertEqual(resolve_dtxsid.call_count, 2)
+        name_query = resolve_dtxsid.call_args_list[0].args[0]
+        smiles_query = resolve_dtxsid.call_args_list[1].args[0]
+        self.assertEqual(name_query["compound"], "Example name")
+        self.assertEqual(name_query["smiles"], "")
+        self.assertEqual(name_query["cas"], "")
+        self.assertEqual(name_query["dtxsid"], "")
+        self.assertEqual(smiles_query["compound"], "")
+        self.assertEqual(smiles_query["smiles"], "CCO")
+        self.assertEqual(smiles_query["cas"], "")
+        self.assertEqual(smiles_query["dtxsid"], "")
+        self.assertEqual(summary_df["query_source"].tolist(), ["名称", "SMILES"])
+        self.assertEqual(summary_df["query_value"].tolist(), ["Example name", "CCO"])
+        self.assertEqual(candidates_df["query_source"].tolist(), ["名称", "SMILES"])
+        self.assertEqual(candidates_df["query_value"].tolist(), ["Example name", "CCO"])
+        self.assertEqual(candidates_df["is_primary_identity"].tolist(), [False, True])
+        self.assertEqual(errors_df["stage"].tolist(), ["identity_conflict"])
+        self.assertEqual(errors_df.loc[0, "query_source"], "名称 | SMILES")
+
     def test_dashboard_mode_skips_unconfigured_api(self):
         with (
             patch.object(
