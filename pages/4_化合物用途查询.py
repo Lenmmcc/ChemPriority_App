@@ -9,6 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +67,10 @@ from src.identifier_resolver import (  # noqa: E402
 )
 from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
+from src.mol_structure_parser import (  # noqa: E402
+    prepare_structure_dataframe,
+    summarize_structure_preparation,
+)
 from src.use_rose_plot import (  # noqa: E402
     extract_reported_functional_use_presence_data,
     extract_candidate_use_plot_data,
@@ -106,6 +112,8 @@ def render_speedup_settings(key_prefix, default_workers):
 INPUT_CACHE_KEYS = (
     "use_query_input_bytes",
     "use_query_input_name",
+    "use_query_structure_input_signature",
+    "use_query_structure_prepared_df",
 )
 QUERY_RESULT_KEYS = (
     "identifier_input_signature",
@@ -192,6 +200,40 @@ def dataframe_to_excel_buffer(df, sheet_name="Sheet1"):
         df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
     buffer.seek(0)
     return buffer
+
+
+def append_structure_preparation_sheet(workbook_buffer, prepared_df):
+    workbook_buffer.seek(0)
+    workbook = load_workbook(workbook_buffer)
+    if "Structure_Preparation" in workbook.sheetnames:
+        del workbook["Structure_Preparation"]
+    worksheet = workbook.create_sheet("Structure_Preparation")
+    export_df = prepared_df.astype(object).where(prepared_df.notna(), None)
+    for row in dataframe_to_rows(export_df, index=False, header=True):
+        worksheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def render_structure_preparation_summary(prepared_df):
+    summary = summarize_structure_preparation(prepared_df)
+    st.caption("结构准备（MOL / SMILES）")
+    labels = ["MOL 行", "解析成功", "修复 M END", "SMILES 冲突", "解析失败"]
+    values = [
+        summary["mol_rows"],
+        summary["parsed_success"],
+        summary["repaired_m_end"],
+        summary["smiles_conflicts"],
+        summary["parse_failures"],
+    ]
+    for column, label, value in zip(st.columns(5), labels, values):
+        column.metric(label, value)
+    if summary["smiles_conflicts"] or summary["parse_failures"]:
+        with st.expander("查看结构准备审计记录", expanded=False):
+            mask = prepared_df["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | prepared_df["parse_status"].eq("解析失败")
+            show_dataframe(prepared_df.loc[mask])
 
 
 def build_reported_use_combined_table(comptox_candidates_df=None, echa_candidates_df=None):
@@ -313,7 +355,12 @@ if st.session_state.get("identifier_input_signature") != input_signature:
     clear_query_results()
     st.session_state["identifier_input_signature"] = input_signature
 
-resolver_input_df = normalize_resolver_input_columns(raw_input_df)
+if st.session_state.get("use_query_structure_input_signature") != input_signature:
+    st.session_state["use_query_structure_prepared_df"] = prepare_structure_dataframe(raw_input_df)
+    st.session_state["use_query_structure_input_signature"] = input_signature
+prepared_input_df = st.session_state["use_query_structure_prepared_df"]
+
+resolver_input_df = normalize_resolver_input_columns(prepared_input_df)
 resolver_valid, resolver_message = validate_resolver_input(resolver_input_df)
 
 completed_query_input_df = st.session_state.get("identifier_completed_input_df")
@@ -321,7 +368,7 @@ if isinstance(completed_query_input_df, pd.DataFrame) and not completed_query_in
     query_input_df = completed_query_input_df
     query_input_label = "当前 EPA/ECHA 查询使用标识符补全结果。"
 else:
-    query_input_df = raw_input_df
+    query_input_df = prepared_input_df
     query_input_label = "当前 EPA/ECHA 查询使用原始上传表。"
 
 comptox_input_df = normalize_comptox_input_columns(query_input_df)
@@ -356,6 +403,8 @@ if source_origin_valid:
     st.success(source_origin_message)
 else:
     st.warning(f"来源属性输入检查未通过：{source_origin_message}")
+
+render_structure_preparation_summary(prepared_input_df)
 
 tab_input, tab_resolver, tab_epa, tab_echa, tab_echa_ghs, tab_source_origin, tab_rose, tab_output, tab_notes = st.tabs(
     [
@@ -1132,6 +1181,10 @@ with tab_output:
         completed_df=completed_df,
         warnings_df=identifier_warnings_df,
     )
+    identifier_workbook_buffer = append_structure_preparation_sheet(
+        identifier_workbook_buffer,
+        prepared_input_df,
+    )
 
     st.download_button(
         label="下载标识符补全结果",
@@ -1160,6 +1213,7 @@ with tab_output:
         candidates_df=candidates_df,
         errors_df=errors_df,
     )
+    workbook_buffer = append_structure_preparation_sheet(workbook_buffer, prepared_input_df)
 
     st.download_button(
         label="下载 CompTox 用途查询结果",
@@ -1180,6 +1234,7 @@ with tab_output:
         dossiers_df=echa_dossiers_df,
         errors_df=echa_errors_df,
     )
+    echa_workbook_buffer = append_structure_preparation_sheet(echa_workbook_buffer, prepared_input_df)
 
     st.download_button(
         label="下载 ECHA 用途查询结果",
@@ -1198,6 +1253,7 @@ with tab_output:
         classifications_df=echa_ghs_classifications_df,
         errors_df=echa_ghs_errors_df,
     )
+    echa_ghs_workbook_buffer = append_structure_preparation_sheet(echa_ghs_workbook_buffer, prepared_input_df)
 
     st.download_button(
         label="下载 ECHA GHS危害查询结果",
@@ -1216,6 +1272,7 @@ with tab_output:
         evidence_df=source_origin_evidence_df,
         errors_df=source_origin_errors_df,
     )
+    source_origin_workbook_buffer = append_structure_preparation_sheet(source_origin_workbook_buffer, prepared_input_df)
 
     st.download_button(
         label="下载来源属性评估结果",

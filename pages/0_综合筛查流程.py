@@ -34,7 +34,10 @@ from src.cp_screening_workflow import (  # noqa: E402
 )
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch  # noqa: E402
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, run_identifier_completion_batch  # noqa: E402
-from src.mol_structure_parser import prepare_structure_dataframe  # noqa: E402
+from src.mol_structure_parser import (  # noqa: E402
+    prepare_structure_dataframe,
+    summarize_structure_preparation,
+)
 from src.pov_lrtp_replica import run_pov_lrtp_batch  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 from src.r_screening_replica import ScreeningConfig, run_screening_pipeline  # noqa: E402
@@ -399,7 +402,14 @@ def normalize_samples_for_mappings(samples, sample_mappings):
                 }
             )
 
-        normalized_samples.append({**sample, "data": normalized, "column_mapping": mapping})
+        normalized_samples.append(
+            {
+                **sample,
+                "data": normalized,
+                "column_mapping": mapping,
+                "structure_preparation": prepared,
+            }
+        )
 
     warning_table = pd.DataFrame(warnings, columns=["stage", "sample_id", "message"])
     return normalized_samples, selected_peak_cols, warning_table
@@ -562,6 +572,17 @@ def collect_front_half(samples, sample_mappings, detection_threshold):
     )
     summary_figure_paths = build_summary_figure_paths(screening_results, group_area_mean, output_root)
     representative_peak_col = selected_peak_cols[0] if selected_peak_cols else ""
+    structure_summaries = pd.DataFrame(
+        [
+            {"sample_id": sample["name"], **summarize_structure_preparation(sample["structure_preparation"])}
+            for sample in normalized_samples
+        ]
+    )
+    structure_audits = []
+    for sample in normalized_samples:
+        audit = sample["structure_preparation"].copy()
+        audit.insert(0, "sample_id", sample["name"])
+        structure_audits.append(audit)
 
     return {
         "output_root": str(output_root),
@@ -583,6 +604,8 @@ def collect_front_half(samples, sample_mappings, detection_threshold):
         ),
         "selected_peak_cols": selected_peak_cols,
         "sample_mappings": sample_mappings,
+        "structure_preparation_summary": structure_summaries,
+        "structure_preparation_audit": pd.concat(structure_audits, ignore_index=True) if structure_audits else pd.DataFrame(),
         "warnings": pd.DataFrame(warnings, columns=["stage", "sample_id", "message"]),
     }
 
@@ -648,6 +671,7 @@ def workflow_tables(front_state, downstream_state=None):
         "Group_Area_Raw_Long": front_state.get("group_area_raw_long", pd.DataFrame()),
         "Group_Area_Mean_By_Sample": front_state.get("group_area_mean_by_sample", pd.DataFrame()),
         "DF_Table": front_state.get("df_table", pd.DataFrame()),
+        "Structure_Preparation": front_state.get("structure_preparation_audit", pd.DataFrame()),
         "Identifier_Completion": downstream_state.get("completed_identifiers", pd.DataFrame()),
         "EPI_Results": downstream_state.get("epi_results", pd.DataFrame()),
         "Pov_LRTP": downstream_state.get("pov_lrtp_results", pd.DataFrame()),
@@ -786,6 +810,14 @@ with tab_front:
         show_dataframe(front_state["df_table"])
         st.subheader("Sample_Peak_Area")
         show_dataframe(front_state["sample_peak_area"])
+        st.subheader("结构准备汇总")
+        show_dataframe(front_state["structure_preparation_summary"])
+        structure_audit = front_state["structure_preparation_audit"]
+        if not structure_audit.empty:
+            audit_mask = structure_audit["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | structure_audit["parse_status"].eq("解析失败")
+            if audit_mask.any():
+                with st.expander("查看结构准备审计记录", expanded=False):
+                    show_dataframe(structure_audit.loc[audit_mask])
         if not front_state["warnings"].empty:
             st.warning(f"化学类型图、DBE图、VK图与 DF 有 {len(front_state['warnings'])} 条提示或失败。")
             show_dataframe(front_state["warnings"])

@@ -29,6 +29,10 @@ from src.episuite_io import (  # noqa: E402
     validate_input,
 )
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
+from src.mol_structure_parser import (  # noqa: E402
+    prepare_structure_dataframe,
+    summarize_structure_preparation,
+)
 
 
 INPUT_CACHE_KEYS = (
@@ -88,6 +92,25 @@ def render_epi_web_tables(epi_tables):
             st.dataframe(raw_table[preview_cols], use_container_width=True)
 
 
+def render_structure_preparation_summary(prepared_df):
+    summary = summarize_structure_preparation(prepared_df)
+    st.caption("结构准备（MOL / SMILES）")
+    labels = ["MOL 行", "解析成功", "修复 M END", "SMILES 冲突", "解析失败"]
+    values = [
+        summary["mol_rows"],
+        summary["parsed_success"],
+        summary["repaired_m_end"],
+        summary["smiles_conflicts"],
+        summary["parse_failures"],
+    ]
+    for column, label, value in zip(st.columns(5), labels, values):
+        column.metric(label, value)
+    if summary["smiles_conflicts"] or summary["parse_failures"]:
+        with st.expander("查看结构准备审计记录", expanded=False):
+            mask = prepared_df["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | prepared_df["parse_status"].eq("解析失败")
+            st.dataframe(prepared_df.loc[mask], use_container_width=True)
+
+
 st.set_page_config(
     page_title="EPI Suite 环境归趋预测 - ChemPriority",
     page_icon="🌊",
@@ -143,8 +166,9 @@ if st.button("清空当前数据", key="epi_clear_cached_input"):
     st.rerun()
 
 try:
-    input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
-    input_df = normalize_input_columns(input_df)
+    raw_input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
+    prepared_input_df = prepare_structure_dataframe(raw_input_df)
+    input_df = normalize_input_columns(prepared_input_df)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")
     st.stop()
@@ -156,6 +180,7 @@ if not is_valid:
     st.stop()
 
 st.success(message)
+render_structure_preparation_summary(prepared_input_df)
 
 tab_input, tab_predict, tab_fallback, tab_parse, tab_output = st.tabs(
     ["输入数据", "网页端预测", "备用输入包", "解析外部结果", "结果下载"]

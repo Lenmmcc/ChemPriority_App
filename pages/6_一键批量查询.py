@@ -13,6 +13,7 @@ from src.auto_query_workflow import (
     run_auto_query_workflow,
 )
 from src.query_cache import clear_query_cache, current_cache_path
+from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
 from src.upload_state import cached_uploads, clear_uploads, store_uploads, upload_bytes
 
 
@@ -53,6 +54,25 @@ def _optional_column_index(columns, value):
 
 def _show_dataframe(frame):
     st.dataframe(frame, use_container_width=True, hide_index=True)
+
+
+def _render_structure_preparation_summary(prepared_df):
+    summary = summarize_structure_preparation(prepared_df)
+    st.caption("结构准备（MOL / SMILES）")
+    labels = ["MOL 行", "解析成功", "修复 M END", "SMILES 冲突", "解析失败"]
+    values = [
+        summary["mol_rows"],
+        summary["parsed_success"],
+        summary["repaired_m_end"],
+        summary["smiles_conflicts"],
+        summary["parse_failures"],
+    ]
+    for column, label, value in zip(st.columns(5), labels, values):
+        column.metric(label, value)
+    if summary["smiles_conflicts"] or summary["parse_failures"]:
+        with st.expander("查看结构准备审计记录", expanded=False):
+            mask = prepared_df["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | prepared_df["parse_status"].eq("解析失败")
+            _show_dataframe(prepared_df.loc[mask])
 
 
 uploaded_file = st.file_uploader(
@@ -129,14 +149,20 @@ with st.expander("列识别与校正", expanded=False):
         default=[column for column in default_mapping.group_area_cols if column in columns],
     )
     optional_columns = ["", *columns]
-    opt_a, opt_b = st.columns(2)
+    opt_a, opt_b, opt_c = st.columns(3)
     with opt_a:
+        mol_column = st.selectbox(
+            "可选：MOL 文本列",
+            optional_columns,
+            index=_optional_column_index(columns, default_mapping.mol_column),
+        ) or None
+    with opt_b:
         smiles_col = st.selectbox(
             "可选：已有 SMILES 列",
             optional_columns,
             index=_optional_column_index(columns, default_mapping.smiles_col),
         ) or None
-    with opt_b:
+    with opt_c:
         cas_col = st.selectbox(
             "可选：已有 CAS 列",
             optional_columns,
@@ -148,9 +174,17 @@ mapping = AutoWorkflowMapping(
     formula_col=formula_col,
     peak_area_col=peak_area_col,
     group_area_cols=list(group_area_cols),
+    mol_column=mol_column,
     smiles_col=smiles_col,
     cas_col=cas_col,
 )
+
+prepared_input_df = prepare_structure_dataframe(
+    input_df,
+    mol_column=mapping.mol_column,
+    smiles_column=mapping.smiles_col,
+)
+_render_structure_preparation_summary(prepared_input_df)
 
 with st.expander("查看前 20 行", expanded=False):
     _show_dataframe(input_df.head(20))
@@ -230,7 +264,7 @@ if start_run:
         source_origin_max_workers=int(source_origin_max_workers),
     )
     with st.spinner("正在按顺序运行已选项目..."):
-        result = run_auto_query_workflow(input_df, config=config, progress_callback=update_progress)
+        result = run_auto_query_workflow(prepared_input_df, config=config, progress_callback=update_progress)
         charts = build_auto_workflow_charts(result)
         package = build_auto_workflow_zip(result, charts)
     st.session_state["auto_query_workflow_result"] = result
@@ -252,6 +286,9 @@ if result is not None:
     if table_names:
         selected_table = st.selectbox("查看结果表", table_names)
         _show_dataframe(result.tables[selected_table])
+    structure_preparation = result.tables.get("Structure_Preparation")
+    if isinstance(structure_preparation, pd.DataFrame):
+        _render_structure_preparation_summary(structure_preparation)
 
     charts = st.session_state.get("auto_query_workflow_charts") or {}
     if charts:
