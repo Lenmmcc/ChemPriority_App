@@ -11,6 +11,12 @@ from rdkit.Chem import Descriptors, rdMolDescriptors
 
 
 MOL_COLUMN_ALIASES = ("mol_text", "mol", "molfile", "structure")
+SMILES_COLUMN_ALIASES = (
+    "smiles",
+    "canonical_smiles",
+    "isomeric_smiles",
+    "smile",
+)
 RESULT_COLUMNS = (
     "parsed_smiles",
     "parsed_isomeric_smiles",
@@ -49,6 +55,14 @@ def find_mol_text_column(columns: Iterable[object]) -> object | None:
     """Return the first recognised MOL-text column name, if present."""
     for column in columns:
         if str(column).strip().casefold() in MOL_COLUMN_ALIASES:
+            return column
+    return None
+
+
+def find_smiles_column(columns: Iterable[object]) -> object | None:
+    """Return the first recognised source-SMILES column name, if present."""
+    for column in columns:
+        if str(column).strip().casefold() in SMILES_COLUMN_ALIASES:
             return column
     return None
 
@@ -126,3 +140,147 @@ def parse_mol_dataframe(
     for column in RESULT_COLUMNS:
         result[column] = parsed_df[column]
     return result
+
+
+def _empty_parse_dataframe(input_df: pd.DataFrame) -> pd.DataFrame:
+    result = input_df.copy()
+    empty_result = _empty_result("未提供 MOL 列")
+    for column in RESULT_COLUMNS:
+        result[column] = empty_result[column]
+    return result
+
+
+def _canonical_isomeric_smiles(value: object) -> str:
+    """Return canonical isomeric SMILES, or an empty string for invalid input."""
+    if not _has_text(value):
+        return ""
+    try:
+        mol = Chem.MolFromSmiles(str(value).strip())
+        if mol is None:
+            return ""
+        return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
+    except Exception:
+        return ""
+
+
+def _decide_smiles(
+    source_smiles: object,
+    parsed_smiles: object,
+    parsed_isomeric_smiles: object,
+    parse_status: object,
+) -> dict[str, str]:
+    source_text = str(source_smiles).strip() if _has_text(source_smiles) else ""
+    source_canonical = _canonical_isomeric_smiles(source_text)
+    mol_succeeded = (
+        parse_status == "成功"
+        and _has_text(parsed_smiles)
+        and _has_text(parsed_isomeric_smiles)
+    )
+
+    if not source_text:
+        if mol_succeeded:
+            return {
+                "smiles": str(parsed_smiles),
+                "smiles_source": "MOL 解析",
+                "smiles_decision_warning": "",
+            }
+        return {"smiles": "", "smiles_source": "", "smiles_decision_warning": ""}
+
+    if not source_canonical:
+        if mol_succeeded:
+            return {
+                "smiles": str(parsed_smiles),
+                "smiles_source": "MOL 解析",
+                "smiles_decision_warning": "原始 SMILES 无效，已改用 MOL 解析结果。",
+            }
+        return {
+            "smiles": "",
+            "smiles_source": "",
+            "smiles_decision_warning": "原始 SMILES 无效，且没有可用的 MOL 解析结果。",
+        }
+
+    if not mol_succeeded:
+        return {
+            "smiles": source_text,
+            "smiles_source": "原始 SMILES",
+            "smiles_decision_warning": "",
+        }
+
+    if source_canonical == str(parsed_isomeric_smiles):
+        return {
+            "smiles": source_text,
+            "smiles_source": "原始 SMILES（与 MOL 一致）",
+            "smiles_decision_warning": "",
+        }
+    return {
+        "smiles": source_text,
+        "smiles_source": "原始 SMILES（与 MOL 冲突）",
+        "smiles_decision_warning": "原始 SMILES 与 MOL 解析结果冲突，保留原始 SMILES。",
+    }
+
+
+def prepare_structure_dataframe(
+    input_df: pd.DataFrame,
+    mol_column: object | None = None,
+    smiles_column: object | None = None,
+) -> pd.DataFrame:
+    """Parse optional MOL text and choose a usable SMILES for every source row."""
+    selected_mol_column = mol_column
+    if selected_mol_column is None:
+        selected_mol_column = find_mol_text_column(input_df.columns)
+
+    if selected_mol_column is None:
+        result = _empty_parse_dataframe(input_df)
+    else:
+        result = parse_mol_dataframe(input_df, mol_column=selected_mol_column)
+
+    selected_smiles_column = smiles_column
+    if selected_smiles_column is None:
+        selected_smiles_column = find_smiles_column(input_df.columns)
+    if selected_smiles_column is not None and selected_smiles_column not in input_df.columns:
+        raise ValueError(f"SMILES 列不存在：{selected_smiles_column}")
+
+    source_values: Iterable[object]
+    if selected_smiles_column is None:
+        source_values = [""] * len(result)
+    else:
+        source_values = input_df[selected_smiles_column]
+
+    decisions = pd.DataFrame(
+        [
+            _decide_smiles(
+                source_smiles,
+                parsed_smiles,
+                parsed_isomeric_smiles,
+                parse_status,
+            )
+            for source_smiles, parsed_smiles, parsed_isomeric_smiles, parse_status in zip(
+                source_values,
+                result["parsed_smiles"],
+                result["parsed_isomeric_smiles"],
+                result["parse_status"],
+            )
+        ],
+        index=result.index,
+        columns=("smiles", "smiles_source", "smiles_decision_warning"),
+    )
+    for column in decisions:
+        result[column] = decisions[column]
+    return result
+
+
+def summarize_structure_preparation(prepared_df: pd.DataFrame) -> dict[str, int]:
+    """Summarize MOL parsing and source-SMILES decision outcomes."""
+    empty_series = pd.Series("", index=prepared_df.index)
+    parse_status = prepared_df.get("parse_status", empty_series)
+    parse_warnings = prepared_df.get("parse_warnings", empty_series).fillna("")
+    smiles_source = prepared_df.get("smiles_source", empty_series)
+    return {
+        "mol_rows": int((parse_status != "未提供 MOL 列").sum()),
+        "parsed_success": int((parse_status == "成功").sum()),
+        "repaired_m_end": int(
+            parse_warnings.str.contains("已自动补齐 M END", regex=False).sum()
+        ),
+        "smiles_conflicts": int((smiles_source == "原始 SMILES（与 MOL 冲突）").sum()),
+        "parse_failures": int((parse_status == "解析失败").sum()),
+    }

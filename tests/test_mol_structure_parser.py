@@ -4,9 +4,12 @@ import pandas as pd
 from rdkit import Chem
 
 from src.mol_structure_parser import (
+    RESULT_COLUMNS,
     find_mol_text_column,
     parse_mol_dataframe,
     parse_mol_text,
+    prepare_structure_dataframe,
+    summarize_structure_preparation,
 )
 
 
@@ -101,3 +104,85 @@ class MolDataFrameParserTests(unittest.TestCase):
                 pd.DataFrame({"Structure": [ETHANOL_MOL]}),
                 mol_column="raw_ctab",
             )
+
+
+class StructurePreparationTests(unittest.TestCase):
+    def test_uses_successfully_parsed_mol_when_source_smiles_is_blank(self):
+        prepared = prepare_structure_dataframe(
+            pd.DataFrame({"Structure": [ETHANOL_MOL], "SMILES": ["  "]})
+        )
+
+        self.assertEqual(prepared.loc[0, "smiles"], "CCO")
+        self.assertEqual(prepared.loc[0, "smiles_source"], "MOL 解析")
+
+    def test_preserves_valid_source_smiles_when_it_conflicts_with_mol(self):
+        prepared = prepare_structure_dataframe(
+            pd.DataFrame({"Structure": [ETHANOL_MOL], "smiles": ["c1ccccc1"]})
+        )
+
+        self.assertEqual(prepared.loc[0, "smiles"], "c1ccccc1")
+        self.assertEqual(prepared.loc[0, "smiles_source"], "原始 SMILES（与 MOL 冲突）")
+        self.assertIn("冲突", prepared.loc[0, "smiles_decision_warning"])
+
+    def test_compares_source_smiles_and_mol_by_canonical_isomeric_smiles(self):
+        prepared = prepare_structure_dataframe(
+            pd.DataFrame({"Structure": [ETHANOL_MOL], "smiles": ["OCC"]})
+        )
+
+        self.assertEqual(prepared.loc[0, "smiles"], "OCC")
+        self.assertEqual(prepared.loc[0, "smiles_source"], "原始 SMILES（与 MOL 一致）")
+
+    def test_uses_mol_when_source_smiles_is_invalid(self):
+        prepared = prepare_structure_dataframe(
+            pd.DataFrame({"Structure": [ETHANOL_MOL], "smiles": ["not valid"]})
+        )
+
+        self.assertEqual(prepared.loc[0, "smiles"], "CCO")
+        self.assertEqual(prepared.loc[0, "smiles_source"], "MOL 解析")
+        self.assertIn("无效", prepared.loc[0, "smiles_decision_warning"])
+
+    def test_handles_absent_mol_column_and_canonical_smiles_alias(self):
+        prepared = prepare_structure_dataframe(
+            pd.DataFrame({"Canonical_SMILES": ["OCC"]})
+        )
+
+        self.assertEqual(prepared.loc[0, "smiles"], "OCC")
+        self.assertEqual(prepared.loc[0, "smiles_source"], "原始 SMILES")
+        self.assertEqual(prepared.loc[0, "parse_status"], "未提供 MOL 列")
+        self.assertTrue(all(column in prepared for column in RESULT_COLUMNS))
+
+    def test_adds_decision_columns_for_an_empty_input_frame(self):
+        prepared = prepare_structure_dataframe(pd.DataFrame({"smiles": []}))
+
+        self.assertTrue(
+            all(
+                column in prepared
+                for column in ("smiles", "smiles_source", "smiles_decision_warning")
+            )
+        )
+        self.assertEqual(len(prepared), 0)
+
+    def test_summarizes_mol_parsing_and_smiles_conflicts(self):
+        prepared = prepare_structure_dataframe(
+            pd.DataFrame(
+                {
+                    "Structure": [
+                        ETHANOL_MOL.replace("M  END\n", "") + "$$$$\n",
+                        "bad",
+                        "",
+                    ],
+                    "smiles": ["c1ccccc1", "CCO", ""],
+                }
+            )
+        )
+
+        self.assertEqual(
+            summarize_structure_preparation(prepared),
+            {
+                "mol_rows": 3,
+                "parsed_success": 1,
+                "repaired_m_end": 1,
+                "smiles_conflicts": 1,
+                "parse_failures": 1,
+            },
+        )
