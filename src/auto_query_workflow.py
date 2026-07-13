@@ -23,6 +23,7 @@ from src.echa_ghs import run_echa_ghs_batch
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, REQUIRED_IDENTIFIER_COLUMNS, run_identifier_completion_batch
+from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
 from src.pov_lrtp_replica import run_pov_lrtp_batch
 from src.r_screening_replica.pipeline import run_screening_pipeline
 from src.r_screening_replica.schema import ScreeningConfig
@@ -48,6 +49,7 @@ class AutoWorkflowMapping:
     formula_col: str = "NIST Lib Hit Formula"
     peak_area_col: str = "Avg TIC"
     group_area_cols: list[str] = field(default_factory=list)
+    mol_column: str | None = None
     smiles_col: str | None = None
     cas_col: str | None = None
 
@@ -122,6 +124,7 @@ def detect_default_mapping(columns) -> AutoWorkflowMapping:
     formula_col = _first_existing(columns, ["NIST Lib Hit Formula", "formula", "Formula", "Molecular Formula"])
     peak_area_col = _first_existing(columns, ["Avg TIC", "Group_Area", "Peak_Area", "Peak area", "Area"])
     group_area_cols = [column for column in columns if _is_group_area_column(column)]
+    mol_column = find_mol_text_column(columns)
     smiles_col = _first_existing(columns, ["smiles", "SMILES", "canonical_smiles"], default=None)
     cas_col = _first_existing(columns, ["cas", "CAS", "CASRN", "CAS No."], default=None)
     return AutoWorkflowMapping(
@@ -129,6 +132,7 @@ def detect_default_mapping(columns) -> AutoWorkflowMapping:
         formula_col=formula_col or (columns[0] if columns else ""),
         peak_area_col=peak_area_col or (group_area_cols[0] if group_area_cols else (columns[0] if columns else "")),
         group_area_cols=group_area_cols,
+        mol_column=mol_column,
         smiles_col=smiles_col,
         cas_col=cas_col,
     )
@@ -141,9 +145,15 @@ def run_auto_query_workflow(
 ) -> AutoWorkflowResult:
     config = config or AutoWorkflowConfig()
     mapping = config.mapping or detect_default_mapping(input_df.columns)
-    normalized = _normalize_input(input_df, mapping)
+    prepared_input = prepare_structure_dataframe(
+        input_df,
+        mol_column=mapping.mol_column,
+        smiles_column=mapping.smiles_col,
+    )
+    normalized = _normalize_input(prepared_input, mapping)
     representative = build_representative_table(normalized, mapping)
     tables: OrderedDict[str, pd.DataFrame] = OrderedDict()
+    tables["Structure_Preparation"] = prepared_input
     status_rows = []
     warning_rows = []
 
@@ -422,8 +432,8 @@ def build_representative_table(input_df: pd.DataFrame, mapping: AutoWorkflowMapp
         frame["Group_Area"] = pd.to_numeric(input_df[mapping.peak_area_col], errors="coerce")
     else:
         frame["Group_Area"] = pd.NA
-    if mapping.smiles_col and mapping.smiles_col in input_df.columns:
-        frame["SMILES_input"] = input_df[mapping.smiles_col]
+    if "smiles" in input_df.columns:
+        frame["SMILES_input"] = input_df["smiles"]
     if mapping.cas_col and mapping.cas_col in input_df.columns:
         frame["CAS_input"] = input_df[mapping.cas_col]
     frame["compound_key"] = frame["Name"].map(_compound_key)

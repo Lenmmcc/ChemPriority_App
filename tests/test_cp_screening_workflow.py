@@ -1,4 +1,5 @@
 import io
+import ast
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 import src.cp_screening_workflow as workflow
+from src.mol_structure_parser import prepare_structure_dataframe
 from src.cp_screening_workflow import (
     EXPECTED_WORKBOOK_SHEETS,
     build_detection_frequency,
@@ -18,7 +20,106 @@ from src.cp_screening_workflow import (
 )
 
 
+ETHANOL_MOL = """ethanol
+  ChemPriority
+
+  3  2  0  0  0  0  0  0  0  0  0
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.5000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    2.2500    1.2990    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  1  0
+M  END
+"""
+
+
+def load_screening_mapping_normalizer():
+    page_path = Path("pages/0_综合筛查流程.py")
+    page_module = ast.parse(page_path.read_text(encoding="utf-8"), filename=str(page_path))
+    function = next(
+        node
+        for node in page_module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "normalize_samples_for_mappings"
+    )
+    namespace = {
+        "pd": pd,
+        "prepare_structure_dataframe": prepare_structure_dataframe,
+        "STANDARD_COMPOUND_COL": "Name",
+        "STANDARD_FORMULA_COL": "formula",
+        "STANDARD_SMILES_COL": "SMILES_input",
+        "STANDARD_CAS_COL": "CAS_input",
+        "clean_text": lambda value: "" if value is None or pd.isna(value) else str(value).strip(),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(page_path), "exec"), namespace)
+    return namespace["normalize_samples_for_mappings"]
+
+
 class CpScreeningWorkflowTests(unittest.TestCase):
+    def test_screening_mapping_uses_mol_derived_smiles_for_downstream_input(self):
+        normalize_samples = load_screening_mapping_normalizer()
+        samples = [
+            {
+                "name": "Ethanol",
+                "data": pd.DataFrame(
+                    {
+                        "Compound": ["Ethanol"],
+                        "Formula": ["C2H6O"],
+                        "Peak_Area": [100.0],
+                        "Structure": [ETHANOL_MOL],
+                    }
+                ),
+            }
+        ]
+        mappings = {
+            "Ethanol": {
+                "compound_col": "Compound",
+                "formula_col": "Formula",
+                "peak_area_col": "Peak_Area",
+                "sample_cols": ["Peak_Area"],
+                "mol_column": "Structure",
+                "smiles_col": None,
+                "cas_col": None,
+            }
+        }
+
+        normalized, _, _ = normalize_samples(samples, mappings)
+
+        self.assertIn("SMILES_input", normalized[0]["data"].columns)
+        self.assertEqual(normalized[0]["data"].loc[0, "SMILES_input"], "CCO")
+
+    def test_screening_mapping_preserves_raw_smiles_when_mol_is_the_fallback(self):
+        normalize_samples = load_screening_mapping_normalizer()
+        samples = [
+            {
+                "name": "Ethanol",
+                "data": pd.DataFrame(
+                    {
+                        "Compound": ["Ethanol"],
+                        "Formula": ["C2H6O"],
+                        "Peak_Area": [100.0],
+                        "Structure": [ETHANOL_MOL],
+                        "smiles": ["not valid"],
+                    }
+                ),
+            }
+        ]
+        mappings = {
+            "Ethanol": {
+                "compound_col": "Compound",
+                "formula_col": "Formula",
+                "peak_area_col": "Peak_Area",
+                "sample_cols": ["Peak_Area"],
+                "mol_column": "Structure",
+                "smiles_col": "smiles",
+                "cas_col": None,
+            }
+        }
+
+        normalized, _, _ = normalize_samples(samples, mappings)
+
+        self.assertEqual(normalized[0]["data"].loc[0, "smiles"], "not valid")
+        self.assertEqual(normalized[0]["data"].loc[0, "SMILES_input"], "CCO")
+
     def test_detection_frequency_uses_uploaded_files_as_samples(self):
         samples = [
             (

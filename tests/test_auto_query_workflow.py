@@ -17,6 +17,19 @@ from src.auto_query_workflow import (
 )
 
 
+ETHANOL_MOL = """ethanol
+  ChemPriority
+
+  3  2  0  0  0  0  0  0  0  0  0
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.5000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    2.2500    1.2990    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  1  0
+M  END
+"""
+
+
 class AutoQueryWorkflowTests(unittest.TestCase):
     def test_detect_default_mapping_for_level3_workbook_schema(self):
         columns = [
@@ -44,6 +57,44 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 "Group Area: 01YiChang-zhong-3",
             ],
         )
+
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_auto_workflow_passes_mol_derived_smiles_to_identifier_step(self, run_identifier):
+        self.assertTrue(hasattr(AutoWorkflowMapping, "mol_column"))
+        input_df = pd.DataFrame(
+            {
+                "Name": ["Ethanol"],
+                "NIST Lib Hit Formula": ["C2 H6 O"],
+                "Avg TIC": [100.0],
+                "Structure": [ETHANOL_MOL],
+            }
+        )
+        run_identifier.return_value = (
+            pd.DataFrame(
+                {
+                    "compound": ["Ethanol"],
+                    "smiles": ["CCO"],
+                    "cas": ["64-17-5"],
+                    "ec": [""],
+                    "dtxsid": [""],
+                    "echa_id": [""],
+                }
+            ),
+            pd.DataFrame(),
+        )
+
+        result = run_auto_query_workflow(
+            input_df,
+            AutoWorkflowConfig(
+                mapping=AutoWorkflowMapping(mol_column="Structure"),
+                run_r_replicate_df=False,
+                run_identifier=True,
+                identifier_delay_seconds=0,
+            ),
+        )
+
+        self.assertEqual(run_identifier.call_args.args[0].loc[0, "smiles"], "CCO")
+        self.assertIn("Structure_Preparation", result.tables)
 
     @patch("src.auto_query_workflow.run_source_origin_batch")
     @patch("src.auto_query_workflow.run_echa_ghs_batch")

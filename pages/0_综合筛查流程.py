@@ -34,6 +34,7 @@ from src.cp_screening_workflow import (  # noqa: E402
 )
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch  # noqa: E402
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, run_identifier_completion_batch  # noqa: E402
+from src.mol_structure_parser import prepare_structure_dataframe  # noqa: E402
 from src.pov_lrtp_replica import run_pov_lrtp_batch  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 from src.r_screening_replica import ScreeningConfig, run_screening_pipeline  # noqa: E402
@@ -257,6 +258,7 @@ def sample_mapping_defaults(sample):
         "formula_col": formula_col,
         "peak_area_col": peak_area_col,
         "sample_cols": default_sample_cols,
+        "mol_column": None,
         "smiles_col": None,
         "cas_col": None,
     }
@@ -305,15 +307,22 @@ def render_sample_mapping_tabs(samples):
                 st.info("未选择 Group Area 列；本文件不会参与化学类型图、DBE图、VK图、DF 和 PA/ToxPi。")
 
             optional_columns = [""] + columns
-            opt_a, opt_b = st.columns(2)
+            opt_a, opt_b, opt_c = st.columns(3)
             with opt_a:
+                mol_column = st.selectbox(
+                    "可选：MOL 文本列",
+                    optional_columns,
+                    index=0,
+                    key=widget_key("cp_mol_col", sample["name"], index),
+                ) or None
+            with opt_b:
                 smiles_col = st.selectbox(
                     "可选：已有 SMILES 列",
                     optional_columns,
                     index=0,
                     key=widget_key("cp_smiles_col", sample["name"], index),
                 ) or None
-            with opt_b:
+            with opt_c:
                 cas_col = st.selectbox(
                     "可选：已有 CAS 列",
                     optional_columns,
@@ -326,6 +335,7 @@ def render_sample_mapping_tabs(samples):
                 "formula_col": formula_col,
                 "peak_area_col": peak_area_col,
                 "sample_cols": sample_cols,
+                "mol_column": mol_column,
                 "smiles_col": smiles_col,
                 "cas_col": cas_col,
             }
@@ -341,7 +351,12 @@ def normalize_samples_for_mappings(samples, sample_mappings):
     for sample in samples:
         mapping = sample_mappings.get(sample["name"]) or sample_mapping_defaults(sample)
         frame = sample["data"]
-        normalized = pd.DataFrame(index=frame.index)
+        prepared = prepare_structure_dataframe(
+            frame,
+            mol_column=mapping.get("mol_column"),
+            smiles_column=mapping.get("smiles_col"),
+        )
+        normalized = frame.copy()
 
         compound_col = mapping.get("compound_col")
         if compound_col in frame.columns:
@@ -370,9 +385,7 @@ def normalize_samples_for_mappings(samples, sample_mappings):
         if peak_area_col and peak_area_col in frame.columns and peak_area_col not in normalized.columns:
             normalized[peak_area_col] = frame[peak_area_col]
 
-        smiles_col = mapping.get("smiles_col")
-        if smiles_col and smiles_col in frame.columns:
-            normalized[STANDARD_SMILES_COL] = frame[smiles_col]
+        normalized[STANDARD_SMILES_COL] = prepared["smiles"]
         cas_col = mapping.get("cas_col")
         if cas_col and cas_col in frame.columns:
             normalized[STANDARD_CAS_COL] = frame[cas_col]
