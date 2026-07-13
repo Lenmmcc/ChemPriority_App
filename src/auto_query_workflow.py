@@ -145,11 +145,15 @@ def run_auto_query_workflow(
 ) -> AutoWorkflowResult:
     config = config or AutoWorkflowConfig()
     mapping = config.mapping or detect_default_mapping(input_df.columns)
-    prepared_input = prepare_structure_dataframe(
-        input_df,
-        mol_column=mapping.mol_column,
-        smiles_column=mapping.smiles_col,
-    )
+    audit_columns = {"parse_status", "smiles_source", "smiles_decision_warning"}
+    if audit_columns.issubset(input_df.columns):
+        prepared_input = input_df.copy()
+    else:
+        prepared_input = prepare_structure_dataframe(
+            input_df,
+            mol_column=mapping.mol_column,
+            smiles_column=mapping.smiles_col,
+        )
     normalized = _normalize_input(prepared_input, mapping)
     representative = build_representative_table(normalized, mapping)
     tables: OrderedDict[str, pd.DataFrame] = OrderedDict()

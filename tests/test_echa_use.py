@@ -64,15 +64,17 @@ class EchaUseSummaryTests(unittest.TestCase):
         self, resolve_substance, fetch_dossiers, fetch_html, extract_candidates
     ):
         resolve_substance.side_effect = [
+            {**_resolution(), "echa_id": "100.001.999", "status": "使用输入 ECHA ID"},
             {**_resolution(), "echa_id": "100.001.111", "status": "通过 compound 匹配"},
             {**_resolution(), "echa_id": "100.001.222", "status": "通过 smiles 匹配"},
         ]
         extract_candidates.side_effect = [
+            [_candidate("Input use", "输入标识用途")],
             [_candidate("Name use", "名称用途")],
             [_candidate("SMILES use", "结构用途")],
         ]
 
-        summary_df, candidates_df, _, warnings_df = echa_use.run_echa_use_batch(
+        summary_df, candidates_df, dossiers_df, warnings_df = echa_use.run_echa_use_batch(
             pd.DataFrame(
                 [
                     {
@@ -87,9 +89,11 @@ class EchaUseSummaryTests(unittest.TestCase):
             delay_seconds=0,
         )
 
-        self.assertEqual(resolve_substance.call_count, 2)
-        name_query = resolve_substance.call_args_list[0].args[0]
-        smiles_query = resolve_substance.call_args_list[1].args[0]
+        self.assertEqual(resolve_substance.call_count, 3)
+        input_query = resolve_substance.call_args_list[0].args[0]
+        name_query = resolve_substance.call_args_list[1].args[0]
+        smiles_query = resolve_substance.call_args_list[2].args[0]
+        self.assertEqual(input_query["echa_id"], "100.001.999")
         self.assertEqual(name_query["compound"], "Example name")
         self.assertEqual(name_query["smiles"], "")
         self.assertEqual(name_query["cas"], "")
@@ -100,10 +104,13 @@ class EchaUseSummaryTests(unittest.TestCase):
         self.assertEqual(smiles_query["cas"], "")
         self.assertEqual(smiles_query["ec"], "")
         self.assertEqual(smiles_query["echa_id"], "")
-        self.assertEqual(summary_df["query_source"].tolist(), ["名称", "SMILES"])
-        self.assertEqual(candidates_df["echa_id"].tolist(), ["100.001.111", "100.001.222"])
-        self.assertEqual(candidates_df["query_source"].tolist(), ["名称", "SMILES"])
-        self.assertEqual(candidates_df["is_primary_identity"].tolist(), [False, True])
+        self.assertEqual(summary_df["query_source"].tolist(), ["输入标识", "名称", "SMILES"])
+        self.assertEqual(candidates_df["echa_id"].tolist(), ["100.001.999", "100.001.111", "100.001.222"])
+        self.assertEqual(candidates_df["query_source"].tolist(), ["输入标识", "名称", "SMILES"])
+        self.assertEqual(candidates_df["is_primary_identity"].tolist(), [True, False, False])
+        self.assertEqual(dossiers_df["query_source"].tolist(), ["输入标识", "名称", "SMILES"])
+        self.assertEqual(dossiers_df["query_value"].tolist(), ["100.001.999", "Example name", "CCO"])
+        self.assertEqual(dossiers_df["is_primary_identity"].tolist(), [True, False, False])
         conflict_warnings = warnings_df[warnings_df["stage"].eq("identity_conflict")]
         self.assertEqual(len(conflict_warnings), 1)
         self.assertEqual(conflict_warnings.iloc[0]["query_source"], "名称 | SMILES")

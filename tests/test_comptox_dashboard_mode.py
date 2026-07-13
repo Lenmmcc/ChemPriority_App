@@ -56,10 +56,12 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self, resolve_dtxsid, fetch_use_candidates
     ):
         resolve_dtxsid.side_effect = [
+            {"dtxsid": "DTXSID0099999", "status": "使用输入 DTXSID", "message": ""},
             {"dtxsid": "DTXSID0000001", "status": "通过名称匹配", "message": ""},
             {"dtxsid": "DTXSID0000002", "status": "通过 SMILES 匹配", "message": ""},
         ]
         fetch_use_candidates.side_effect = [
+            ([_candidate("product_category", raw_use="input identity evidence")], []),
             ([_candidate("product_category", raw_use="name evidence")], []),
             ([_candidate("product_category", raw_use="smiles evidence")], []),
         ]
@@ -79,9 +81,11 @@ class CompToxDashboardModeTests(unittest.TestCase):
             delay_seconds=0,
         )
 
-        self.assertEqual(resolve_dtxsid.call_count, 2)
-        name_query = resolve_dtxsid.call_args_list[0].args[0]
-        smiles_query = resolve_dtxsid.call_args_list[1].args[0]
+        self.assertEqual(resolve_dtxsid.call_count, 3)
+        input_query = resolve_dtxsid.call_args_list[0].args[0]
+        name_query = resolve_dtxsid.call_args_list[1].args[0]
+        smiles_query = resolve_dtxsid.call_args_list[2].args[0]
+        self.assertEqual(input_query["dtxsid"], "DTXSID0099999")
         self.assertEqual(name_query["compound"], "Example name")
         self.assertEqual(name_query["smiles"], "")
         self.assertEqual(name_query["cas"], "")
@@ -90,11 +94,11 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertEqual(smiles_query["smiles"], "CCO")
         self.assertEqual(smiles_query["cas"], "")
         self.assertEqual(smiles_query["dtxsid"], "")
-        self.assertEqual(summary_df["query_source"].tolist(), ["名称", "SMILES"])
-        self.assertEqual(summary_df["query_value"].tolist(), ["Example name", "CCO"])
-        self.assertEqual(candidates_df["query_source"].tolist(), ["名称", "SMILES"])
-        self.assertEqual(candidates_df["query_value"].tolist(), ["Example name", "CCO"])
-        self.assertEqual(candidates_df["is_primary_identity"].tolist(), [False, True])
+        self.assertEqual(summary_df["query_source"].tolist(), ["输入标识", "名称", "SMILES"])
+        self.assertEqual(summary_df["query_value"].tolist(), ["DTXSID0099999", "Example name", "CCO"])
+        self.assertEqual(candidates_df["query_source"].tolist(), ["输入标识", "名称", "SMILES"])
+        self.assertEqual(candidates_df["query_value"].tolist(), ["DTXSID0099999", "Example name", "CCO"])
+        self.assertEqual(candidates_df["is_primary_identity"].tolist(), [True, False, False])
         self.assertEqual(errors_df["stage"].tolist(), ["identity_conflict"])
         self.assertEqual(errors_df.loc[0, "query_source"], "名称 | SMILES")
 

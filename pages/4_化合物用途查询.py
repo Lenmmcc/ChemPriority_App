@@ -597,9 +597,13 @@ with tab_resolver:
     else:
         st.subheader("补全结果")
         show_dataframe(completed_df)
+        resolver_workbook_buffer = append_structure_preparation_sheet(
+            resolver_build_result_workbook(resolver_input_df, completed_df, warnings_df),
+            prepared_input_df,
+        )
         st.download_button(
             label="下载标识符补全结果",
-            data=resolver_build_result_workbook(resolver_input_df, completed_df, warnings_df),
+            data=resolver_workbook_buffer,
             file_name="Identifier_Completion_Report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="resolver_download_in_tab",

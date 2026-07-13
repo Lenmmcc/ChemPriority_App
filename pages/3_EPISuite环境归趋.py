@@ -5,6 +5,8 @@ import sys
 
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +71,21 @@ def clear_cached_input():
     for key in INPUT_CACHE_KEYS:
         st.session_state.pop(key, None)
     clear_result_cache()
+
+
+def append_structure_preparation_sheet(workbook_buffer, prepared_df):
+    workbook_buffer.seek(0)
+    workbook = load_workbook(workbook_buffer)
+    if "Structure_Preparation" in workbook.sheetnames:
+        del workbook["Structure_Preparation"]
+    worksheet = workbook.create_sheet("Structure_Preparation")
+    export_df = prepared_df.astype(object).where(prepared_df.notna(), None)
+    for row in dataframe_to_rows(export_df, index=False, header=True):
+        worksheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
 
 
 def render_epi_web_tables(epi_tables):
@@ -369,6 +386,7 @@ with tab_output:
         raw_df=raw_results,
         epi_tables=web_tables,
     )
+    workbook_buffer = append_structure_preparation_sheet(workbook_buffer, prepared_input_df)
 
     st.download_button(
         label="下载 EPI Suite 结果工作簿",

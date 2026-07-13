@@ -15,6 +15,7 @@ from src.auto_query_workflow import (
     detect_default_mapping,
     run_auto_query_workflow,
 )
+from src.mol_structure_parser import prepare_structure_dataframe
 
 
 ETHANOL_MOL = """ethanol
@@ -95,6 +96,40 @@ class AutoQueryWorkflowTests(unittest.TestCase):
 
         self.assertEqual(run_identifier.call_args.args[0].loc[0, "smiles"], "CCO")
         self.assertIn("Structure_Preparation", result.tables)
+
+    def test_auto_workflow_reuses_prepared_mol_audit_without_reparsing(self):
+        raw_input = pd.DataFrame(
+            {
+                "Name": ["Ethanol"],
+                "NIST Lib Hit Formula": ["C2 H6 O"],
+                "Avg TIC": [100.0],
+                "Structure": [ETHANOL_MOL],
+                "SMILES": ["not valid"],
+            }
+        )
+        prepared_input = prepare_structure_dataframe(
+            raw_input,
+            mol_column="Structure",
+            smiles_column="SMILES",
+        )
+
+        with patch(
+            "src.auto_query_workflow.prepare_structure_dataframe",
+            side_effect=AssertionError("prepared input must not be parsed again"),
+        ):
+            result = run_auto_query_workflow(
+                prepared_input,
+                AutoWorkflowConfig(
+                    mapping=AutoWorkflowMapping(mol_column="Structure", smiles_col="SMILES"),
+                    run_r_replicate_df=False,
+                    run_identifier=False,
+                ),
+            )
+
+        pd.testing.assert_frame_equal(result.tables["Structure_Preparation"], prepared_input)
+        self.assertEqual(result.tables["Structure_Preparation"].loc[0, "smiles"], "CCO")
+        self.assertEqual(result.tables["Structure_Preparation"].loc[0, "smiles_source"], "MOL 解析")
+        self.assertIn("原始 SMILES 无效", result.tables["Structure_Preparation"].loc[0, "smiles_decision_warning"])
 
     @patch("src.auto_query_workflow.run_source_origin_batch")
     @patch("src.auto_query_workflow.run_echa_ghs_batch")

@@ -78,6 +78,9 @@ DOSSIER_COLUMNS = [
     "registration_role",
     "dossier_url",
     "parsed_use_count",
+    "query_source",
+    "query_value",
+    "is_primary_identity",
 ]
 
 WARNING_COLUMNS = [
@@ -206,10 +209,19 @@ def build_use_query_variants(row) -> list[dict]:
         return query
 
     if compound and smiles:
-        return [
-            variant("名称", compound, smiles="", cas="", ec="", echa_id=""),
-            variant("SMILES", smiles, compound="", cas="", ec="", echa_id=""),
-        ]
+        variants = []
+        for field in ("echa_id", "ec", "cas"):
+            value = _clean_cell(source.get(field))
+            if value:
+                variants.append(variant("输入标识", value))
+                break
+        variants.extend(
+            [
+                variant("名称", compound, smiles="", cas="", ec="", echa_id=""),
+                variant("SMILES", smiles, compound="", cas="", ec="", echa_id=""),
+            ]
+        )
+        return variants
 
     for field in ("echa_id", "ec", "cas"):
         value = _clean_cell(source.get(field))
@@ -333,10 +345,18 @@ def run_echa_use_batch(
                 )
 
         identity_conflict = _variant_identity_conflict(outcomes)
+        has_input_identity = any(
+            outcome["query_source"] == "输入标识" and _clean_cell(outcome["echa_id"])
+            for outcome in outcomes
+        )
         for outcome in outcomes:
             is_primary_identity = bool(
                 _clean_cell(outcome["echa_id"])
-                and (not identity_conflict or outcome["query_source"] == "SMILES")
+                and (
+                    outcome["query_source"] == "输入标识"
+                    if has_input_identity
+                    else (not identity_conflict or outcome["query_source"] == "SMILES")
+                )
             )
             summary_rows.append(
                 _summary_row(
@@ -351,7 +371,16 @@ def run_echa_use_batch(
             )
             for dossier, parsed_count in outcome["dossiers"]:
                 dossier_rows.append(
-                    _dossier_row(row, outcome["echa_id"], dossier, parsed_count, base_url)
+                    _dossier_row(
+                        row,
+                        outcome["echa_id"],
+                        dossier,
+                        parsed_count,
+                        base_url,
+                        query_source=outcome["query_source"],
+                        query_value=outcome["query_value"],
+                        is_primary_identity=is_primary_identity,
+                    )
                 )
             for candidate in outcome["candidates"]:
                 candidate_rows.append(
@@ -856,7 +885,16 @@ def _dossier_sort_key(dossier):
     )
 
 
-def _dossier_row(row, echa_id, dossier, parsed_use_count, base_url):
+def _dossier_row(
+    row,
+    echa_id,
+    dossier,
+    parsed_use_count,
+    base_url,
+    query_source="",
+    query_value="",
+    is_primary_identity=False,
+):
     return {
         "compound": _display_compound(row),
         "echa_id": echa_id,
@@ -869,6 +907,9 @@ def _dossier_row(row, echa_id, dossier, parsed_use_count, base_url):
         "registration_role": dossier.get("registration_role", ""),
         "dossier_url": _dossier_url(dossier.get("asset_external_id"), base_url),
         "parsed_use_count": parsed_use_count,
+        "query_source": query_source,
+        "query_value": query_value,
+        "is_primary_identity": is_primary_identity,
     }
 
 

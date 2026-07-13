@@ -264,10 +264,19 @@ def build_use_query_variants(row) -> list[dict]:
         return query
 
     if compound and smiles:
-        return [
-            variant("名称", compound, smiles="", cas="", dtxsid=""),
-            variant("SMILES", smiles, compound="", cas="", dtxsid=""),
-        ]
+        variants = []
+        for field in ("dtxsid", "cas"):
+            value = _clean_cell(source.get(field))
+            if value:
+                variants.append(variant("输入标识", value))
+                break
+        variants.extend(
+            [
+                variant("名称", compound, smiles="", cas="", dtxsid=""),
+                variant("SMILES", smiles, compound="", cas="", dtxsid=""),
+            ]
+        )
+        return variants
 
     for field in ("dtxsid", "cas"):
         value = _clean_cell(source.get(field))
@@ -373,10 +382,18 @@ def run_comptox_use_batch(
                 )
 
         identity_conflict = _variant_identity_conflict(outcomes, "dtxsid")
+        has_input_identity = any(
+            outcome["query_source"] == "输入标识" and _clean_cell(outcome["dtxsid"])
+            for outcome in outcomes
+        )
         for outcome in outcomes:
             is_primary_identity = bool(
                 _clean_cell(outcome["dtxsid"])
-                and (not identity_conflict or outcome["query_source"] == "SMILES")
+                and (
+                    outcome["query_source"] == "输入标识"
+                    if has_input_identity
+                    else (not identity_conflict or outcome["query_source"] == "SMILES")
+                )
             )
             summary_rows.append(
                 _summary_row(

@@ -25,6 +25,18 @@ class StructurePreparationPageContractTests(unittest.TestCase):
             with self.subTest(page=prefix):
                 self.assertIn("Structure_Preparation", source)
 
+    def test_epi_result_and_resolver_tab_downloads_append_structure_preparation_audit(self):
+        epi_source = _page_source("3")
+        self.assertIn("def append_structure_preparation_sheet", epi_source)
+        epi_workbook = epi_source.index("workbook_buffer = build_result_workbook(")
+        epi_audit = epi_source.index("workbook_buffer = append_structure_preparation_sheet(", epi_workbook)
+        self.assertLess(epi_workbook, epi_audit)
+
+        use_source = _page_source("4")
+        resolver_workbook = use_source.index("resolver_workbook_buffer = append_structure_preparation_sheet(")
+        resolver_download = use_source.index('key="resolver_download_in_tab"')
+        self.assertLess(resolver_workbook, resolver_download)
+
     def test_epi_summary_renders_before_input_normalization_and_validation(self):
         source = _page_source("3")
 

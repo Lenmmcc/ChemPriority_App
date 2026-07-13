@@ -35,6 +35,7 @@ from src.cp_screening_workflow import (  # noqa: E402
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch  # noqa: E402
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, run_identifier_completion_batch  # noqa: E402
 from src.mol_structure_parser import (  # noqa: E402
+    find_mol_text_column,
     prepare_structure_dataframe,
     summarize_structure_preparation,
 )
@@ -237,6 +238,11 @@ def column_index(columns, value):
     return columns.index(value) if value in columns else 0
 
 
+def optional_column_index(columns, value):
+    options = ["", *columns]
+    return options.index(value) if value in columns else 0
+
+
 def widget_key(prefix, sample_name, index):
     digest = hashlib.sha1(f"{prefix}:{sample_name}:{index}".encode("utf-8", errors="ignore")).hexdigest()[:10]
     return f"{prefix}_{digest}"
@@ -261,7 +267,7 @@ def sample_mapping_defaults(sample):
         "formula_col": formula_col,
         "peak_area_col": peak_area_col,
         "sample_cols": default_sample_cols,
-        "mol_column": None,
+        "mol_column": find_mol_text_column(columns),
         "smiles_col": None,
         "cas_col": None,
     }
@@ -315,21 +321,21 @@ def render_sample_mapping_tabs(samples):
                 mol_column = st.selectbox(
                     "可选：MOL 文本列",
                     optional_columns,
-                    index=0,
+                    index=optional_column_index(columns, defaults["mol_column"]),
                     key=widget_key("cp_mol_col", sample["name"], index),
                 ) or None
             with opt_b:
                 smiles_col = st.selectbox(
                     "可选：已有 SMILES 列",
                     optional_columns,
-                    index=0,
+                    index=optional_column_index(columns, defaults["smiles_col"]),
                     key=widget_key("cp_smiles_col", sample["name"], index),
                 ) or None
             with opt_c:
                 cas_col = st.selectbox(
                     "可选：已有 CAS 列",
                     optional_columns,
-                    index=0,
+                    index=optional_column_index(columns, defaults["cas_col"]),
                     key=widget_key("cp_cas_col", sample["name"], index),
                 ) or None
 

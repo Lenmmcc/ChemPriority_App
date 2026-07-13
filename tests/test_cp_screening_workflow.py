@@ -8,7 +8,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 import src.cp_screening_workflow as workflow
-from src.mol_structure_parser import prepare_structure_dataframe
+from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
 from src.cp_screening_workflow import (
     EXPECTED_WORKBOOK_SHEETS,
     build_detection_frequency,
@@ -55,6 +55,28 @@ def load_screening_mapping_normalizer():
 
 
 class CpScreeningWorkflowTests(unittest.TestCase):
+    def test_screening_default_mapping_detects_recognized_mol_column(self):
+        page_path = Path("pages/0_综合筛查流程.py")
+        page_module = ast.parse(page_path.read_text(encoding="utf-8"), filename=str(page_path))
+        function = next(
+            node
+            for node in page_module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "sample_mapping_defaults"
+        )
+        namespace = {
+            "guess_column": lambda columns, candidates, fallback_index=0: columns[fallback_index],
+            "guess_peak_area_column": lambda columns: columns[0],
+            "group_area_columns": lambda columns: [],
+            "find_mol_text_column": find_mol_text_column,
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(page_path), "exec"), namespace)
+
+        defaults = namespace["sample_mapping_defaults"](
+            {"data": pd.DataFrame({"Name": ["Ethanol"], " Structure ": [ETHANOL_MOL]})}
+        )
+
+        self.assertEqual(defaults["mol_column"], " Structure ")
+
     def test_screening_mapping_uses_mol_derived_smiles_for_downstream_input(self):
         normalize_samples = load_screening_mapping_normalizer()
         samples = [
