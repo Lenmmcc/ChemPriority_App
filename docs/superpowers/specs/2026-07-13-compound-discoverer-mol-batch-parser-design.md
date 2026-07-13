@@ -18,9 +18,9 @@
 ## 解析规则
 
 1. 对非空单元格删除尾部的 SDF 记录分隔符 `$$$$`。
-2. 若文本中没有 `M  END`，只在已有可识别的 V2000 原子/键计数行时于结构区末尾补入 `M  END`，并添加警告 `已自动补齐 M END`。
+2. 若文本中没有 `M  END`，只在已有可识别的 MOL 原子/键计数行时于结构区末尾补入 `M  END`，并添加警告 `已自动补齐 M END`。计数行不强制带有 `V2000`，以兼容附件中的 Compound Discoverer 导出。
 3. 使用 RDKit 解析并进行 sanitize。若解析或 sanitize 失败，该行不得生成 SMILES。
-4. 成功时生成 canonical SMILES、isomeric SMILES、分子式、精确质量、原子数和键数，并保留标准化 MOL block 供后续页面预览使用。
+4. 成功时保留解析出的原始分子图以统计原子数和键数、导出标准化 MOL block；生成 canonical SMILES 和 isomeric SMILES 前移除显式氢原子，使 SMILES 可直接用于后续查询。同步输出分子式和精确质量。
 5. 空单元格标记为 `未提供 MOL 文本`；无法识别结构列时批处理函数抛出清晰的输入错误；单条结构失败只影响该行。
 
 ## 批处理接口
