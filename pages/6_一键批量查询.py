@@ -14,6 +14,13 @@ from src.auto_query_workflow import (
 )
 from src.query_cache import clear_query_cache, current_cache_path
 from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
+from src.auto_query_progress import (
+    build_selected_steps,
+    create_progress_state,
+    format_activity_message,
+    progress_snapshot,
+    record_activity_event,
+)
 from src.upload_state import cached_uploads, clear_uploads, store_uploads, upload_bytes
 
 
@@ -343,13 +350,61 @@ with st.expander("运行设置", expanded=False):
 start_run = st.button("开始一键运行", type="primary")
 
 if start_run:
-    progress_bar = st.progress(0)
+    selected_steps = build_selected_steps(
+        run_r_replicate_df=run_r_replicate_df,
+        run_identifier=run_identifier,
+        run_epi=run_epi,
+        run_comptox=run_comptox,
+        run_echa_use=run_echa_use,
+        run_echa_ghs=run_echa_ghs,
+        run_source_origin=run_source_origin,
+        run_pov_lrtp_toxpi=run_pov_toxpi,
+    )
+    progress_state = create_progress_state(selected_steps)
+    overall_label = st.empty()
+    overall_progress_bar = st.progress(0)
+    module_label = st.empty()
+    module_progress_bar = st.progress(0)
     status_box = st.empty()
 
+    def render_progress():
+        snapshot = progress_snapshot(progress_state)
+        overall_label.caption(
+            f"总体进度：已完成 {snapshot['overall_finished']}/{snapshot['overall_total']} 个环节"
+        )
+        overall_progress_bar.progress(snapshot["overall_fraction"])
+        step = snapshot["current_step"] or "等待第一个环节开始"
+        if snapshot["module_total"]:
+            module_label.caption(
+                f"当前模块进度：{step}（已完成 {snapshot['module_done']}/{snapshot['module_total']} 条）"
+            )
+        else:
+            module_label.caption(f"当前模块进度：{step}")
+        module_progress_bar.progress(snapshot["module_fraction"])
+        message = format_activity_message(snapshot)
+        terminal = snapshot["last_terminal_event"] or {}
+        if terminal.get("event") == "failed":
+            status_box.warning(message)
+        else:
+            status_box.info(message)
+
+    def update_activity(event):
+        record_activity_event(progress_state, event)
+        render_progress()
+
     def update_progress(step, done, total, label):
-        if total:
-            progress_bar.progress(done / total)
-        status_box.info(f"{step}：{label} ({done}/{total})")
+        if progress_state["current_step"] == step and progress_state["module_done"] >= done:
+            return
+        update_activity(
+            {
+                "event": "completed",
+                "step": step,
+                "index": max(0, done - 1),
+                "total": total,
+                "done": done,
+                "label": label,
+            }
+        )
 
     config = AutoWorkflowConfig(
         mapping=mapping,
@@ -370,14 +425,22 @@ if start_run:
         echa_ghs_max_workers=int(echa_ghs_max_workers),
         source_origin_max_workers=int(source_origin_max_workers),
     )
+    render_progress()
     with st.spinner("正在按顺序运行已选项目..."):
-        result = run_auto_query_workflow(prepared_input_df, config=config, progress_callback=update_progress)
+        result = run_auto_query_workflow(
+            prepared_input_df,
+            config=config,
+            progress_callback=update_progress,
+            activity_callback=update_activity,
+        )
+        status_box.info("查询环节已完成，正在汇总结果与生成图表...")
         charts = build_auto_workflow_charts(result)
         package = build_auto_workflow_zip(result, charts)
     st.session_state["auto_query_workflow_result"] = result
     st.session_state["auto_query_workflow_charts"] = charts
     st.session_state["auto_query_workflow_zip"] = package
-    progress_bar.progress(1.0)
+    overall_progress_bar.progress(1.0)
+    module_progress_bar.progress(1.0)
     status_box.success("一键批量查询完成。")
 
 result = st.session_state.get("auto_query_workflow_result")

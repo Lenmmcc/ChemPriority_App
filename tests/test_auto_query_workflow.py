@@ -267,6 +267,57 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         run_epi.assert_called_once()
         self.assertEqual(result.step_status["step"].tolist(), ["标识符补全", "EPI Suite 环境归趋"])
 
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_workflow_forwards_network_activity_with_stage_and_timeout(self, run_identifier):
+        input_df = pd.DataFrame(
+            {
+                "Name": ["Ethanol"],
+                "NIST Lib Hit Formula": ["C2 H6 O"],
+                "Avg TIC": [100.0],
+            }
+        )
+        completed = pd.DataFrame(
+            {
+                "compound": ["Ethanol"],
+                "smiles": ["CCO"],
+                "cas": ["64-17-5"],
+                "ec": [""],
+                "dtxsid": [""],
+                "echa_id": [""],
+            }
+        )
+
+        def fake_identifier(*args, **kwargs):
+            kwargs["activity_callback"](
+                {
+                    "event": "started",
+                    "index": 0,
+                    "total": 1,
+                    "done": 0,
+                    "label": "Ethanol",
+                    "elapsed_seconds": 0.0,
+                    "error": None,
+                }
+            )
+            return completed, pd.DataFrame()
+
+        run_identifier.side_effect = fake_identifier
+        events = []
+        result = run_auto_query_workflow(
+            input_df,
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                identifier_timeout=12,
+                identifier_delay_seconds=0,
+            ),
+            activity_callback=events.append,
+        )
+
+        self.assertEqual(events[0]["event"], "started")
+        self.assertEqual(events[0]["step"], result.step_status.loc[0, "step"])
+        self.assertEqual(events[0]["timeout_seconds"], 12)
+
     def test_new_page_uses_chart_specific_r_df_name(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
             page_text = page_file.read()
@@ -354,6 +405,17 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn("_result_dashboard_groups(result, charts)", page_text)
         self.assertIn('st.selectbox("查看结果表"', page_text)
         self.assertIn("Auto_Query_Workflow_Results.zip", page_text)
+
+
+    def test_page_6_renders_detailed_overall_and_module_progress(self):
+        with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
+            page_text = page_file.read()
+
+        self.assertIn("build_selected_steps", page_text)
+        self.assertIn("format_activity_message", page_text)
+        self.assertIn("总体进度", page_text)
+        self.assertIn("当前模块进度", page_text)
+        self.assertIn("activity_callback=update_activity", page_text)
 
 
 def _example_comptox_candidates():

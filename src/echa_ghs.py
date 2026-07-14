@@ -177,17 +177,8 @@ def run_echa_ghs_batch(
     progress_callback=None,
     max_workers=1,
     cache_enabled=True,
+    activity_callback=None,
 ):
-    if int(max_workers or 1) <= 1:
-        with cache_control(cache_enabled):
-            return _run_echa_ghs_batch_sequential(
-                input_df,
-                base_url=base_url,
-                timeout=timeout,
-                delay_seconds=delay_seconds,
-                progress_callback=progress_callback,
-            )
-
     clean_df = normalize_input_columns(input_df)
     items = list(clean_df.iterrows())
 
@@ -209,6 +200,7 @@ def run_echa_ghs_batch(
             delay_seconds=delay_seconds,
             progress_callback=progress_callback,
             label_func=lambda item: _display_compound(item[1]),
+            event_callback=activity_callback,
         )
 
     summary_frames = []

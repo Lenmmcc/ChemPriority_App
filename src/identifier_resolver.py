@@ -310,25 +310,8 @@ def run_identifier_completion_batch(
     progress_callback=None,
     max_workers=1,
     cache_enabled=True,
+    activity_callback=None,
 ):
-    if int(max_workers or 1) <= 1:
-        with cache_control(cache_enabled):
-            return _run_identifier_completion_batch_sequential(
-                input_df,
-                comptox_api_base=comptox_api_base,
-                comptox_api_key=comptox_api_key,
-                echa_base=echa_base,
-                use_epa=use_epa,
-                use_echa=use_echa,
-                use_pubchem=use_pubchem,
-                pubchem_base=pubchem_base,
-                chemspider_api_key=chemspider_api_key,
-                use_chemspider=use_chemspider,
-                timeout=timeout,
-                delay_seconds=delay_seconds,
-                progress_callback=progress_callback,
-            )
-
     clean_df = normalize_input_columns(input_df)
     items = list(clean_df.iterrows())
 
@@ -358,6 +341,7 @@ def run_identifier_completion_batch(
             delay_seconds=delay_seconds,
             progress_callback=progress_callback,
             label_func=lambda item: _display_compound(item[1]),
+            event_callback=activity_callback,
         )
 
     completed_frames = []

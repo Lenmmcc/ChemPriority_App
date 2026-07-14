@@ -110,6 +110,7 @@ class AutoWorkflowChart:
 
 
 ProgressCallback = Callable[[str, int, int, str], None]
+ActivityCallback = Callable[[dict], None]
 
 
 def read_input_workbook(file_or_path, sheet_name=0) -> pd.DataFrame:
@@ -142,6 +143,7 @@ def run_auto_query_workflow(
     input_df: pd.DataFrame,
     config: AutoWorkflowConfig | None = None,
     progress_callback: ProgressCallback | None = None,
+    activity_callback: ActivityCallback | None = None,
 ) -> AutoWorkflowResult:
     config = config or AutoWorkflowConfig()
     mapping = config.mapping or detect_default_mapping(input_df.columns)
@@ -174,6 +176,29 @@ def run_auto_query_workflow(
 
     def record(step, status, rows=0, message=""):
         status_rows.append({"step": step, "status": status, "rows": int(rows or 0), "message": message})
+        if activity_callback:
+            activity_callback(
+                {
+                    "event": "stage_finished",
+                    "step": step,
+                    "status": status,
+                    "rows": int(rows or 0),
+                    "message": message,
+                }
+            )
+
+    def activity_for(step, timeout_seconds):
+        def forward(event):
+            if activity_callback:
+                activity_callback(
+                    {
+                        **event,
+                        "step": step,
+                        "timeout_seconds": int(timeout_seconds),
+                    }
+                )
+
+        return forward
 
     def add_warning(stage, message):
         warning_rows.append({"stage": stage, "message": str(message)})
@@ -233,6 +258,7 @@ def run_auto_query_workflow(
                 max_workers=int(config.identifier_max_workers),
                 cache_enabled=bool(config.cache_enabled),
                 progress_callback=identifier_progress,
+                activity_callback=activity_for("标识符补全", config.identifier_timeout),
             ),
         )
         if identifier_value is not None:
@@ -265,6 +291,7 @@ def run_auto_query_workflow(
                     max_workers=int(config.epi_max_workers),
                     cache_enabled=bool(config.cache_enabled),
                     progress_callback=epi_progress,
+                    activity_callback=activity_for("EPI Suite 环境归趋", config.epi_timeout),
                 ),
             )
             if epi_value is not None:
@@ -284,6 +311,7 @@ def run_auto_query_workflow(
                 dashboard_fallback=True,
                 max_workers=int(config.comptox_max_workers),
                 cache_enabled=bool(config.cache_enabled),
+                activity_callback=activity_for("EPA CompTox 用途", config.use_timeout),
             ),
         )
         if comptox_value is not None:
@@ -303,6 +331,7 @@ def run_auto_query_workflow(
                 delay_seconds=float(config.echa_delay_seconds),
                 max_workers=int(config.echa_max_workers),
                 cache_enabled=bool(config.cache_enabled),
+                activity_callback=activity_for("ECHA REACH 用途", config.echa_timeout),
             ),
         )
         if echa_value is not None:
@@ -323,6 +352,7 @@ def run_auto_query_workflow(
                 delay_seconds=float(config.echa_delay_seconds),
                 max_workers=int(config.echa_ghs_max_workers),
                 cache_enabled=bool(config.cache_enabled),
+                activity_callback=activity_for("ECHA GHS/C&L 危害", config.echa_timeout),
             ),
         )
         if ghs_value is not None:
@@ -347,6 +377,7 @@ def run_auto_query_workflow(
                 delay_seconds=float(config.source_origin_delay_seconds),
                 max_workers=int(config.source_origin_max_workers),
                 cache_enabled=bool(config.cache_enabled),
+                activity_callback=activity_for("来源属性评估", config.source_origin_timeout),
             ),
         )
         if source_value is not None:

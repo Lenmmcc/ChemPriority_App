@@ -211,6 +211,21 @@ class ChemSpiderTests(unittest.TestCase):
 
 
 class ChemSpiderSelectionTests(unittest.TestCase):
+    def test_single_worker_batch_reports_lifecycle_activity(self):
+        events = []
+
+        run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["Ethanol"], "smiles": ["CCO"]}),
+            use_epa=False,
+            use_echa=False,
+            use_pubchem=False,
+            delay_seconds=0,
+            max_workers=1,
+            activity_callback=events.append,
+        )
+
+        self.assertEqual([event["event"] for event in events], ["started", "completed"])
+
     @patch("src.identifier_resolver.resolve_chemspider")
     def test_batch_skips_chemspider_when_user_disables_it(self, resolve_chemspider):
         completed, _ = run_identifier_completion_batch(

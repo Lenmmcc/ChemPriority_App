@@ -389,6 +389,7 @@ def run_epi_web_batch(
     progress_callback=None,
     max_workers=1,
     cache_enabled=True,
+    activity_callback=None,
 ):
     rows = []
     raw_rows = []
@@ -438,6 +439,7 @@ def run_epi_web_batch(
             delay_seconds=delay_seconds,
             progress_callback=progress_callback,
             label_func=display_compound,
+            event_callback=activity_callback,
         )
 
     for result, item in zip(batch_results, items):

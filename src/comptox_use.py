@@ -473,21 +473,8 @@ def run_comptox_use_batch(
     progress_callback=None,
     max_workers=1,
     cache_enabled=True,
+    activity_callback=None,
 ):
-    if int(max_workers or 1) <= 1:
-        from src.query_cache import cache_control
-
-        with cache_control(cache_enabled):
-            return _run_comptox_use_batch_sequential(
-                input_df,
-                api_base=api_base,
-                api_key=api_key,
-                timeout=timeout,
-                delay_seconds=delay_seconds,
-                dashboard_fallback=dashboard_fallback,
-                progress_callback=progress_callback,
-            )
-
     clean_df = normalize_input_columns(input_df)
     items = list(clean_df.iterrows())
     query_note = _query_scope_note(api_base, dashboard_fallback)
@@ -514,6 +501,7 @@ def run_comptox_use_batch(
             delay_seconds=delay_seconds,
             progress_callback=progress_callback,
             label_func=lambda item: _display_compound(item[1]),
+            event_callback=activity_callback,
         )
 
     summary_frames = []
