@@ -1,4 +1,5 @@
 from collections import OrderedDict
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -428,26 +429,71 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertTrue(top_chart.png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(top_chart.pdf.startswith(b"%PDF"))
 
-    def test_auto_workflow_zip_contains_workbook_and_chart_files(self):
+    def test_auto_workflow_zip_groups_results_by_module(self):
+        local_chart = AutoWorkflowChart(
+            title="Chemical Type Distribution",
+            png=b"\x89PNG\r\n\x1a\nlocal",
+            pdf=b"%PDF-1.4 local",
+        )
         result = AutoWorkflowResult(
             mapping=AutoWorkflowMapping(),
             representative_table=pd.DataFrame({"Name": ["Compound A"]}),
-            tables=OrderedDict([("CompTox_Candidates", _example_comptox_candidates())]),
+            tables=OrderedDict(
+                [
+                    ("DF_Table", pd.DataFrame({"Name": ["Compound A"], "DF": [1.0]})),
+                    ("Identifier_Completion", pd.DataFrame({"compound": ["Compound A"]})),
+                    ("CompTox_Candidates", _example_comptox_candidates()),
+                    ("ECHA_Use_Candidates", _example_echa_candidates()),
+                ]
+            ),
             step_status=pd.DataFrame({"step": ["EPA CompTox 用途"], "status": ["完成"]}),
             warnings=pd.DataFrame(),
+            charts=OrderedDict([("Local_Chemical_Type_Distribution", local_chart)]),
         )
 
         package = build_auto_workflow_zip(result)
 
         with zipfile.ZipFile(package) as archive:
             names = set(archive.namelist())
-            self.assertIn("Auto_Query_Workflow_Results.xlsx", names)
-            self.assertIn("charts/EPA_Top_Predicted_Functional_Use.png", names)
-            self.assertIn("charts/EPA_Top_Predicted_Functional_Use.pdf", names)
-            self.assertIn("charts/EPA_Product_Use_Category_Rose_Plot.png", names)
-            self.assertIn("charts/EPA_Reported_Functional_Use_Evidence.png", names)
+            expected = {
+                "Auto_Query_Workflow_Results.xlsx",
+                "01_Local_Screening/Local_Screening_Results.xlsx",
+                "01_Local_Screening/figures/Chemical_Type_Distribution.png",
+                "01_Local_Screening/figures/Chemical_Type_Distribution.pdf",
+                "02_Identifier_Completion/Identifier_Completion_Results.xlsx",
+                "04_EPA_CompTox/EPA_CompTox_Results.xlsx",
+                "04_EPA_CompTox/figures/EPA_Top_Predicted_Functional_Use.png",
+                "05_ECHA/ECHA_Results.xlsx",
+                "05_ECHA/figures/ECHA_Use_Rose_Plot.pdf",
+            }
+            self.assertTrue(expected.issubset(names))
+            self.assertFalse(any(name.startswith("03_EPI_Suite/") for name in names))
             self.assertGreater(len(archive.read("Auto_Query_Workflow_Results.xlsx")), 1_000)
-            self.assertTrue(archive.read("charts/EPA_Top_Predicted_Functional_Use.png").startswith(b"\x89PNG"))
+            self.assertTrue(
+                archive.read("01_Local_Screening/figures/Chemical_Type_Distribution.png").startswith(
+                    b"\x89PNG"
+                )
+            )
+
+            local_sheets = pd.ExcelFile(
+                io.BytesIO(archive.read("01_Local_Screening/Local_Screening_Results.xlsx"))
+            ).sheet_names
+            identifier_sheets = pd.ExcelFile(
+                io.BytesIO(
+                    archive.read("02_Identifier_Completion/Identifier_Completion_Results.xlsx")
+                )
+            ).sheet_names
+            epa_sheets = pd.ExcelFile(
+                io.BytesIO(archive.read("04_EPA_CompTox/EPA_CompTox_Results.xlsx"))
+            ).sheet_names
+            echa_sheets = pd.ExcelFile(
+                io.BytesIO(archive.read("05_ECHA/ECHA_Results.xlsx"))
+            ).sheet_names
+
+            self.assertEqual(local_sheets, ["DF_Table"])
+            self.assertEqual(identifier_sheets, ["Identifier_Completion"])
+            self.assertEqual(epa_sheets, ["CompTox_Candidates"])
+            self.assertEqual(echa_sheets, ["ECHA_Use_Candidates"])
 
     def test_page_6_previews_charts_and_downloads_zip(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:

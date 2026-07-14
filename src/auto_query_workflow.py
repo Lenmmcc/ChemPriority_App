@@ -42,6 +42,68 @@ from src.use_rose_plot import (
 
 R_DF_STEP_LABEL = "化学类型图、DBE图、VK图与 DF"
 
+AUTO_WORKFLOW_EXPORT_MODULES = (
+    (
+        "01_Local_Screening",
+        "Local_Screening_Results.xlsx",
+        (
+            "Structure_Preparation",
+            "Input_Check",
+            "Elemental_Ratios_DBE",
+            "Category_Summary",
+            "DF_Table",
+            "Sample_Peak_Area",
+            "Group_Area_Raw_Long",
+            "Group_Area_Mean_By_Sample",
+        ),
+        ("Local_",),
+    ),
+    (
+        "02_Identifier_Completion",
+        "Identifier_Completion_Results.xlsx",
+        ("Identifier_Completion", "Identifier_Warnings"),
+        (),
+    ),
+    (
+        "03_EPI_Suite",
+        "EPI_Suite_Results.xlsx",
+        ("EPI_Results", "EPI_Raw_Results", "EPI_Errors"),
+        (),
+    ),
+    (
+        "04_EPA_CompTox",
+        "EPA_CompTox_Results.xlsx",
+        ("CompTox_Summary", "CompTox_Candidates", "CompTox_Errors"),
+        ("EPA_",),
+    ),
+    (
+        "05_ECHA",
+        "ECHA_Results.xlsx",
+        (
+            "ECHA_Use_Summary",
+            "ECHA_Use_Candidates",
+            "ECHA_Use_Dossiers",
+            "ECHA_Use_Errors",
+            "ECHA_GHS_Summary",
+            "ECHA_GHS_Classifications",
+            "ECHA_GHS_Errors",
+        ),
+        ("ECHA_",),
+    ),
+    (
+        "06_Source_Origin",
+        "Source_Origin_Results.xlsx",
+        ("Source_Origin_Summary", "Source_Origin_Evidence", "Source_Origin_Errors"),
+        (),
+    ),
+    (
+        "07_Pov_LRTP_PBM_ToxPi",
+        "Pov_LRTP_PBM_ToxPi_Results.xlsx",
+        ("Pov_LRTP_Input", "Pov_LRTP", "ToxPi_Input", "ToxPi_Normalized", "ToxPi_Results"),
+        (),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class AutoWorkflowMapping:
@@ -434,6 +496,21 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
     return buffer
 
 
+def _build_module_workbook(result: AutoWorkflowResult, table_names: tuple[str, ...]) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for name in table_names:
+            table = result.tables.get(name)
+            if isinstance(table, pd.DataFrame) and not table.empty:
+                table.to_excel(writer, sheet_name=_safe_sheet_name(name), index=False)
+    buffer.seek(0)
+    return buffer
+
+
+def _module_chart_file_name(chart_key: str) -> str:
+    return chart_key.removeprefix("Local_")
+
+
 def build_auto_workflow_charts(result: AutoWorkflowResult) -> OrderedDict[str, AutoWorkflowChart]:
     charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict(result.charts)
     for source_config in _auto_workflow_chart_sources(result):
@@ -462,9 +539,26 @@ def build_auto_workflow_zip(
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("Auto_Query_Workflow_Results.xlsx", build_auto_workflow_workbook(result).getvalue())
-        for key, chart in charts.items():
-            archive.writestr(f"charts/{key}.png", chart.png)
-            archive.writestr(f"charts/{key}.pdf", chart.pdf)
+        for folder, workbook_name, table_candidates, chart_prefixes in AUTO_WORKFLOW_EXPORT_MODULES:
+            table_names = tuple(
+                name
+                for name in table_candidates
+                if isinstance(result.tables.get(name), pd.DataFrame) and not result.tables[name].empty
+            )
+            chart_keys = tuple(
+                key
+                for key in charts
+                if any(key.startswith(prefix) for prefix in chart_prefixes)
+            )
+            if not table_names and not chart_keys:
+                continue
+            if table_names:
+                workbook = _build_module_workbook(result, table_names)
+                archive.writestr(f"{folder}/{workbook_name}", workbook.getvalue())
+            for key in chart_keys:
+                stem = _module_chart_file_name(key)
+                archive.writestr(f"{folder}/figures/{stem}.png", charts[key].png)
+                archive.writestr(f"{folder}/figures/{stem}.pdf", charts[key].pdf)
     buffer.seek(0)
     return buffer
 
