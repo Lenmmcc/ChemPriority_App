@@ -93,6 +93,13 @@ class AutoWorkflowConfig:
     cache_enabled: bool = True
 
 
+@dataclass(frozen=True)
+class AutoWorkflowChart:
+    title: str
+    png: bytes
+    pdf: bytes
+
+
 @dataclass
 class AutoWorkflowResult:
     mapping: AutoWorkflowMapping
@@ -100,13 +107,14 @@ class AutoWorkflowResult:
     tables: OrderedDict[str, pd.DataFrame]
     step_status: pd.DataFrame
     warnings: pd.DataFrame
+    charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
 
 
-@dataclass(frozen=True)
-class AutoWorkflowChart:
-    title: str
-    png: bytes
-    pdf: bytes
+@dataclass
+class LocalScreeningOutput:
+    tables: OrderedDict[str, pd.DataFrame]
+    charts: OrderedDict[str, AutoWorkflowChart]
+    warnings: list[str] = field(default_factory=list)
 
 
 ProgressCallback = Callable[[str, int, int, str], None]
@@ -159,6 +167,7 @@ def run_auto_query_workflow(
     normalized = _normalize_input(prepared_input, mapping)
     representative = build_representative_table(normalized, mapping)
     tables: OrderedDict[str, pd.DataFrame] = OrderedDict()
+    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
     tables["Structure_Preparation"] = prepared_input
     status_rows = []
     warning_rows = []
@@ -219,9 +228,12 @@ def run_auto_query_workflow(
             lambda: _run_r_replicate_df(normalized, mapping, config.detection_threshold),
         )
         if local_value is not None:
-            for key, table in local_value.items():
+            for key, table in local_value.tables.items():
                 tables[key] = table
-            record(R_DF_STEP_LABEL, "完成", len(local_value.get("DF_Table", pd.DataFrame())))
+            charts.update(local_value.charts)
+            for message in local_value.warnings:
+                add_warning(R_DF_STEP_LABEL, message)
+            record(R_DF_STEP_LABEL, "完成", len(local_value.tables.get("DF_Table", pd.DataFrame())))
 
     needs_identifier = any(
         [
@@ -406,6 +418,7 @@ def run_auto_query_workflow(
         tables=tables,
         step_status=step_status,
         warnings=warnings,
+        charts=charts,
     )
 
 
@@ -422,7 +435,7 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
 
 
 def build_auto_workflow_charts(result: AutoWorkflowResult) -> OrderedDict[str, AutoWorkflowChart]:
-    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
+    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict(result.charts)
     for source_config in _auto_workflow_chart_sources(result):
         chart_df = _build_chart_data(source_config)
         if chart_df.empty:
@@ -552,6 +565,37 @@ def _build_chart_figure(chart_df: pd.DataFrame, source_config: dict):
     return generate_use_rose_plot(chart_df, source_config["title"])
 
 
+LOCAL_SCREENING_FIGURES = (
+    (
+        "category_percent_donut_with_total",
+        "Local_Chemical_Type_Distribution",
+        "Chemical Type Distribution",
+    ),
+    ("compound_bubble_plot", "Local_DBE_Bubble_Plot", "DBE Bubble Plot"),
+    ("VanKrevelen", "Local_Van_Krevelen_Plot", "Van Krevelen Plot"),
+)
+
+
+def _load_local_screening_charts(screening_result):
+    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
+    warnings = []
+    for source_key, chart_key, title in LOCAL_SCREENING_FIGURES:
+        paths = screening_result.figure_paths.get(source_key, {})
+        png_path = paths.get("png")
+        pdf_path = paths.get("pdf")
+        try:
+            png = Path(png_path).read_bytes() if png_path else b""
+            pdf = Path(pdf_path).read_bytes() if pdf_path else b""
+        except OSError as exc:
+            warnings.append(f"{title}: {exc}")
+            continue
+        if not png.startswith(b"\x89PNG") or not pdf.startswith(b"%PDF"):
+            warnings.append(f"{title}: generated PNG/PDF is missing or invalid.")
+            continue
+        charts[chart_key] = AutoWorkflowChart(title=title, png=png, pdf=pdf)
+    return charts, warnings
+
+
 def _run_r_replicate_df(input_df: pd.DataFrame, mapping: AutoWorkflowMapping, detection_threshold: float):
     area_cols = [column for column in mapping.group_area_cols if column in input_df.columns]
     if not area_cols and mapping.peak_area_col in input_df.columns:
@@ -593,7 +637,7 @@ def _run_r_replicate_df(input_df: pd.DataFrame, mapping: AutoWorkflowMapping, de
         formula_col="formula",
         peak_area_cols=area_cols,
     )
-    return OrderedDict(
+    tables = OrderedDict(
         [
             ("Input_Check", screening_result.input_check),
             ("Elemental_Ratios_DBE", screening_result.all_formulas),
@@ -604,6 +648,8 @@ def _run_r_replicate_df(input_df: pd.DataFrame, mapping: AutoWorkflowMapping, de
             ("Group_Area_Mean_By_Sample", group_area_mean),
         ]
     )
+    charts, chart_warnings = _load_local_screening_charts(screening_result)
+    return LocalScreeningOutput(tables=tables, charts=charts, warnings=chart_warnings)
 
 
 def _run_pov_lrtp_toxpi(

@@ -1,4 +1,7 @@
 from collections import OrderedDict
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import zipfile
 import unittest
 from unittest.mock import patch
@@ -7,9 +10,12 @@ import pandas as pd
 
 from src.auto_query_workflow import (
     AutoWorkflowConfig,
+    AutoWorkflowChart,
     AutoWorkflowMapping,
     AutoWorkflowResult,
+    LocalScreeningOutput,
     R_DF_STEP_LABEL,
+    _load_local_screening_charts,
     build_auto_workflow_charts,
     build_auto_workflow_zip,
     detect_default_mapping,
@@ -32,6 +38,76 @@ M  END
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_local_screening_chart_paths_become_portable_png_pdf_bytes(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            figure_paths = {}
+            for source_key in (
+                "category_percent_donut_with_total",
+                "compound_bubble_plot",
+                "VanKrevelen",
+            ):
+                png_path = root / f"{source_key}.png"
+                pdf_path = root / f"{source_key}.pdf"
+                png_path.write_bytes(b"\x89PNG\r\n\x1a\nlocal")
+                pdf_path.write_bytes(b"%PDF-1.4 local")
+                figure_paths[source_key] = {"png": png_path, "pdf": pdf_path}
+
+            charts, warnings = _load_local_screening_charts(
+                SimpleNamespace(figure_paths=figure_paths)
+            )
+
+        self.assertEqual(
+            list(charts),
+            [
+                "Local_Chemical_Type_Distribution",
+                "Local_DBE_Bubble_Plot",
+                "Local_Van_Krevelen_Plot",
+            ],
+        )
+        self.assertEqual(warnings, [])
+        self.assertTrue(charts["Local_Chemical_Type_Distribution"].png.startswith(b"\x89PNG"))
+        self.assertTrue(charts["Local_Van_Krevelen_Plot"].pdf.startswith(b"%PDF"))
+
+    def test_missing_local_screening_charts_are_skipped_with_warnings(self):
+        charts, warnings = _load_local_screening_charts(
+            SimpleNamespace(
+                figure_paths={
+                    "category_percent_donut_with_total": {
+                        "png": Path("missing.png"),
+                        "pdf": Path("missing.pdf"),
+                    }
+                }
+            )
+        )
+
+        self.assertEqual(charts, OrderedDict())
+        self.assertEqual(len(warnings), 3)
+        self.assertIn("Chemical Type Distribution", warnings[0])
+
+    @patch("src.auto_query_workflow._run_r_replicate_df")
+    def test_workflow_preserves_local_screening_charts_and_warnings(self, mock_local):
+        chart = AutoWorkflowChart("DBE Bubble Plot", b"\x89PNG\r\n\x1a\n", b"%PDF")
+        mock_local.return_value = LocalScreeningOutput(
+            tables=OrderedDict([("DF_Table", pd.DataFrame({"Name": ["A"]}))]),
+            charts=OrderedDict([("Local_DBE_Bubble_Plot", chart)]),
+            warnings=["Van Krevelen Plot: missing"],
+        )
+
+        result = run_auto_query_workflow(
+            pd.DataFrame(
+                {
+                    "Name": ["A"],
+                    "NIST Lib Hit Formula": ["C2H6"],
+                    "Avg TIC": [2e5],
+                }
+            ),
+            AutoWorkflowConfig(run_identifier=False),
+        )
+
+        self.assertIs(result.charts["Local_DBE_Bubble_Plot"], chart)
+        self.assertIn("Van Krevelen Plot: missing", result.warnings["message"].tolist())
+
     def test_detect_default_mapping_for_level3_workbook_schema(self):
         columns = [
             "Checked",
