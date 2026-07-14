@@ -472,6 +472,12 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn('"来源属性"', page_text)
         self.assertIn('"Pov-LRTP / PBM / ToxPi"', page_text)
 
+    def test_page_6_assigns_local_screening_charts_to_local_tab(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        screening_definition = page_text.split('"screening"', 1)[1].split('"identifier"', 1)[0]
+
+        self.assertIn('("Local_",)', screening_definition)
+
     def test_page_6_renders_module_dashboard_without_removing_exports(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
             page_text = page_file.read()

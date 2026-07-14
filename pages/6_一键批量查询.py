@@ -97,7 +97,7 @@ def _result_dashboard_groups(result, charts):
                 "Group_Area_Raw_Long",
                 "Group_Area_Mean_By_Sample",
             ],
-            (),
+            ("Local_",),
         ),
         ("identifier", "标识符补全", ["Identifier_Completion", "Identifier_Warnings"], ()),
         ("epi", "EPI Suite", ["EPI_Results", "EPI_Raw_Results", "EPI_Errors"], ()),
