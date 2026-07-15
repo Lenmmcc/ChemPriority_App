@@ -13,6 +13,8 @@ import src.cp_screening_workflow as workflow
 from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
 from src.cp_screening_workflow import (
     EXPECTED_WORKBOOK_SHEETS,
+    PBMToxPiConfig,
+    PBMToxPiResult,
     build_detection_frequency,
     build_peak_area_long,
     build_pbm_toxpi_input,
@@ -455,11 +457,13 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         )
 
         toxpi_input = build_pbm_toxpi_input(df_table, pov_lrtp, peak_area_long=group_area_mean)
-        normalized, toxpi_results = calculate_pbm_toxpi(toxpi_input)
+        result = calculate_pbm_toxpi(toxpi_input)
+        normalized = result.candidate_normalized
+        toxpi_results = result.final_ranking
 
         self.assertEqual(len(toxpi_input), 3)
         self.assertEqual(toxpi_input["compound"].tolist().count("Compound A"), 2)
-        self.assertEqual(set(normalized["sample_id"].dropna()), {"File1", "File2"})
+        self.assertEqual(set(toxpi_input["sample_id"].dropna()), {"File1", "File2"})
 
         by_compound = toxpi_results.set_index("compound")
         self.assertAlmostEqual(by_compound.loc["Compound A", "Peak_Area"], 8525.0)
@@ -467,6 +471,85 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             by_compound.loc["Compound A", "toxpi"],
             normalized.loc[normalized["compound"].eq("Compound A"), "toxpi"].mean(),
         )
+
+    def test_two_stage_toxpi_selects_global_candidates_then_renormalizes_source_metrics(self):
+        toxpi_input = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C", "D"],
+                "Peak_Area": [1e9, 1e8, 1e6, 1e3],
+                "Scores": [1.0, 9.0, 8.0, 2.0],
+                "DF": [0.2, 0.9, 0.8, 0.1],
+            }
+        )
+        config = PBMToxPiConfig(candidate_top_n=3, display_top_n=2)
+
+        result = calculate_pbm_toxpi(toxpi_input, config=config)
+
+        self.assertIsInstance(result, PBMToxPiResult)
+        self.assertEqual(len(result.global_screen), 4)
+        self.assertEqual(len(result.candidate_normalized), 3)
+        self.assertEqual(len(result.final_ranking), 3)
+        self.assertEqual(len(result.display_rows), 2)
+        candidates = set(result.candidate_normalized["compound"])
+        source = result.source_metrics.set_index("compound")
+        self.assertEqual(
+            result.candidate_normalized.set_index("compound").loc["B", "Scores"],
+            source.loc["B", "Scores"],
+        )
+        self.assertEqual(candidates, set(result.global_screen.head(3)["compound"]))
+        self.assertEqual(
+            result.display_rows["compound"].tolist(),
+            result.final_ranking.head(2)["compound"].tolist(),
+        )
+
+    def test_two_stage_toxpi_caps_limits_for_small_inputs(self):
+        data = pd.DataFrame(
+            {"compound": ["A", "B"], "Peak_Area": [100, 10], "Scores": [2, 1], "DF": [1, 0]}
+        )
+        result = calculate_pbm_toxpi(
+            data,
+            config=PBMToxPiConfig(candidate_top_n=100, display_top_n=20),
+        )
+        self.assertEqual(len(result.final_ranking), 2)
+        self.assertEqual(len(result.display_rows), 2)
+        self.assertEqual(result.effective_candidate_top_n, 2)
+        self.assertEqual(result.effective_display_top_n, 2)
+
+    def test_two_stage_toxpi_normalizes_custom_weights_and_uses_them_in_both_stages(self):
+        data = pd.DataFrame(
+            {"compound": ["PA", "PBM"], "Peak_Area": [1e8, 1e2], "Scores": [1, 10], "DF": [0.5, 0.5]}
+        )
+        pa_result = calculate_pbm_toxpi(
+            data,
+            config=PBMToxPiConfig(candidate_top_n=2, display_top_n=2, weights={"peak_area": 8, "pbm": 1, "df": 1}),
+        )
+        pbm_result = calculate_pbm_toxpi(
+            data,
+            config=PBMToxPiConfig(candidate_top_n=2, display_top_n=2, weights={"peak_area": 1, "pbm": 8, "df": 1}),
+        )
+        self.assertEqual(pa_result.final_ranking.loc[0, "compound"], "PA")
+        self.assertEqual(pbm_result.final_ranking.loc[0, "compound"], "PBM")
+        self.assertAlmostEqual(sum(pa_result.normalized_weights.values()), 1.0)
+
+    def test_two_stage_toxpi_rejects_invalid_settings(self):
+        with self.assertRaisesRegex(ValueError, "positive"):
+            PBMToxPiConfig(weights={"peak_area": 0, "pbm": 0, "df": 0})
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            PBMToxPiConfig(candidate_top_n=10, display_top_n=20)
+
+    def test_two_stage_toxpi_breaks_score_ties_deterministically(self):
+        scored = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C"],
+                "Peak_Area": [10, 100, 100],
+                "toxpi": [0.5, 0.5, 0.5],
+            }
+        )
+
+        result = workflow._sort_toxpi_stage(scored, "toxpi", "final_rank")
+
+        self.assertEqual(result["compound"].tolist(), ["B", "C", "A"])
+        self.assertEqual(result["final_rank"].tolist(), [1, 2, 3])
 
     def test_pbm_scores_are_normalized_in_positive_direction_for_toxpi(self):
         toxpi_input = pd.DataFrame(
@@ -478,7 +561,9 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             }
         )
 
-        normalized, toxpi_results = calculate_pbm_toxpi(toxpi_input)
+        result = calculate_pbm_toxpi(toxpi_input)
+        normalized = result.candidate_normalized
+        toxpi_results = result.final_ranking
 
         normalized_by_compound = normalized.set_index("compound")
         self.assertGreater(

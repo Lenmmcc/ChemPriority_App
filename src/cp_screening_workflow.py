@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import io
 from typing import Iterable
 
@@ -45,6 +45,64 @@ DEFAULT_TOXPI_PLOT_TOP_N = 15
 class SampleTable:
     sample_id: str
     data: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class PBMToxPiConfig:
+    candidate_top_n: int = 100
+    display_top_n: int = 20
+    weights: dict[str, float] = field(default_factory=lambda: dict(PBM_TOXPI_WEIGHTS))
+    robustness_enabled: bool = True
+    perturbation_fraction: float = 0.20
+    n_iter: int = 1000
+    seed: int = 123
+
+    def __post_init__(self):
+        if int(self.candidate_top_n) < 1:
+            raise ValueError("Candidate Top N must be at least 1")
+        if int(self.display_top_n) < 1:
+            raise ValueError("Display Top N must be at least 1")
+        if int(self.display_top_n) > int(self.candidate_top_n):
+            raise ValueError("Display Top N cannot exceed Candidate Top N")
+        if float(self.perturbation_fraction) < 0 or float(self.perturbation_fraction) > 1:
+            raise ValueError("Weight perturbation must be between 0% and 100%")
+        if int(self.n_iter) < 1:
+            raise ValueError("Robustness iterations must be at least 1")
+        normalize_pbm_toxpi_weights(self.weights)
+
+
+@dataclass
+class PBMToxPiResult:
+    config: PBMToxPiConfig
+    source_metrics: pd.DataFrame
+    global_screen: pd.DataFrame
+    candidate_normalized: pd.DataFrame
+    final_ranking: pd.DataFrame
+    display_rows: pd.DataFrame
+    normalized_weights: dict[str, float]
+    effective_candidate_top_n: int
+    effective_display_top_n: int
+    robustness_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    robustness_stats: pd.DataFrame = field(default_factory=pd.DataFrame)
+    robustness_correlations: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    def settings_table(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {"setting": "requested_candidate_top_n", "value": self.config.candidate_top_n},
+                {"setting": "candidate_top_n", "value": self.effective_candidate_top_n},
+                {"setting": "requested_display_top_n", "value": self.config.display_top_n},
+                {"setting": "display_top_n", "value": self.effective_display_top_n},
+                {"setting": "robustness_enabled", "value": self.config.robustness_enabled},
+                {"setting": "perturbation_fraction", "value": self.config.perturbation_fraction},
+                {"setting": "robustness_iterations", "value": self.config.n_iter},
+                {"setting": "robustness_seed", "value": self.config.seed},
+                *[
+                    {"setting": f"weight_{name}", "value": value}
+                    for name, value in self.normalized_weights.items()
+                ],
+            ]
+        )
 
 
 def build_detection_frequency(
@@ -362,56 +420,107 @@ def build_pbm_toxpi_input(
     return output
 
 
+def normalize_pbm_toxpi_weights(weights: dict[str, float] | None = None) -> dict[str, float]:
+    supplied = weights or PBM_TOXPI_WEIGHTS
+    required = tuple(PBM_TOXPI_WEIGHTS)
+    values = {name: float(supplied.get(name, 0.0)) for name in required}
+    if any(value < 0 for value in values.values()):
+        raise ValueError("ToxPi weights cannot be negative")
+    total = sum(values.values())
+    if total <= 0:
+        raise ValueError("ToxPi weights must sum to a positive value")
+    return {name: value / total for name, value in values.items()}
+
+
+def _compound_toxpi_source(toxpi_input: pd.DataFrame) -> pd.DataFrame:
+    data = toxpi_input.copy()
+    data["compound"] = data["compound"].map(_clean_text)
+    for column in ("Peak_Area", "Scores", "DF"):
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    source = (
+        data.loc[data["compound"].ne("")]
+        .groupby("compound", as_index=False)
+        .agg(Peak_Area=("Peak_Area", "mean"), Scores=("Scores", "mean"), DF=("DF", "mean"))
+    )
+    source["ir_value"] = np.nan
+    mask = source["Peak_Area"] > 0
+    source.loc[mask, "ir_value"] = np.log10(source.loc[mask, "Peak_Area"])
+    return source
+
+
+def _score_pbm_toxpi_stage(source: pd.DataFrame, weights: dict[str, float], score_name: str) -> pd.DataFrame:
+    scored = source.copy()
+    scored["norm_peak_area"] = _normalize_positive(scored["ir_value"])
+    scored["norm_pbm"] = _normalize_positive(scored["Scores"])
+    scored["norm_df"] = pd.to_numeric(scored["DF"], errors="coerce").clip(0, 1)
+    matrix = scored[["norm_peak_area", "norm_pbm", "norm_df"]].to_numpy(dtype=float)
+    vector = np.array([weights["peak_area"], weights["pbm"], weights["df"]], dtype=float)
+    scored[score_name] = _weighted_indicator_scores(matrix, vector)
+    return scored
+
+
+def _weighted_indicator_scores(matrix: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    valid = ~np.isnan(matrix)
+    clean = np.nan_to_num(matrix, nan=0.0)
+    denominators = valid @ weights
+    numerators = (clean * weights).sum(axis=1)
+    return np.divide(
+        numerators,
+        denominators,
+        out=np.full(len(matrix), np.nan, dtype=float),
+        where=denominators > 0,
+    )
+
+
+def _sort_toxpi_stage(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFrame:
+    ranked = frame.copy()
+    ranked["_compound_key"] = ranked["compound"].map(lambda value: _clean_text(value).casefold())
+    ranked = ranked.sort_values(
+        [score_col, "Peak_Area", "_compound_key"],
+        ascending=[False, False, True],
+        na_position="last",
+        kind="mergesort",
+    ).drop(columns="_compound_key").reset_index(drop=True)
+    ranked[rank_col] = np.arange(1, len(ranked) + 1)
+    ranked.attrs["toxic_cols"] = ["peak_area", "pbm", "df"]
+    return ranked
+
+
 def calculate_pbm_toxpi(
     toxpi_input: pd.DataFrame,
-    weights: dict[str, float] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    weights = weights or PBM_TOXPI_WEIGHTS
+    config: PBMToxPiConfig | None = None,
+) -> PBMToxPiResult:
+    config = config or PBMToxPiConfig()
     required = ["compound", "Peak_Area", "Scores", "DF"]
     missing = [column for column in required if column not in toxpi_input.columns]
     if missing:
         raise ValueError(f"Missing required ToxPi input columns: {', '.join(missing)}")
-
-    data = toxpi_input.copy()
-    data["compound"] = data["compound"].map(_clean_text)
-    data["Peak_Area"] = pd.to_numeric(data["Peak_Area"], errors="coerce")
-    data["Scores"] = pd.to_numeric(data["Scores"], errors="coerce")
-    data["DF"] = pd.to_numeric(data["DF"], errors="coerce")
-    data["ir_value"] = np.nan
-    positive_area = data["Peak_Area"] > 0
-    data.loc[positive_area, "ir_value"] = np.log10(data.loc[positive_area, "Peak_Area"])
-
-    data["norm_peak_area"] = _normalize_positive(data["ir_value"])
-    data["norm_pbm"] = _normalize_positive(data["Scores"])
-    data["norm_df"] = data["DF"].clip(lower=0, upper=1)
-
-    total_weight = sum(float(value) for value in weights.values())
-    if total_weight <= 0:
-        raise ValueError("ToxPi weights must sum to a positive value")
-    normalized_weights = {key: float(value) / total_weight for key, value in weights.items()}
-
-    data["toxpi"] = (
-        data["norm_peak_area"] * normalized_weights["peak_area"]
-        + data["norm_pbm"] * normalized_weights["pbm"]
-        + data["norm_df"] * normalized_weights["df"]
+    weights = normalize_pbm_toxpi_weights(config.weights)
+    source = _compound_toxpi_source(toxpi_input)
+    global_screen = _sort_toxpi_stage(
+        _score_pbm_toxpi_stage(source, weights, "initial_toxpi"),
+        "initial_toxpi",
+        "initial_rank",
     )
-
-    toxpi_results = (
-        data.groupby("compound", as_index=False)
-        .agg(
-            Peak_Area=("Peak_Area", "mean"),
-            Scores=("Scores", "mean"),
-            DF=("DF", "mean"),
-            norm_peak_area=("norm_peak_area", "mean"),
-            norm_pbm=("norm_pbm", "mean"),
-            norm_df=("norm_df", "mean"),
-            toxpi=("toxpi", "mean"),
-        )
-        .sort_values("toxpi", ascending=False)
-        .reset_index(drop=True)
+    candidate_n = min(int(config.candidate_top_n), len(global_screen))
+    candidate_source = source.merge(
+        global_screen.head(candidate_n)[["compound"]], on="compound", how="inner"
     )
-    toxpi_results.attrs["toxic_cols"] = ["peak_area", "pbm", "df"]
-    return data, toxpi_results
+    candidate_normalized = _score_pbm_toxpi_stage(candidate_source, weights, "toxpi")
+    final_ranking = _sort_toxpi_stage(candidate_normalized, "toxpi", "final_rank")
+    display_n = min(int(config.display_top_n), len(final_ranking))
+    display_rows = final_ranking.head(display_n).copy()
+    return PBMToxPiResult(
+        config=config,
+        source_metrics=source,
+        global_screen=global_screen,
+        candidate_normalized=candidate_normalized,
+        final_ranking=final_ranking,
+        display_rows=display_rows,
+        normalized_weights=weights,
+        effective_candidate_top_n=candidate_n,
+        effective_display_top_n=display_n,
+    )
 
 
 def limit_toxpi_plot_rows(
