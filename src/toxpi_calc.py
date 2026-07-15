@@ -8,11 +8,10 @@ import pandas as pd
 from matplotlib.patches import Patch, Wedge
 from scipy.stats import spearmanr
 
+from src.plot_style import apply_figure_font, configure_plot_style
 
-# Result figures must export consistently on hosts that do not have CJK fonts.
-plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "sans-serif"]
-plt.rcParams["axes.unicode_minus"] = False
-plt.rcParams["pdf.fonttype"] = 42
+
+configure_plot_style()
 
 
 # Legacy ADMETlab/ToxPi indicators. They are still used by old templates and
@@ -319,7 +318,7 @@ def run_sensitivity_analysis(toxpi_agg, custom_weights=None, n_iter=1000, seed=1
     offset_x = 0.01 if mean_val < 0.95 else -0.06
     ax.text(mean_val + offset_x, 800, f"Mean = {mean_val:.3f}", color="red", fontsize=11)
 
-    return summary_df, stats, fig_cor, actual_top_k
+    return summary_df, stats, apply_figure_font(fig_cor), actual_top_k
 
 
 def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, toxic_cols=None):
@@ -429,7 +428,7 @@ def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, tox
     if beautify:
         caption_text += " | Zero values use minimum visual thickness"
     fig.text(0.94, 0.04, caption_text, fontsize=9.5, color="#333333", ha="right", va="bottom")
-    return fig
+    return apply_figure_font(fig)
 
 
 def generate_r_style_toxpi_plot(
@@ -564,7 +563,7 @@ def generate_r_style_toxpi_plot(
         ha="right",
         va="bottom",
     )
-    return fig
+    return apply_figure_font(fig)
 
 
 def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
@@ -622,7 +621,7 @@ def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
 
     ax.tick_params(axis="both", which="both", direction="in", length=4, labelsize=10, colors="#000000")
 
-    return fig
+    return apply_figure_font(fig)
 
 
 def export_results_to_excel(toxpi_agg, sensitivity_df, stats_dict, excel_path, top_k_value, toxic_cols=None):

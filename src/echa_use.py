@@ -716,6 +716,11 @@ def classify_use_cn(*texts):
 
 
 def build_result_workbook(input_df, summary_df=None, candidates_df=None, dossiers_df=None, errors_df=None):
+    from src.use_rose_plot import (
+        build_compound_universe,
+        extract_top_reported_functional_use_data,
+    )
+
     if summary_df is None:
         summary_df = pd.DataFrame(columns=_summary_columns())
     if candidates_df is None:
@@ -728,14 +733,25 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, dossier
     mapping_df = pd.DataFrame(
         [{"英文关键词": " / ".join(keywords), "中文类别": label} for keywords, label in USE_TRANSLATION_RULES]
     )
+    normalized_input = normalize_input_columns(input_df)
+    compound_universe = build_compound_universe(normalized_input)
+    reported_pie = extract_top_reported_functional_use_data(
+        candidates_df,
+        compound_universe,
+        source_label="ECHA reported",
+        source_type=None,
+        use_key="category",
+        require_reported_flag=False,
+    )
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        normalize_input_columns(input_df)[REQUIRED_IDENTIFIER_COLUMNS].to_excel(
+        normalized_input[REQUIRED_IDENTIFIER_COLUMNS].to_excel(
             writer, sheet_name="Input", index=False
         )
         summary_df.to_excel(writer, sheet_name="ECHA_Use_Summary", index=False)
-        candidates_df.to_excel(writer, sheet_name="ECHA_All_Use_Candidates", index=False)
+        candidates_df.to_excel(writer, sheet_name="ECHA_Uses_Reported", index=False)
+        reported_pie.to_excel(writer, sheet_name="ECHA_Reported_Pie_Data", index=False)
         dossiers_df.to_excel(writer, sheet_name="ECHA_Dossiers", index=False)
         errors_df.to_excel(writer, sheet_name="ECHA_Warnings", index=False)
         mapping_df.to_excel(writer, sheet_name="ECHA_CN_Mapping", index=False)

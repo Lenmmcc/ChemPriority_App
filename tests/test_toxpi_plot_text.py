@@ -1,6 +1,7 @@
 import io
 import unittest
 import warnings
+from pathlib import Path
 
 import matplotlib
 
@@ -46,6 +47,7 @@ class ToxPiPlotTextTests(unittest.TestCase):
         try:
             for figure in figures:
                 self._assert_no_cjk_figure_text(figure)
+                self.assert_times_new_roman(figure)
                 with warnings.catch_warnings():
                     warnings.simplefilter("error")
                     for image_format in ("png", "pdf"):
@@ -77,6 +79,22 @@ class ToxPiPlotTextTests(unittest.TestCase):
             any("\u4e00" <= char <= "\u9fff" for text in text_values for char in text),
             text_values,
         )
+
+    def assert_times_new_roman(self, figure):
+        texts = [
+            text
+            for text in figure.findobj(matplotlib.text.Text)
+            if text.get_text().strip()
+        ]
+        self.assertTrue(texts)
+        self.assertTrue(
+            all(text.get_fontfamily()[0] == "Times New Roman" for text in texts)
+        )
+
+    def test_toxpi_page_configures_shared_plot_style_and_displays_warnings(self):
+        page_source = Path("pages/2_ToxPi毒性评估.py").read_text(encoding="utf-8")
+        self.assertIn("configure_plot_style", page_source)
+        self.assertIn("st.warning", page_source)
 
     def test_r_style_toxpi_plot_uses_single_canvas_grid(self):
         norm_peak_area = np.linspace(1.0, 0.35, 15)
@@ -121,6 +139,7 @@ class ToxPiPlotTextTests(unittest.TestCase):
             legend = figure.legends[0]
             self.assertEqual(legend.get_title().get_text(), "Metric")
             self.assertEqual([text.get_text() for text in legend.get_texts()], ["Peak area", "PBM scores", "DF"])
+            self.assert_times_new_roman(figure)
 
             with warnings.catch_warnings():
                 warnings.simplefilter("error")

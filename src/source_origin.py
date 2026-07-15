@@ -304,19 +304,25 @@ def fetch_coconut_evidence(row, timeout=60, base_url=COCONUT_BASE):
 
 
 def build_result_workbook(input_df, summary_df=None, evidence_df=None, errors_df=None):
+    from src.use_rose_plot import build_compound_universe, extract_source_origin_pie_data
+
     if summary_df is None:
         summary_df = pd.DataFrame(columns=SUMMARY_COLUMNS)
     if evidence_df is None:
         evidence_df = pd.DataFrame(columns=EVIDENCE_COLUMNS)
     if errors_df is None:
         errors_df = pd.DataFrame(columns=WARNING_COLUMNS)
+    normalized_input = normalize_source_input_columns(input_df)
+    compound_universe = build_compound_universe(normalized_input)
+    source_origin_pie = extract_source_origin_pie_data(summary_df, compound_universe)
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        normalize_source_input_columns(input_df).to_excel(writer, sheet_name="Input", index=False)
+        normalized_input.to_excel(writer, sheet_name="Input", index=False)
         _ensure_columns(summary_df, SUMMARY_COLUMNS).to_excel(
             writer, sheet_name="Source_Origin_Summary", index=False
         )
+        source_origin_pie.to_excel(writer, sheet_name="Source_Origin_Pie_Data", index=False)
         _ensure_columns(evidence_df, EVIDENCE_COLUMNS).to_excel(
             writer, sheet_name="Source_Origin_Evidence", index=False
         )

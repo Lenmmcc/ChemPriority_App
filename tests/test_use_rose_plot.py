@@ -1,18 +1,25 @@
 import unittest
 import warnings
 
+import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from src.echa_use import classify_use_cn
 from src.use_rose_plot import (
+    build_compound_universe,
     build_epa_echa_combined_rose_data,
+    extract_source_origin_pie_data,
     extract_reported_functional_use_presence_data,
     extract_candidate_use_plot_data,
+    extract_top_reported_functional_use_data,
     extract_top_predicted_functional_use_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
     generate_combined_use_rose_plot,
+    generate_compound_classification_pie_plot,
     generate_reported_functional_use_presence_plot,
+    generate_reported_functional_use_pie_plot,
     generate_top_predicted_functional_use_lollipop_plot,
     generate_top_predicted_functional_use_pie_plot,
     generate_use_bar_plot,
@@ -21,6 +28,354 @@ from src.use_rose_plot import (
 
 
 class UseRosePlotTests(unittest.TestCase):
+    def test_reported_classification_uses_unique_top_tie_and_missing(self):
+        universe = build_compound_universe(
+            pd.DataFrame({"compound": ["A", "B", "C", "A"]})
+        )
+        candidates = pd.DataFrame(
+            [
+                {"compound": "A", "source_type": "functional_use", "functional_use_source": "reported", "raw_use": "Solvent", "evidence_count": 3},
+                {"compound": "A", "source_type": "functional_use", "functional_use_source": "reported", "raw_use": "Catalyst", "evidence_count": 1},
+                {"compound": "B", "source_type": "functional_use", "functional_use_source": "reported", "raw_use": "Solvent", "evidence_count": 2},
+                {"compound": "B", "source_type": "functional_use", "functional_use_source": "reported", "raw_use": "Catalyst", "evidence_count": 2},
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="EPA FC reported",
+            source_type="functional_use",
+            use_key="raw",
+            require_reported_flag=True,
+        ).set_index("compound")
+
+        self.assertEqual(result.loc["A", "display_label"], "Solvent")
+        self.assertEqual(result.loc["A", "classification_reason"], "unique_top_reported_category")
+        self.assertEqual(result.loc["B", "display_label"], "Others")
+        self.assertEqual(result.loc["B", "classification_reason"], "tie_for_top_reported_category")
+        self.assertEqual(result.loc["C", "display_label"], "Others")
+        self.assertEqual(result.loc["C", "classification_reason"], "no_reported_result")
+        self.assertEqual(len(result), 3)
+
+    def test_echa_reported_uses_the_same_unique_top_rule(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B"]}))
+        candidates = pd.DataFrame(
+            [
+                {"compound": "A", "use_en": "Industrial use", "use_cn": "Industrial use", "evidence_count": 2},
+                {"compound": "A", "use_en": "Consumer use", "use_cn": "Consumer use", "evidence_count": 1},
+                {"compound": "B", "use_en": "Industrial use", "use_cn": "Industrial use", "evidence_count": 1},
+                {"compound": "B", "use_en": "Consumer use", "use_cn": "Consumer use", "evidence_count": 1},
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="ECHA reported",
+            source_type=None,
+            use_key="category",
+            require_reported_flag=False,
+        ).set_index("compound")
+
+        self.assertEqual(result.loc["A", "display_label"], "Industrial use")
+        self.assertEqual(result.loc["B", "display_label"], "Others")
+
+    def test_echa_reported_aggregates_distinct_evidence_by_true_category(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "use_en": "Industrial manufacture",
+                    "use_cn": "Industrial category",
+                    "evidence_count": 2,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Industrial processing",
+                    "use_cn": "Industrial category",
+                    "evidence_count": 3,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Consumer use",
+                    "use_cn": "Consumer category",
+                    "evidence_count": 4,
+                },
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="ECHA reported",
+            source_type=None,
+            use_key="category",
+            require_reported_flag=False,
+        ).iloc[0]
+
+        self.assertEqual(result["display_label"], "Industrial category")
+        self.assertEqual(result["evidence_count"], 5)
+        self.assertEqual(result["classification_reason"], "unique_top_reported_category")
+
+    def test_real_echa_chinese_categories_keep_distinct_stable_english_labels(self):
+        industrial_category = classify_use_cn("industrial use")
+        consumer_category = classify_use_cn("consumer use")
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "use_en": "Industrial use at industrial sites",
+                    "use_cn": industrial_category,
+                    "evidence_count": 2,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Use at industrial sites",
+                    "use_cn": industrial_category,
+                    "evidence_count": 3,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Consumer use in household products",
+                    "use_cn": consumer_category,
+                    "evidence_count": 4,
+                },
+                {
+                    "compound": "B",
+                    "use_en": "Consumer use by the general public",
+                    "use_cn": consumer_category,
+                    "evidence_count": 1,
+                },
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="ECHA reported",
+            source_type=None,
+            use_key="category",
+            require_reported_flag=False,
+        ).set_index("compound")
+
+        self.assertEqual(result.loc["A", "evidence_count"], 5)
+        self.assertEqual(result.loc["A", "display_label"], "Industrial use")
+        self.assertEqual(result.loc["B", "display_label"], "Consumer use")
+        self.assertNotEqual(
+            result.loc["A", "display_label"], result.loc["B", "display_label"]
+        )
+
+        figure = generate_reported_functional_use_pie_plot(
+            result.reset_index(), "ECHA reported"
+        )
+        try:
+            legend_labels = {
+                text.get_text()
+                for legend in figure.legends
+                for text in legend.get_texts()
+            }
+            self.assertEqual(len(figure.axes[0].patches), 2)
+            self.assertEqual(
+                legend_labels,
+                {"Consumer use (1, 50.0%)", "Industrial use (1, 50.0%)"},
+            )
+        finally:
+            plt.close(figure)
+
+    def test_reported_classification_fails_closed_when_source_type_is_missing(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "raw_use": "Solvent",
+                    "functional_use_source": "reported",
+                    "evidence_count": 3,
+                }
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="EPA FC reported",
+            source_type="functional_use",
+            use_key="raw",
+            require_reported_flag=True,
+        ).iloc[0]
+
+        self.assertEqual(result["display_label"], "Others")
+        self.assertEqual(result["classification_reason"], "no_reported_result")
+
+    def test_literal_none_is_valid_only_as_a_compound_identifier(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["None"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "None",
+                    "source_type": "functional_use",
+                    "functional_use_source": "reported",
+                    "raw_use": "None",
+                    "evidence_count": 2,
+                }
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="EPA FC reported",
+            source_type="functional_use",
+            use_key="raw",
+            require_reported_flag=True,
+        ).iloc[0]
+
+        self.assertEqual(len(universe), 1)
+        self.assertEqual(universe.loc[0, "compound_key"], "none")
+        self.assertEqual(result["display_label"], "Others")
+        self.assertEqual(result["classification_reason"], "no_reported_result")
+
+    def test_predicted_fills_missing_universe_compound_as_others(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "source_type": "functional_use",
+                    "functional_use_source": "predicted",
+                    "raw_use": "Solvent",
+                    "probability": 0.91,
+                }
+            ]
+        )
+
+        result = extract_top_predicted_functional_use_data(
+            candidates, compound_universe=universe
+        ).set_index("compound")
+
+        self.assertEqual(result.loc["A", "display_label"], "Solvent")
+        self.assertEqual(result.loc["B", "display_label"], "Others")
+        self.assertEqual(result.loc["B", "classification_reason"], "no_predicted_result")
+        self.assertEqual(len(result), 2)
+
+    def test_source_origin_maps_all_four_fixed_categories(self):
+        universe = build_compound_universe(
+            pd.DataFrame({"compound": ["Both", "Human", "Natural", "None"]})
+        )
+        summary = pd.DataFrame(
+            [
+                {"compound": "Both", "人为源证据数": 2, "天然源证据数": 1},
+                {"compound": "Human", "人为源证据数": 1, "天然源证据数": 0},
+                {"compound": "Natural", "人为源证据数": 0, "天然源证据数": 3},
+            ]
+        )
+
+        result = extract_source_origin_pie_data(summary, universe)
+
+        self.assertEqual(
+            result.set_index("compound")["display_label"].to_dict(),
+            {
+                "Both": "Both",
+                "Human": "Anthropogenic",
+                "Natural": "Natural",
+                "None": "Unknown",
+            },
+        )
+
+    def test_source_origin_duplicate_rows_aggregate_presence_in_both_orders(self):
+        universe = build_compound_universe(
+            pd.DataFrame({"compound": ["Compound A", "Compound A"]})
+        )
+        evidence_rows = [
+            {"compound": "Compound A", "人为源证据数": 2, "天然源证据数": 0},
+            {"compound": "Compound A", "人为源证据数": 0, "天然源证据数": 3},
+        ]
+
+        for rows in (evidence_rows, list(reversed(evidence_rows))):
+            with self.subTest(rows=rows):
+                result = extract_source_origin_pie_data(pd.DataFrame(rows), universe)
+
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result["compound_key"].nunique(), 1)
+                self.assertEqual(result.loc[0, "display_label"], "Both")
+                self.assertEqual(result.loc[0, "evidence_count"], 2)
+
+    def test_reported_pie_uses_tiered_labels_footnote_and_keeps_rare_categories(self):
+        rows = []
+        for category, count in [("Major", 950), ("Medium", 40), ("Rare", 9), ("Tiny", 1)]:
+            for index in range(count):
+                compound = f"{category}-{index}"
+                rows.append(
+                    {
+                        "compound_key": compound.lower(),
+                        "compound": compound,
+                        "display_label": category,
+                    }
+                )
+        plot_df = pd.DataFrame(rows)
+
+        figure = generate_reported_functional_use_pie_plot(plot_df, "Reported")
+        try:
+            axis_text = {text.get_text() for text in figure.axes[0].texts}
+            figure_text = {text.get_text() for text in figure.texts}
+            annotations = [
+                item
+                for item in figure.axes[0].texts
+                if isinstance(item, matplotlib.text.Annotation)
+            ]
+            legend_labels = {
+                text.get_text()
+                for legend in figure.legends
+                for text in legend.get_texts()
+            }
+
+            self.assertIn("95.0%", axis_text)
+            self.assertIn("4.0%", {item.get_text() for item in annotations})
+            self.assertNotIn("0.9%", axis_text)
+            self.assertNotIn("0.1%", axis_text)
+            self.assertTrue(any("Rare (9, 0.9%)" == label for label in legend_labels))
+            self.assertTrue(any("Tiny (1, 0.1%)" == label for label in legend_labels))
+            self.assertFalse(any(label.startswith("Others (") for label in legend_labels))
+            self.assertIn(
+                "Others includes compounds with no reported result or with a tie for the most frequently reported category.",
+                figure_text,
+            )
+            self.assertTrue(
+                all(
+                    text.get_fontfamily()[0] == "Times New Roman"
+                    for text in figure.findobj(matplotlib.text.Text)
+                    if text.get_text().strip()
+                )
+            )
+        finally:
+            plt.close(figure)
+
+    def test_compound_classification_pie_assigns_duplicate_compound_to_first_category(self):
+        plot_df = pd.DataFrame(
+            [
+                {"compound_key": "compound-a", "display_label": "Alpha"},
+                {"compound_key": "compound-a", "display_label": "Beta"},
+                {"compound_key": "compound-b", "display_label": "Beta"},
+            ]
+        )
+
+        figure = generate_compound_classification_pie_plot(plot_df, "Classification")
+        try:
+            axis_text = {text.get_text() for text in figure.axes[0].texts}
+            legend_labels = {
+                text.get_text()
+                for legend in figure.legends
+                for text in legend.get_texts()
+            }
+
+            self.assertIn("Total compounds\n2", axis_text)
+            self.assertEqual(legend_labels, {"Alpha (1, 50.0%)", "Beta (1, 50.0%)"})
+        finally:
+            plt.close(figure)
+
     def test_candidate_detail_data_keeps_all_uses_without_top_limit(self):
         candidates_df = pd.DataFrame(
             [
@@ -331,6 +686,7 @@ class UseRosePlotTests(unittest.TestCase):
             extract_top_predicted_functional_use_data(pd.DataFrame()).columns.tolist(),
             [
                 "source",
+                "compound_key",
                 "compound",
                 "compound_label",
                 "use_cn",
@@ -338,6 +694,8 @@ class UseRosePlotTests(unittest.TestCase):
                 "display_label",
                 "probability",
                 "status",
+                "classification_reason",
+                "is_other",
             ],
         )
         self.assertEqual(
@@ -392,6 +750,34 @@ class UseRosePlotTests(unittest.TestCase):
         self.assertEqual(len(plot_df), 1)
         self.assertEqual(plot_df.loc[0, "compound"], "Compound A")
         self.assertEqual(plot_df.loc[0, "use_label"], "Intermediate")
+        self.assertEqual(plot_df.loc[0, "presence"], 1)
+
+    def test_echa_reported_presence_uses_category_rows_without_source_flags(self):
+        candidates_df = pd.DataFrame(
+            [
+                {
+                    "compound": "Compound A",
+                    "use_en": "Industrial use",
+                    "use_cn": "Industrial use",
+                },
+                {
+                    "compound": "Compound A",
+                    "use_en": "Industrial use",
+                    "use_cn": "Industrial use",
+                },
+            ]
+        )
+
+        plot_df = extract_reported_functional_use_presence_data(
+            candidates_df,
+            source_label="ECHA",
+            source_type=None,
+            use_key="category",
+            require_reported_flag=False,
+        )
+
+        self.assertEqual(len(plot_df), 1)
+        self.assertEqual(plot_df.loc[0, "use_label"], "Industrial use")
         self.assertEqual(plot_df.loc[0, "presence"], 1)
 
     def test_top_predicted_pie_plot_exports_with_ascii_only_text(self):

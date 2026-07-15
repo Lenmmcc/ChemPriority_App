@@ -8,6 +8,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.plot_style import apply_figure_font, configure_plot_style
+
+
+configure_plot_style()
+
 
 EXPECTED_WORKBOOK_SHEETS = [
     "Input_Check",
@@ -478,7 +483,7 @@ def generate_pbm_toxpi_bar_plot(toxpi_results: pd.DataFrame, top_n: int = 15):
     ax.tick_params(axis="x", rotation=90)
     ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
     fig.tight_layout()
-    return fig
+    return apply_figure_font(fig)
 
 
 def _normalize_positive(series: pd.Series) -> pd.Series:

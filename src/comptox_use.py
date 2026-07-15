@@ -714,6 +714,12 @@ def fetch_use_candidates(
 
 
 def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_df=None):
+    from src.use_rose_plot import (
+        build_compound_universe,
+        extract_top_predicted_functional_use_data,
+        extract_top_reported_functional_use_data,
+    )
+
     if summary_df is None:
         summary_df = pd.DataFrame()
     if candidates_df is None:
@@ -734,10 +740,25 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_
             for keywords, label in USE_TRANSLATION_RULES
         ]
     )
+    normalized_input = normalize_input_columns(input_df)
+    compound_universe = build_compound_universe(normalized_input)
+    predicted_pie = extract_top_predicted_functional_use_data(
+        candidates_df,
+        source_label="EPA FC",
+        compound_universe=compound_universe,
+    )
+    reported_pie = extract_top_reported_functional_use_data(
+        candidates_df,
+        compound_universe,
+        source_label="EPA FC reported",
+        source_type="functional_use",
+        use_key="raw",
+        require_reported_flag=True,
+    )
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        normalize_input_columns(input_df)[REQUIRED_IDENTIFIER_COLUMNS].to_excel(
+        normalized_input[REQUIRED_IDENTIFIER_COLUMNS].to_excel(
             writer, sheet_name="Input", index=False
         )
         summary_df.to_excel(writer, sheet_name="Use_Summary", index=False)
@@ -752,7 +773,8 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_
             sheet_name="Functional_Uses_Reported",
             index=False,
         )
-        candidates_df.to_excel(writer, sheet_name="All_Use_Candidates", index=False)
+        predicted_pie.to_excel(writer, sheet_name="EPA_Predicted_Pie_Data", index=False)
+        reported_pie.to_excel(writer, sheet_name="EPA_Reported_Pie_Data", index=False)
         errors_df.to_excel(writer, sheet_name="Warnings", index=False)
         build_evidence_metadata_table().to_excel(writer, sheet_name="Evidence_Metadata", index=False)
         mapping_df.to_excel(writer, sheet_name="CN_Mapping", index=False)

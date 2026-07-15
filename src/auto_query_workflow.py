@@ -11,7 +11,11 @@ from typing import Callable
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from src.comptox_use import run_comptox_use_batch
+from src.comptox_use import (
+    build_functional_use_table,
+    build_product_use_table,
+    run_comptox_use_batch,
+)
 from src.cp_screening_workflow import (
     build_detection_frequency,
     build_group_area_mean_by_sample,
@@ -25,15 +29,21 @@ from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, REQUIRED_IDENTIFIER_COLUMNS, run_identifier_completion_batch
 from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
 from src.pov_lrtp_replica import run_pov_lrtp_batch
+from src.plot_style import configure_plot_style
 from src.r_screening_replica.pipeline import run_screening_pipeline
 from src.r_screening_replica.schema import ScreeningConfig
 from src.source_origin import run_source_origin_batch
 from src.use_rose_plot import (
+    build_compound_universe,
     extract_candidate_use_plot_data,
     extract_reported_functional_use_presence_data,
+    extract_source_origin_pie_data,
     extract_top_predicted_functional_use_data,
+    extract_top_reported_functional_use_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
+    generate_compound_classification_pie_plot,
+    generate_reported_functional_use_pie_plot,
     generate_reported_functional_use_presence_plot,
     generate_top_predicted_functional_use_pie_plot,
     generate_use_rose_plot,
@@ -55,8 +65,13 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
             "Sample_Peak_Area",
             "Group_Area_Raw_Long",
             "Group_Area_Mean_By_Sample",
+            "Plot_Warnings",
         ),
-        ("Local_",),
+        (
+            "Local_Chemical_Type_Distribution",
+            "Local_DBE_Bubble_Plot",
+            "Local_Van_Krevelen_Plot",
+        ),
     ),
     (
         "02_Identifier_Completion",
@@ -73,28 +88,50 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
     (
         "04_EPA_CompTox",
         "EPA_CompTox_Results.xlsx",
-        ("CompTox_Summary", "CompTox_Candidates", "CompTox_Errors"),
-        ("EPA_",),
+        (
+            "CompTox_Summary",
+            "Product_Use_Categories",
+            "Functional_Uses_Predicted",
+            "Functional_Uses_Reported",
+            "EPA_Predicted_Pie_Data",
+            "EPA_Reported_Pie_Data",
+            "CompTox_Errors",
+        ),
+        (
+            "EPA_Product_Use_Category_Rose_Plot",
+            "EPA_Top_Predicted_Functional_Use",
+            "EPA_Reported_Functional_Use_Distribution",
+            "EPA_Reported_Functional_Use_Evidence",
+        ),
     ),
     (
         "05_ECHA",
         "ECHA_Results.xlsx",
         (
             "ECHA_Use_Summary",
-            "ECHA_Use_Candidates",
+            "ECHA_Uses_Reported",
+            "ECHA_Reported_Pie_Data",
             "ECHA_Use_Dossiers",
             "ECHA_Use_Errors",
             "ECHA_GHS_Summary",
             "ECHA_GHS_Classifications",
             "ECHA_GHS_Errors",
         ),
-        ("ECHA_",),
+        (
+            "ECHA_Reported_Use_Distribution",
+            "ECHA_Reported_Use_Evidence",
+        ),
     ),
     (
         "06_Source_Origin",
         "Source_Origin_Results.xlsx",
-        ("Source_Origin_Summary", "Source_Origin_Evidence", "Source_Origin_Errors"),
-        (),
+        (
+            "Source_Origin_Summary",
+            "Source_Origin_Evidence",
+            "Source_Origin_Errors",
+            "Source_Origin_Pie_Data",
+        ),
+        ("Source_Origin_Distribution",),
     ),
     (
         "07_Pov_LRTP_PBM_ToxPi",
@@ -102,6 +139,18 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
         ("Pov_LRTP_Input", "Pov_LRTP", "ToxPi_Input", "ToxPi_Normalized", "ToxPi_Results"),
         (),
     ),
+)
+
+PUBLIC_TABLE_NAMES = frozenset(
+    name
+    for _, _, table_names, _ in AUTO_WORKFLOW_EXPORT_MODULES
+    for name in table_names
+) | frozenset({"Identifier_Input", "EPI_Input", "Warnings"})
+
+PUBLIC_CHART_NAMES = frozenset(
+    chart_name
+    for _, _, _, chart_names in AUTO_WORKFLOW_EXPORT_MODULES
+    for chart_name in chart_names
 )
 
 
@@ -233,7 +282,13 @@ def run_auto_query_workflow(
     tables["Structure_Preparation"] = prepared_input
     status_rows = []
     warning_rows = []
+    plot_warnings = configure_plot_style()
+    for message in plot_warnings:
+        warning_rows.append({"stage": "Plot style", "message": str(message)})
+    if plot_warnings:
+        tables["Plot_Warnings"] = pd.DataFrame({"warning": plot_warnings})
 
+    identifier_input = pd.DataFrame(columns=REQUIRED_IDENTIFIER_COLUMNS)
     completed_identifiers = pd.DataFrame()
     identifier_warnings = pd.DataFrame()
     epi_results = pd.DataFrame()
@@ -244,6 +299,7 @@ def run_auto_query_workflow(
     echa_summary = pd.DataFrame()
     echa_candidates = pd.DataFrame()
     echa_dossiers = pd.DataFrame()
+    source_summary = pd.DataFrame()
 
     def record(step, status, rows=0, message=""):
         status_rows.append({"step": step, "status": status, "rows": int(rows or 0), "message": message})
@@ -341,7 +397,8 @@ def run_auto_query_workflow(
             tables["Identifier_Warnings"] = identifier_warnings
             record("标识符补全", "完成", len(completed_identifiers))
 
-    query_input = _query_input_from_identifiers(completed_identifiers)
+    query_input = _query_input_from_identifiers(identifier_input, completed_identifiers)
+    compound_universe = build_compound_universe(identifier_input)
 
     run_epi_step = config.run_epi or config.run_pov_lrtp_toxpi
     if run_epi_step:
@@ -392,8 +449,52 @@ def run_auto_query_workflow(
             comptox_summary, comptox_candidates, comptox_errors = comptox_value
             tables["CompTox_Summary"] = comptox_summary
             tables["CompTox_Candidates"] = comptox_candidates
+            tables["Product_Use_Categories"] = build_product_use_table(comptox_candidates)
+            tables["Functional_Uses_Predicted"] = build_functional_use_table(
+                comptox_candidates,
+                functional_source="predicted",
+            )
+            tables["Functional_Uses_Reported"] = build_functional_use_table(
+                comptox_candidates,
+                functional_source="reported",
+            )
+            tables["EPA_Predicted_Pie_Data"] = extract_top_predicted_functional_use_data(
+                comptox_candidates,
+                compound_universe=compound_universe,
+            )
+            tables["EPA_Reported_Pie_Data"] = extract_top_reported_functional_use_data(
+                comptox_candidates,
+                compound_universe,
+                source_label="EPA FC reported",
+                source_type="functional_use",
+                use_key="raw",
+                require_reported_flag=True,
+            )
             tables["CompTox_Errors"] = comptox_errors
             record("EPA CompTox 用途", "完成", len(comptox_summary))
+
+        if comptox_value is None:
+            tables["Product_Use_Categories"] = build_product_use_table(comptox_candidates)
+            tables["Functional_Uses_Predicted"] = build_functional_use_table(
+                comptox_candidates,
+                functional_source="predicted",
+            )
+            tables["Functional_Uses_Reported"] = build_functional_use_table(
+                comptox_candidates,
+                functional_source="reported",
+            )
+            tables["EPA_Predicted_Pie_Data"] = extract_top_predicted_functional_use_data(
+                comptox_candidates,
+                compound_universe=compound_universe,
+            )
+            tables["EPA_Reported_Pie_Data"] = extract_top_reported_functional_use_data(
+                comptox_candidates,
+                compound_universe,
+                source_label="EPA FC reported",
+                source_type="functional_use",
+                use_key="raw",
+                require_reported_flag=True,
+            )
 
     if config.run_echa_use:
         echa_value = run_step(
@@ -412,9 +513,28 @@ def run_auto_query_workflow(
             echa_summary, echa_candidates, echa_dossiers, echa_errors = echa_value
             tables["ECHA_Use_Summary"] = echa_summary
             tables["ECHA_Use_Candidates"] = echa_candidates
+            tables["ECHA_Uses_Reported"] = echa_candidates.copy()
+            tables["ECHA_Reported_Pie_Data"] = extract_top_reported_functional_use_data(
+                echa_candidates,
+                compound_universe,
+                source_label="ECHA reported",
+                use_key="category",
+                require_reported_flag=False,
+            )
             tables["ECHA_Use_Dossiers"] = echa_dossiers
             tables["ECHA_Use_Errors"] = echa_errors
             record("ECHA REACH 用途", "完成", len(echa_summary))
+
+        if echa_value is None:
+            echa_reported_audit = extract_top_reported_functional_use_data(
+                echa_candidates,
+                compound_universe,
+                source_label="ECHA reported",
+                use_key="category",
+                require_reported_flag=False,
+            )
+            tables["ECHA_Uses_Reported"] = echa_reported_audit.copy()
+            tables["ECHA_Reported_Pie_Data"] = echa_reported_audit
 
     if config.run_echa_ghs:
         ghs_value = run_step(
@@ -441,11 +561,11 @@ def run_auto_query_workflow(
             "来源属性评估",
             lambda: run_source_origin_batch(
                 query_input,
-                comptox_summary_df=comptox_summary,
-                comptox_candidates_df=comptox_candidates,
-                echa_summary_df=echa_summary,
-                echa_candidates_df=echa_candidates,
-                echa_dossiers_df=echa_dossiers,
+                comptox_summary_df=comptox_summary if config.run_comptox else None,
+                comptox_candidates_df=comptox_candidates if config.run_comptox else None,
+                echa_summary_df=echa_summary if config.run_echa_use else None,
+                echa_candidates_df=echa_candidates if config.run_echa_use else None,
+                echa_dossiers_df=echa_dossiers if config.run_echa_use else None,
                 echa_base=config.echa_base,
                 timeout=int(config.source_origin_timeout),
                 delay_seconds=float(config.source_origin_delay_seconds),
@@ -459,7 +579,17 @@ def run_auto_query_workflow(
             tables["Source_Origin_Summary"] = source_summary
             tables["Source_Origin_Evidence"] = source_evidence
             tables["Source_Origin_Errors"] = source_errors
+            tables["Source_Origin_Pie_Data"] = extract_source_origin_pie_data(
+                source_summary,
+                compound_universe,
+            )
             record("来源属性评估", "完成", len(source_summary))
+
+        if source_value is None:
+            tables["Source_Origin_Pie_Data"] = extract_source_origin_pie_data(
+                source_summary,
+                compound_universe,
+            )
 
     if config.run_pov_lrtp_toxpi:
         toxpi_value = run_step(
@@ -490,6 +620,8 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
         result.step_status.to_excel(writer, sheet_name="Run_Log", index=False)
         result.representative_table.to_excel(writer, sheet_name="Representative_Input", index=False)
         for name, table in result.tables.items():
+            if name not in PUBLIC_TABLE_NAMES:
+                continue
             sheet_name = _safe_sheet_name(name)
             (table if table is not None else pd.DataFrame()).to_excel(writer, sheet_name=sheet_name, index=False)
     buffer.seek(0)
@@ -500,8 +632,10 @@ def _build_module_workbook(result: AutoWorkflowResult, table_names: tuple[str, .
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for name in table_names:
+            if name not in PUBLIC_TABLE_NAMES:
+                continue
             table = result.tables.get(name)
-            if isinstance(table, pd.DataFrame) and not table.empty:
+            if isinstance(table, pd.DataFrame):
                 table.to_excel(writer, sheet_name=_safe_sheet_name(name), index=False)
     buffer.seek(0)
     return buffer
@@ -512,7 +646,11 @@ def _module_chart_file_name(chart_key: str) -> str:
 
 
 def build_auto_workflow_charts(result: AutoWorkflowResult) -> OrderedDict[str, AutoWorkflowChart]:
-    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict(result.charts)
+    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict(
+        (key, chart)
+        for key, chart in result.charts.items()
+        if key in PUBLIC_CHART_NAMES
+    )
     for source_config in _auto_workflow_chart_sources(result):
         chart_df = _build_chart_data(source_config)
         if chart_df.empty:
@@ -539,16 +677,17 @@ def build_auto_workflow_zip(
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("Auto_Query_Workflow_Results.xlsx", build_auto_workflow_workbook(result).getvalue())
-        for folder, workbook_name, table_candidates, chart_prefixes in AUTO_WORKFLOW_EXPORT_MODULES:
+        for folder, workbook_name, table_candidates, chart_candidates in AUTO_WORKFLOW_EXPORT_MODULES:
             table_names = tuple(
                 name
                 for name in table_candidates
-                if isinstance(result.tables.get(name), pd.DataFrame) and not result.tables[name].empty
+                if name in PUBLIC_TABLE_NAMES
+                and isinstance(result.tables.get(name), pd.DataFrame)
             )
             chart_keys = tuple(
                 key
                 for key in charts
-                if any(key.startswith(prefix) for prefix in chart_prefixes)
+                if key in PUBLIC_CHART_NAMES and key in chart_candidates
             )
             if not table_names and not chart_keys:
                 continue
@@ -600,13 +739,6 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
                     "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
                 },
                 {
-                    "chart_type": "top_predicted_pie",
-                    "source_label": "EPA FC",
-                    "candidates_df": comptox_candidates,
-                    "title": "EPA CompTox Top Predicted Functional Use Distribution",
-                    "file_prefix": "EPA_Top_Predicted_Functional_Use",
-                },
-                {
                     "chart_type": "reported_presence",
                     "source_label": "EPA FC reported",
                     "candidates_df": comptox_candidates,
@@ -616,31 +748,82 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
             ]
         )
 
+    predicted_pie = result.tables.get("EPA_Predicted_Pie_Data")
+    if isinstance(predicted_pie, pd.DataFrame) and not predicted_pie.empty:
+        chart_sources.append(
+            {
+                "chart_type": "top_predicted_pie",
+                "table_df": predicted_pie,
+                "title": "EPA CompTox Top Predicted Functional Use Distribution",
+                "file_prefix": "EPA_Top_Predicted_Functional_Use",
+            }
+        )
+
+    epa_reported_pie = result.tables.get("EPA_Reported_Pie_Data")
+    if isinstance(epa_reported_pie, pd.DataFrame) and not epa_reported_pie.empty:
+        chart_sources.append(
+            {
+                "chart_type": "classification_pie",
+                "table_df": epa_reported_pie,
+                "pie_renderer": "reported",
+                "title": "EPA CompTox Reported Functional Use Distribution",
+                "file_prefix": "EPA_Reported_Functional_Use_Distribution",
+            }
+        )
+
     echa_candidates = result.tables.get("ECHA_Use_Candidates")
     if isinstance(echa_candidates, pd.DataFrame) and not echa_candidates.empty:
         chart_sources.append(
             {
-                "chart_type": "rose",
-                "source_label": "ECHA",
+                "chart_type": "reported_presence",
+                "source_label": "ECHA reported",
                 "candidates_df": echa_candidates,
+                "source_type": None,
                 "use_key": "category",
-                "title": "ECHA REACH Use Rose Plot",
-                "file_prefix": "ECHA_Use_Rose_Plot",
+                "require_reported_flag": False,
+                "title": "ECHA REACH Reported Use Evidence",
+                "file_prefix": "ECHA_Reported_Use_Evidence",
+            }
+        )
+
+    echa_reported_pie = result.tables.get("ECHA_Reported_Pie_Data")
+    if isinstance(echa_reported_pie, pd.DataFrame) and not echa_reported_pie.empty:
+        chart_sources.append(
+            {
+                "chart_type": "classification_pie",
+                "table_df": echa_reported_pie,
+                "pie_renderer": "reported",
+                "title": "ECHA REACH Reported Use Distribution",
+                "file_prefix": "ECHA_Reported_Use_Distribution",
+            }
+        )
+
+    source_origin_pie = result.tables.get("Source_Origin_Pie_Data")
+    if isinstance(source_origin_pie, pd.DataFrame) and not source_origin_pie.empty:
+        chart_sources.append(
+            {
+                "chart_type": "classification_pie",
+                "table_df": source_origin_pie,
+                "title": "Source Origin Distribution",
+                "file_prefix": "Source_Origin_Distribution",
+                "fixed_categories": ("Anthropogenic", "Natural", "Both", "Unknown"),
             }
         )
     return chart_sources
 
 
 def _build_chart_data(source_config: dict) -> pd.DataFrame:
+    if source_config["chart_type"] == "classification_pie":
+        return source_config["table_df"]
     if source_config["chart_type"] == "top_predicted_pie":
-        return extract_top_predicted_functional_use_data(
-            source_config["candidates_df"],
-            source_label=source_config["source_label"],
-        )
+        return source_config["table_df"]
     if source_config["chart_type"] == "reported_presence":
         return extract_reported_functional_use_presence_data(
             source_config["candidates_df"],
             source_label=source_config["source_label"],
+            source_type=source_config.get("source_type", "functional_use"),
+            use_key=source_config.get("use_key", "raw"),
+            require_reported_flag=source_config.get("require_reported_flag", True),
         )
     return extract_candidate_use_plot_data(
         source_config["candidates_df"],
@@ -654,6 +837,15 @@ def _build_chart_data(source_config: dict) -> pd.DataFrame:
 def _build_chart_figure(chart_df: pd.DataFrame, source_config: dict):
     if source_config["chart_type"] == "top_predicted_pie":
         return generate_top_predicted_functional_use_pie_plot(chart_df, source_config["title"])
+    if source_config["chart_type"] == "classification_pie":
+        if source_config.get("pie_renderer") == "reported":
+            return generate_reported_functional_use_pie_plot(chart_df, source_config["title"])
+        return generate_compound_classification_pie_plot(
+            chart_df,
+            source_config["title"],
+            footnote=source_config.get("footnote"),
+            fixed_categories=source_config.get("fixed_categories"),
+        )
     if source_config["chart_type"] == "reported_presence":
         return generate_reported_functional_use_presence_plot(chart_df, source_config["title"])
     return generate_use_rose_plot(chart_df, source_config["title"])
@@ -795,14 +987,37 @@ def _build_identifier_input(representative: pd.DataFrame) -> pd.DataFrame:
     return output[REQUIRED_IDENTIFIER_COLUMNS]
 
 
-def _query_input_from_identifiers(completed_identifiers: pd.DataFrame) -> pd.DataFrame:
-    if completed_identifiers is None or completed_identifiers.empty:
-        return pd.DataFrame(columns=REQUIRED_IDENTIFIER_COLUMNS)
-    output = completed_identifiers.copy()
+def _query_input_from_identifiers(
+    identifier_input: pd.DataFrame,
+    completed_identifiers: pd.DataFrame,
+) -> pd.DataFrame:
+    output = identifier_input.copy()
     for column in REQUIRED_IDENTIFIER_COLUMNS:
         if column not in output.columns:
             output[column] = ""
         output[column] = output[column].map(_clean_text)
+
+    if completed_identifiers is None or completed_identifiers.empty:
+        return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
+
+    completed = completed_identifiers.copy()
+    for column in REQUIRED_IDENTIFIER_COLUMNS:
+        if column not in completed.columns:
+            completed[column] = ""
+        completed[column] = completed[column].map(_clean_text)
+    completed_by_key = {
+        _compound_key(row["compound"]): row
+        for _, row in completed.iterrows()
+        if _compound_key(row["compound"])
+    }
+    for index, compound in output["compound"].items():
+        completed_row = completed_by_key.get(_compound_key(compound))
+        if completed_row is None:
+            continue
+        for column in REQUIRED_IDENTIFIER_COLUMNS[1:]:
+            enriched_value = _clean_text(completed_row[column])
+            if enriched_value:
+                output.at[index, column] = enriched_value
     return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
 
 

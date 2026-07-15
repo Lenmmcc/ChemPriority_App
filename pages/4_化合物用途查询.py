@@ -66,17 +66,23 @@ from src.identifier_resolver import (  # noqa: E402
     validate_input as validate_resolver_input,
 )
 from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
+from src.plot_style import configure_plot_style  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 from src.mol_structure_parser import (  # noqa: E402
     prepare_structure_dataframe,
     summarize_structure_preparation,
 )
 from src.use_rose_plot import (  # noqa: E402
+    build_compound_universe,
     extract_reported_functional_use_presence_data,
     extract_candidate_use_plot_data,
+    extract_source_origin_pie_data,
     extract_top_predicted_functional_use_data,
+    extract_top_reported_functional_use_data,
     figure_to_pdf_bytes,
     figure_to_png_bytes,
+    generate_compound_classification_pie_plot,
+    generate_reported_functional_use_pie_plot,
     generate_reported_functional_use_presence_plot,
     generate_top_predicted_functional_use_pie_plot,
     generate_use_rose_plot,
@@ -288,6 +294,8 @@ st.set_page_config(
 
 
 st.title("🔎 化合物用途查询")
+for plot_warning in configure_plot_style():
+    st.warning(plot_warning)
 st.caption("上传化合物表格，分别连接 EPA CompTox Dashboard 和 ECHA CHEM 查询用途证据，并按证据强度取前五个用途。")
 st.markdown("---")
 
@@ -625,7 +633,7 @@ with tab_epa:
     st.subheader("3. 查询用途类别")
     st.write(
         "系统会先把化合物匹配到 CompTox 的 DTXSID，再查询产品用途类别（产品场景）和化学功能用途（技术功能）。"
-        "产品场景和功能用途会以完整明细保留；reported 功能用途仅保留为明细证据。"
+        "产品场景和功能用途会以完整明细保留；reported 结果还会形成分布图，并保留证据点图用于逐条复核。"
     )
 
     if not comptox_valid:
@@ -1033,12 +1041,46 @@ with tab_source_origin:
 with tab_rose:
     st.subheader("7. 用途图表")
     st.write(
-        "根据 EPA 或 ECHA 的完整用途明细绘图。EPA 产品场景和 ECHA 用途使用风玫瑰图；"
-        "EPA CompTox 功能用途分为最高预测概率图和 reported 证据标注图。"
+        "EPA predicted retains the highest-probability summary. EPA and ECHA reported results use one unique "
+        "most-reported category per compound; ties and missing results are counted as Others. Evidence-dot plots "
+        "remain available for record-level review."
+    )
+    st.caption(
+        "Source origin uses four exclusive categories: Anthropogenic, Natural, Both, and Unknown. Unknown means insufficient source evidence."
+    )
+
+    comptox_candidates_df = st.session_state.get("comptox_use_candidates")
+    echa_candidates_df = st.session_state.get("echa_use_candidates")
+    source_origin_summary_df = st.session_state.get("source_origin_summary")
+
+    compound_universe = build_compound_universe(query_input_df)
+    epa_predicted_pie_df = extract_top_predicted_functional_use_data(
+        comptox_candidates_df,
+        source_label="EPA FC",
+        compound_universe=compound_universe,
+    )
+    epa_reported_pie_df = extract_top_reported_functional_use_data(
+        comptox_candidates_df,
+        compound_universe,
+        source_label="EPA FC reported",
+        source_type="functional_use",
+        use_key="raw",
+        require_reported_flag=True,
+    )
+    echa_reported_pie_df = extract_top_reported_functional_use_data(
+        echa_candidates_df,
+        compound_universe,
+        source_label="ECHA reported",
+        source_type=None,
+        use_key="category",
+        require_reported_flag=False,
+    )
+    source_origin_pie_df = extract_source_origin_pie_data(
+        source_origin_summary_df,
+        compound_universe,
     )
 
     chart_sources = {}
-    comptox_candidates_df = st.session_state.get("comptox_use_candidates")
     if isinstance(comptox_candidates_df, pd.DataFrame) and not comptox_candidates_df.empty:
         chart_sources["EPA CompTox 产品场景"] = {
             "chart_type": "rose",
@@ -1049,30 +1091,60 @@ with tab_rose:
             "title": "EPA CompTox Product-Use Category Rose Plot",
             "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
         }
+    if not epa_predicted_pie_df.empty:
         chart_sources["EPA CompTox 最高预测功能用途"] = {
             "chart_type": "top_predicted_pie",
-            "source_label": "EPA FC",
-            "candidates_df": comptox_candidates_df,
+            "table_df": epa_predicted_pie_df,
             "title": "EPA CompTox Top Predicted Functional Use Distribution",
             "file_prefix": "EPA_Top_Predicted_Functional_Use",
         }
+    if not epa_reported_pie_df.empty:
+        chart_sources["EPA CompTox reported 功能用途分布"] = {
+            "chart_type": "classification_pie",
+            "table_df": epa_reported_pie_df,
+            "pie_renderer": "reported",
+            "title": "EPA CompTox Reported Functional Use Distribution",
+            "file_prefix": "EPA_Reported_Functional_Use_Distribution",
+        }
+    if isinstance(comptox_candidates_df, pd.DataFrame) and not comptox_candidates_df.empty:
         chart_sources["EPA CompTox reported 功能用途证据"] = {
             "chart_type": "reported_presence",
             "source_label": "EPA FC reported",
             "candidates_df": comptox_candidates_df,
+            "source_type": "functional_use",
+            "use_key": "raw",
+            "require_reported_flag": True,
             "title": "EPA CompTox Reported Functional Use Evidence",
             "file_prefix": "EPA_Reported_Functional_Use_Evidence",
         }
 
-    echa_candidates_df = st.session_state.get("echa_use_candidates")
+    if not echa_reported_pie_df.empty:
+        chart_sources["ECHA REACH reported 用途分布"] = {
+            "chart_type": "classification_pie",
+            "table_df": echa_reported_pie_df,
+            "pie_renderer": "reported",
+            "title": "ECHA REACH Reported Use Distribution",
+            "file_prefix": "ECHA_Reported_Use_Distribution",
+        }
     if isinstance(echa_candidates_df, pd.DataFrame) and not echa_candidates_df.empty:
-        chart_sources["ECHA REACH"] = {
-            "chart_type": "rose",
-            "source_label": "ECHA",
+        chart_sources["ECHA REACH reported 用途证据"] = {
+            "chart_type": "reported_presence",
+            "source_label": "ECHA reported",
             "candidates_df": echa_candidates_df,
+            "source_type": None,
             "use_key": "category",
-            "title": "ECHA REACH Use Rose Plot",
-            "file_prefix": "ECHA_Use_Rose_Plot",
+            "require_reported_flag": False,
+            "title": "ECHA REACH Reported Use Evidence",
+            "file_prefix": "ECHA_Reported_Use_Evidence",
+        }
+    if not source_origin_pie_df.empty:
+        chart_sources["来源属性四分类"] = {
+            "chart_type": "classification_pie",
+            "table_df": source_origin_pie_df,
+            "title": "Source Origin Distribution",
+            "file_prefix": "Source_Origin_Distribution",
+            "fixed_categories": ("Anthropogenic", "Natural", "Both", "Unknown"),
+            "footnote": "Categories: Anthropogenic, Natural, Both, and Unknown.",
         }
 
     reported_combined_df = build_reported_use_combined_table(comptox_candidates_df, echa_candidates_df)
@@ -1096,15 +1168,15 @@ with tab_rose:
             key="use_rose_source",
         )
         source_config = chart_sources[selected_source]
-        if source_config["chart_type"] == "top_predicted_pie":
-            chart_df = extract_top_predicted_functional_use_data(
-                source_config["candidates_df"],
-                source_label=source_config["source_label"],
-            )
+        if source_config["chart_type"] in {"top_predicted_pie", "classification_pie"}:
+            chart_df = source_config["table_df"]
         elif source_config["chart_type"] == "reported_presence":
             chart_df = extract_reported_functional_use_presence_data(
                 source_config["candidates_df"],
                 source_label=source_config["source_label"],
+                source_type=source_config.get("source_type", "functional_use"),
+                use_key=source_config.get("use_key", "raw"),
+                require_reported_flag=source_config.get("require_reported_flag", True),
             )
         else:
             chart_df = extract_candidate_use_plot_data(
@@ -1137,16 +1209,28 @@ with tab_rose:
                 ]
                 if source_config["chart_type"] == "top_predicted_pie":
                     chart_columns.extend(["display_label", "probability"])
+                elif source_config["chart_type"] == "classification_pie":
+                    chart_columns.extend(["display_label", "evidence_count", "classification_reason"])
                 elif source_config["chart_type"] == "reported_presence":
                     chart_columns.append("presence")
                 else:
                     chart_columns.append("evidence_count")
                 if "angle_fraction" in chart_df.columns:
                     chart_columns.extend(["angle_fraction", "angle_basis"])
-                show_dataframe(chart_df[chart_columns])
+                show_dataframe(chart_df[[column for column in chart_columns if column in chart_df.columns]])
 
             if source_config["chart_type"] == "top_predicted_pie":
                 fig = generate_top_predicted_functional_use_pie_plot(chart_df, source_config["title"])
+            elif source_config["chart_type"] == "classification_pie":
+                if source_config.get("pie_renderer") == "reported":
+                    fig = generate_reported_functional_use_pie_plot(chart_df, source_config["title"])
+                else:
+                    fig = generate_compound_classification_pie_plot(
+                        chart_df,
+                        source_config["title"],
+                        footnote=source_config.get("footnote"),
+                        fixed_categories=source_config.get("fixed_categories"),
+                    )
             elif source_config["chart_type"] == "reported_presence":
                 fig = generate_reported_functional_use_presence_plot(chart_df, source_config["title"])
             else:
@@ -1164,7 +1248,7 @@ with tab_rose:
                     data=png_buffer,
                     file_name=f"{source_config['file_prefix']}.png",
                     mime="image/png",
-                    key=f"rose_download_png_{source_config['source_label']}",
+                    key=f"rose_download_png_{source_config['file_prefix']}",
                 )
             with col_pdf:
                 st.download_button(
@@ -1172,7 +1256,7 @@ with tab_rose:
                     data=pdf_buffer,
                     file_name=f"{source_config['file_prefix']}.pdf",
                     mime="application/pdf",
-                    key=f"rose_download_pdf_{source_config['source_label']}",
+                    key=f"rose_download_pdf_{source_config['file_prefix']}",
                 )
 
 with tab_output:
