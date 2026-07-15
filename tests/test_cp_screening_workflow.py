@@ -554,6 +554,39 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertEqual(result["compound"].tolist(), ["B", "C", "A"])
         self.assertEqual(result["final_rank"].tolist(), [1, 2, 3])
 
+    def test_screening_workbook_contains_two_stage_and_robustness_sheets(self):
+        expected = {
+            "ToxPi_Global_Screen",
+            "ToxPi_Normalized",
+            "ToxPi_Results",
+            "ToxPi_Display",
+            "ToxPi_Settings",
+            "ToxPi_Robustness",
+            "ToxPi_Robust_Stats",
+        }
+
+        self.assertTrue(expected.issubset(EXPECTED_WORKBOOK_SHEETS))
+
+    def test_comprehensive_page_exposes_shared_axis_toxpi_and_robustness_controls(self):
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+        for token in (
+            "ScreeningAxisRanges(",
+            "PBMToxPiConfig(",
+            "candidate_top_n",
+            "display_top_n",
+            "perturbation_fraction",
+            "robustness_enabled",
+            "ToxPi_Global_Screen",
+            "ToxPi_Robustness",
+            "cp_screening_settings_signature",
+            "cp_screening_robustness_png",
+            "cp_screening_robustness_pdf",
+            "hashlib.sha256",
+            "normalized_weights",
+            "effective_display_top_n",
+        ):
+            self.assertIn(token, page_text)
+
     def test_toxpi_robustness_is_reproducible_and_uses_configured_display_top_n(self):
         data = pd.DataFrame(
             {
@@ -793,9 +826,9 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertIn("save_boxplot_log_transformed", page_text)
         per_sample_figures = page_text.split("PER_SAMPLE_FRONT_HALF_FIGURES", 1)[1].split("]", 1)[0]
         self.assertNotIn("boxplot_log_transformed", per_sample_figures)
-        self.assertIn("TOXPI_RADIAL_MAX_COMPOUNDS", page_text)
+        self.assertNotIn("TOXPI_RADIAL_MAX_COMPOUNDS", page_text)
         self.assertIn("TOXPI_RADIAL_PLOT_VERSION", page_text)
-        self.assertIn("limit_toxpi_plot_rows", page_text)
+        self.assertNotIn("limit_toxpi_plot_rows", page_text)
         self.assertIn("generate_r_style_toxpi_plot", page_text)
         self.assertIn("import importlib", page_text)
         self.assertIn("import src.toxpi_calc as toxpi_calc", page_text)

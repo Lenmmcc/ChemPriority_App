@@ -20,7 +20,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.cp_screening_workflow import (  # noqa: E402
-    PBM_TOXPI_WEIGHTS,
+    PBMToxPiConfig,
     build_detection_frequency,
     build_group_area_mean_by_sample,
     build_peak_area_long,
@@ -30,7 +30,7 @@ from src.cp_screening_workflow import (  # noqa: E402
     figure_to_pdf_bytes,
     figure_to_png_bytes,
     generate_pbm_toxpi_bar_plot,
-    limit_toxpi_plot_rows,
+    generate_pbm_toxpi_robustness_plot,
 )
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch  # noqa: E402
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, run_identifier_completion_batch  # noqa: E402
@@ -42,6 +42,7 @@ from src.mol_structure_parser import (  # noqa: E402
 from src.pov_lrtp_replica import run_pov_lrtp_batch  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 from src.r_screening_replica import ScreeningConfig, run_screening_pipeline  # noqa: E402
+from src.r_screening_replica.schema import ScreeningAxisRanges  # noqa: E402
 from src.r_screening_replica.downstream import (  # noqa: E402
     build_epi_input_from_identifiers,
     build_identifier_input,
@@ -65,6 +66,9 @@ STATE_KEYS = (
     "cp_screening_radial_png",
     "cp_screening_radial_pdf",
     "cp_screening_radial_plot_version",
+    "cp_screening_robustness_png",
+    "cp_screening_robustness_pdf",
+    "cp_screening_settings_signature",
 )
 
 INPUT_CACHE_KEYS = (
@@ -82,8 +86,7 @@ SUMMARY_FRONT_HALF_FIGURES = [
     ("boxplot_log_transformed", "Log peak area boxplot"),
 ]
 
-TOXPI_RADIAL_MAX_COMPOUNDS = 15
-TOXPI_RADIAL_PLOT_VERSION = "r_style_single_canvas_v1"
+TOXPI_RADIAL_PLOT_VERSION = "r_style_single_canvas_v2"
 
 STANDARD_COMPOUND_COL = "Name"
 STANDARD_FORMULA_COL = "formula"
@@ -488,7 +491,7 @@ def build_representative_screening_table(samples, compound_col, formula_col, pea
     return combined.drop_duplicates("compound_key", keep="first")[output_cols].reset_index(drop=True)
 
 
-def replace_dbe_bubble_with_thresholded_plot(result, detection_threshold):
+def replace_dbe_bubble_with_thresholded_plot(result, detection_threshold, axis_ranges):
     dbe_table = result.dbe_table.copy()
     peak_area = pd.to_numeric(dbe_table["peak_area"], errors="coerce")
     thresholded_dbe = dbe_table.loc[peak_area > detection_threshold].copy()
@@ -497,6 +500,7 @@ def replace_dbe_bubble_with_thresholded_plot(result, detection_threshold):
         thresholded_dbe,
         result.compound_categories,
         figures_dir,
+        axis_ranges,
     )
     result.metadata["dbe_plot_threshold"] = detection_threshold
 
@@ -528,7 +532,7 @@ def build_summary_figure_paths(screening_results, group_area_mean, output_root):
     }
 
 
-def collect_front_half(samples, sample_mappings, detection_threshold):
+def collect_front_half(samples, sample_mappings, detection_threshold, axis_ranges):
     output_root = Path(tempfile.mkdtemp(prefix="cp_screening_"))
     screening_results = []
     warnings = []
@@ -555,10 +559,11 @@ def collect_front_half(samples, sample_mappings, detection_threshold):
             group_area_col="Group_Area_Mean",
             sample_cols=["Group_Area_Mean"],
             output_dir=output_root / safe_path_name(sample["name"]) / "workbook",
+            axis_ranges=axis_ranges,
         )
         try:
             result = run_screening_pipeline(dataframe_to_excel_bytes(mean_frame), config=config)
-            replace_dbe_bubble_with_thresholded_plot(result, detection_threshold)
+            replace_dbe_bubble_with_thresholded_plot(result, detection_threshold, axis_ranges)
         except Exception as exc:
             warnings.append(
                 {
@@ -703,7 +708,13 @@ def workflow_tables(front_state, downstream_state=None):
         "Pov_LRTP": downstream_state.get("pov_lrtp_results", pd.DataFrame()),
         "PBM_Scores": downstream_state.get("pbm_scores", pd.DataFrame()),
         "ToxPi_Input": downstream_state.get("toxpi_input", pd.DataFrame()),
+        "ToxPi_Global_Screen": downstream_state.get("toxpi_global_screen", pd.DataFrame()),
+        "ToxPi_Normalized": downstream_state.get("toxpi_normalized", pd.DataFrame()),
         "ToxPi_Results": downstream_state.get("toxpi_results", pd.DataFrame()),
+        "ToxPi_Display": downstream_state.get("toxpi_display", pd.DataFrame()),
+        "ToxPi_Settings": downstream_state.get("toxpi_settings", pd.DataFrame()),
+        "ToxPi_Robustness": downstream_state.get("toxpi_robustness", pd.DataFrame()),
+        "ToxPi_Robust_Stats": downstream_state.get("toxpi_robust_stats", pd.DataFrame()),
         "Excluded_or_Failed": excluded,
         "Warnings": pd.concat(warnings, ignore_index=True) if warnings else pd.DataFrame(),
     }
@@ -715,23 +726,13 @@ def refresh_toxpi_radial_plot(downstream_state, force=False):
     if not force and st.session_state.get("cp_screening_radial_plot_version") == TOXPI_RADIAL_PLOT_VERSION:
         return
 
-    radial_plot_rows = downstream_state.get("radial_plot_rows")
+    radial_plot_rows = downstream_state.get("toxpi_display")
     if not isinstance(radial_plot_rows, pd.DataFrame) or radial_plot_rows.empty:
-        toxpi_results = downstream_state.get("toxpi_results")
-        if not isinstance(toxpi_results, pd.DataFrame) or toxpi_results.empty:
-            return
-        radial_plot_rows, radial_omitted_count = limit_toxpi_plot_rows(
-            toxpi_results,
-            max_compounds=TOXPI_RADIAL_MAX_COMPOUNDS,
-        )
-        downstream_state["radial_plot_rows"] = radial_plot_rows
-        downstream_state["radial_omitted_count"] = radial_omitted_count
-    if radial_plot_rows.empty:
         return
 
     radial_fig = generate_r_style_toxpi_plot(
         radial_plot_rows,
-        custom_weights=PBM_TOXPI_WEIGHTS,
+        custom_weights=downstream_state["normalized_weights"],
         toxic_cols=["peak_area", "pbm", "df"],
         label_wrap_width=20,
     )
@@ -811,6 +812,131 @@ with tab_upload:
                 show_dataframe(upload_structure_audit.loc[audit_mask])
 
 with tab_front:
+    st.markdown("**DBE / Van Krevelen 坐标范围**")
+    axis_col_min, axis_col_max = st.columns(2)
+    with axis_col_min:
+        dbe_x_min = st.number_input("DBE X 最小值", value=0.0, step=1.0)
+    with axis_col_max:
+        dbe_x_max = st.number_input("DBE X 最大值", value=60.0, step=1.0)
+    axis_col_min, axis_col_max = st.columns(2)
+    with axis_col_min:
+        dbe_y_min = st.number_input("DBE Y 最小值", value=0.0, step=1.0)
+    with axis_col_max:
+        dbe_y_max = st.number_input("DBE Y 最大值", value=30.0, step=1.0)
+    axis_col_min, axis_col_max = st.columns(2)
+    with axis_col_min:
+        vk_x_min = st.number_input("VK O/C 最小值", value=0.0, step=0.1)
+    with axis_col_max:
+        vk_x_max = st.number_input("VK O/C 最大值", value=1.1, step=0.1)
+    axis_col_min, axis_col_max = st.columns(2)
+    with axis_col_min:
+        vk_y_min = st.number_input("VK H/C 最小值", value=0.0, step=0.1)
+    with axis_col_max:
+        vk_y_max = st.number_input("VK H/C 最大值", value=2.6, step=0.1)
+    try:
+        axis_ranges = ScreeningAxisRanges(
+            dbe_x_min=float(dbe_x_min),
+            dbe_x_max=float(dbe_x_max),
+            dbe_y_min=float(dbe_y_min),
+            dbe_y_max=float(dbe_y_max),
+            vk_x_min=float(vk_x_min),
+            vk_x_max=float(vk_x_max),
+            vk_y_min=float(vk_y_min),
+            vk_y_max=float(vk_y_max),
+        )
+    except ValueError as exc:
+        st.error(f"坐标范围无效：{exc}")
+        st.stop()
+
+with tab_downstream:
+    st.markdown("**两阶段 ToxPi 设置**")
+    toxpi_limit_col, toxpi_display_col = st.columns(2)
+    with toxpi_limit_col:
+        candidate_top_n = st.number_input(
+            "阶段 1 候选 Top N",
+            min_value=1,
+            value=100,
+            step=1,
+        )
+    with toxpi_display_col:
+        display_top_n = st.number_input(
+            "图表显示 Top N",
+            min_value=1,
+            value=20,
+            step=1,
+        )
+    weight_col_pa, weight_col_pbm, weight_col_df = st.columns(3)
+    with weight_col_pa:
+        pa_weight = st.number_input("Peak area 权重", min_value=0.0, value=0.4, step=0.1)
+    with weight_col_pbm:
+        pbm_weight = st.number_input("PBM 权重", min_value=0.0, value=0.4, step=0.1)
+    with weight_col_df:
+        df_weight = st.number_input("DF 权重", min_value=0.0, value=0.2, step=0.1)
+
+    robustness_enabled = st.checkbox("运行权重扰动稳健性分析", value=True)
+    robust_col_fraction, robust_col_iterations, robust_col_seed = st.columns(3)
+    with robust_col_fraction:
+        perturbation_percent = st.number_input(
+            "权重扰动（%）",
+            min_value=0.0,
+            max_value=100.0,
+            value=20.0,
+            step=5.0,
+            disabled=not robustness_enabled,
+        )
+    with robust_col_iterations:
+        robustness_iterations = st.number_input(
+            "稳健性迭代次数",
+            min_value=1,
+            value=1000,
+            step=100,
+            disabled=not robustness_enabled,
+        )
+    with robust_col_seed:
+        robustness_seed = st.number_input(
+            "随机种子",
+            min_value=0,
+            value=123,
+            step=1,
+            disabled=not robustness_enabled,
+        )
+    try:
+        toxpi_config = PBMToxPiConfig(
+            candidate_top_n=int(candidate_top_n),
+            display_top_n=int(display_top_n),
+            weights={
+                "peak_area": float(pa_weight),
+                "pbm": float(pbm_weight),
+                "df": float(df_weight),
+            },
+            robustness_enabled=bool(robustness_enabled),
+            perturbation_fraction=float(perturbation_percent) / 100.0,
+            n_iter=int(robustness_iterations),
+            seed=int(robustness_seed),
+        )
+    except ValueError as exc:
+        st.error(f"ToxPi 设置无效：{exc}")
+        st.stop()
+
+settings_payload = (
+    axis_ranges.dbe_xlim,
+    axis_ranges.dbe_ylim,
+    axis_ranges.vk_xlim,
+    axis_ranges.vk_ylim,
+    toxpi_config.candidate_top_n,
+    toxpi_config.display_top_n,
+    tuple(sorted(toxpi_config.weights.items())),
+    toxpi_config.robustness_enabled,
+    toxpi_config.perturbation_fraction,
+    toxpi_config.n_iter,
+    toxpi_config.seed,
+)
+settings_signature = hashlib.sha256(repr(settings_payload).encode("utf-8")).hexdigest()
+if st.session_state.get("cp_screening_settings_signature") != settings_signature:
+    clear_workflow_state()
+    st.session_state["cp_screening_settings_signature"] = settings_signature
+
+with tab_front:
     st.subheader("2. 化学类型图、DBE图、VK图与 DF")
     detection_threshold = st.number_input(
         "DF 检出阈值",
@@ -826,10 +952,12 @@ with tab_front:
                 samples,
                 sample_mappings,
                 detection_threshold,
+                axis_ranges,
             )
         st.session_state["cp_screening_front"] = front_state
-        st.session_state.pop("cp_screening_downstream", None)
-        st.session_state.pop("cp_screening_workbook", None)
+        for key in STATE_KEYS:
+            if key not in {"cp_screening_front", "cp_screening_settings_signature"}:
+                st.session_state.pop(key, None)
         st.success("化学类型图、DBE图、VK图和 DF 已完成。")
 
     front_state = st.session_state.get("cp_screening_front")
@@ -945,7 +1073,7 @@ with tab_downstream:
                     pov_lrtp_results,
                     peak_area_long=front_state["sample_peak_area"],
                 )
-                normalized_toxpi, toxpi_results = calculate_pbm_toxpi(toxpi_input)
+                toxpi_result = calculate_pbm_toxpi(toxpi_input, config=toxpi_config)
                 pbm_scores = pov_lrtp_results[
                     [column for column in ["Name", "POV_days", "TE_percent", "Log_BAF_Arnot_Gobas", "P_B_LRTP_score", "Scores"] if column in pov_lrtp_results.columns]
                 ].copy()
@@ -963,21 +1091,34 @@ with tab_downstream:
                 "pov_lrtp_results": pov_lrtp_results,
                 "pbm_scores": pbm_scores,
                 "toxpi_input": toxpi_input,
-                "normalized_toxpi": normalized_toxpi,
-                "toxpi_results": toxpi_results,
+                "toxpi_config": toxpi_result.config,
+                "toxpi_source_metrics": toxpi_result.source_metrics,
+                "toxpi_global_screen": toxpi_result.global_screen,
+                "toxpi_normalized": toxpi_result.candidate_normalized,
+                "toxpi_results": toxpi_result.final_ranking,
+                "toxpi_display": toxpi_result.display_rows,
+                "toxpi_settings": toxpi_result.settings_table(),
+                "toxpi_robustness": toxpi_result.robustness_summary,
+                "toxpi_robust_stats": toxpi_result.robustness_stats,
+                "toxpi_robust_correlations": toxpi_result.robustness_correlations,
+                "normalized_weights": toxpi_result.normalized_weights,
+                "effective_candidate_top_n": toxpi_result.effective_candidate_top_n,
+                "effective_display_top_n": toxpi_result.effective_display_top_n,
             }
-            if not toxpi_results.empty and toxpi_results["toxpi"].notna().any():
-                radial_plot_rows, radial_omitted_count = limit_toxpi_plot_rows(
-                    toxpi_results,
-                    max_compounds=TOXPI_RADIAL_MAX_COMPOUNDS,
-                )
-                st.session_state["cp_screening_downstream"]["radial_plot_rows"] = radial_plot_rows
-                st.session_state["cp_screening_downstream"]["radial_omitted_count"] = radial_omitted_count
+            if not toxpi_result.display_rows.empty and toxpi_result.display_rows["toxpi"].notna().any():
                 refresh_toxpi_radial_plot(st.session_state["cp_screening_downstream"], force=True)
-                bar_fig = generate_pbm_toxpi_bar_plot(toxpi_results)
+                bar_fig = generate_pbm_toxpi_bar_plot(
+                    toxpi_result.display_rows,
+                    top_n=len(toxpi_result.display_rows),
+                )
                 st.session_state["cp_screening_bar_png"] = figure_to_png_bytes(bar_fig)
                 st.session_state["cp_screening_bar_pdf"] = figure_to_pdf_bytes(bar_fig)
                 plt.close(bar_fig)
+            if not toxpi_result.robustness_correlations.empty:
+                robustness_fig = generate_pbm_toxpi_robustness_plot(toxpi_result)
+                st.session_state["cp_screening_robustness_png"] = figure_to_png_bytes(robustness_fig)
+                st.session_state["cp_screening_robustness_pdf"] = figure_to_pdf_bytes(robustness_fig)
+                plt.close(robustness_fig)
             st.session_state["cp_screening_workbook"] = build_screening_workbook(
                 workflow_tables(front_state, st.session_state["cp_screening_downstream"])
             )
@@ -985,18 +1126,41 @@ with tab_downstream:
 
     downstream_state = st.session_state.get("cp_screening_downstream")
     if downstream_state:
+        st.subheader("ToxPi_Input")
+        show_dataframe(downstream_state["toxpi_input"])
+        st.subheader("ToxPi_Global_Screen")
+        show_dataframe(downstream_state["toxpi_global_screen"])
+        st.subheader("ToxPi_Normalized")
+        show_dataframe(downstream_state["toxpi_normalized"])
         st.subheader("ToxPi_Results")
         show_dataframe(downstream_state["toxpi_results"])
+        st.subheader("ToxPi_Display")
+        show_dataframe(downstream_state["toxpi_display"])
+        st.subheader("ToxPi_Settings")
+        show_dataframe(downstream_state["toxpi_settings"])
+        if not downstream_state["toxpi_robustness"].empty:
+            st.subheader("ToxPi_Robustness")
+            show_dataframe(downstream_state["toxpi_robustness"])
+            st.subheader("ToxPi_Robust_Stats")
+            show_dataframe(downstream_state["toxpi_robust_stats"])
         st.subheader("Pov_LRTP")
         show_dataframe(downstream_state["pov_lrtp_results"])
         st.subheader("ToxPi 图")
         refresh_toxpi_radial_plot(downstream_state)
         radial_png = st.session_state.get("cp_screening_radial_png")
         if radial_png:
-            omitted_count = int(downstream_state.get("radial_omitted_count", 0) or 0)
+            effective_display_top_n = int(downstream_state["effective_display_top_n"])
+            effective_candidate_top_n = int(downstream_state["effective_candidate_top_n"])
+            omitted_count = max(0, effective_candidate_top_n - effective_display_top_n)
             if omitted_count:
-                st.info(f"Radial ToxPi preview follows the original R logic: only Top {TOXPI_RADIAL_MAX_COMPOUNDS} compounds are plotted; {omitted_count} lower-ranked compounds remain in the full result tables and workbook.")
+                st.info(
+                    f"ToxPi 图显示 Top {effective_display_top_n}；另有 {omitted_count} 个候选化合物保留在完整结果表和工作簿中。"
+                )
             st.image(radial_png.getvalue())
+        robustness_png = st.session_state.get("cp_screening_robustness_png")
+        if robustness_png:
+            st.subheader("ToxPi 稳健性图")
+            st.image(robustness_png.getvalue())
 
 with tab_results:
     st.subheader("4. 下载结果")
@@ -1034,6 +1198,14 @@ with tab_results:
             mime="image/png",
             disabled=radial_png is None,
         )
+        robustness_png = st.session_state.get("cp_screening_robustness_png")
+        st.download_button(
+            "下载 ToxPi robustness PNG",
+            data=robustness_png if robustness_png else io.BytesIO(),
+            file_name="PA_PBM_DF_ToxPi_Robustness.png",
+            mime="image/png",
+            disabled=robustness_png is None,
+        )
     with col_pdf:
         bar_pdf = st.session_state.get("cp_screening_bar_pdf")
         st.download_button(
@@ -1050,4 +1222,12 @@ with tab_results:
             file_name="PA_PBM_DF_ToxPi_Radial.pdf",
             mime="application/pdf",
             disabled=radial_pdf is None,
+        )
+        robustness_pdf = st.session_state.get("cp_screening_robustness_pdf")
+        st.download_button(
+            "下载 ToxPi robustness PDF",
+            data=robustness_pdf if robustness_pdf else io.BytesIO(),
+            file_name="PA_PBM_DF_ToxPi_Robustness.pdf",
+            mime="application/pdf",
+            disabled=robustness_pdf is None,
         )

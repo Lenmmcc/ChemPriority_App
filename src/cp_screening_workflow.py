@@ -28,7 +28,13 @@ EXPECTED_WORKBOOK_SHEETS = [
     "Pov_LRTP",
     "PBM_Scores",
     "ToxPi_Input",
+    "ToxPi_Global_Screen",
+    "ToxPi_Normalized",
     "ToxPi_Results",
+    "ToxPi_Display",
+    "ToxPi_Settings",
+    "ToxPi_Robustness",
+    "ToxPi_Robust_Stats",
     "Excluded_or_Failed",
     "Warnings",
 ]
