@@ -7,7 +7,6 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -31,7 +30,16 @@ from plotnine import (
     theme_bw,
 )
 
+from src.plot_style import (
+    PLOT_FONT_FAMILY,
+    apply_figure_font,
+    configure_plot_style,
+)
+
 from .classification import CATEGORY_ORDER, DISPLAY_CATEGORY_LABELS
+
+
+PLOT_STYLE_WARNINGS = configure_plot_style()
 
 
 SCIENTIFIC_COLORS = {
@@ -96,6 +104,7 @@ def save_category_donut(category_summary: pd.DataFrame, output_dir: Path) -> dic
         width, height = (10, 8) if fmt == "png" else (12, 8)
         fig, ax = plt.subplots(figsize=(width, height), facecolor="white")
         _draw_category_donut(ax, category_summary)
+        apply_figure_font(fig)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         plt.close(fig)
     return paths
@@ -114,6 +123,7 @@ def save_compound_bubble_plot(
     for path in paths.values():
         fig, ax = plt.subplots(figsize=(12, 8), facecolor="white")
         _draw_compound_bubble(ax, data)
+        apply_figure_font(fig)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         plt.close(fig)
     return paths
@@ -131,6 +141,7 @@ def save_van_krevelen_plot(compound_categories: pd.DataFrame, output_dir: Path) 
     for path in paths.values():
         fig, ax = plt.subplots(figsize=(12, 8), facecolor="white")
         _draw_van_krevelen(ax, data)
+        apply_figure_font(fig)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         plt.close(fig)
     return paths
@@ -198,12 +209,19 @@ def save_boxplot_log_transformed(
         + labs(x="Sample Group", y="Log10(Peak Area)")
         + theme_bw()
         + theme(
+            text=element_text(family=PLOT_FONT_FAMILY),
             panel_border=element_rect(color="black", size=0.5),
             axis_ticks=element_line(color="black", size=0.2),
             axis_line=element_line(color="black", size=0.2),
             panel_grid_major=element_blank(),
             panel_grid_minor=element_blank(),
-            axis_text_x=element_text(color="black", size=10, angle=90, ha="right", va="center"),
+            axis_text_x=element_text(
+                color="black",
+                size=10,
+                rotation=45,
+                ha="right",
+                family=PLOT_FONT_FAMILY,
+            ),
             axis_text_y=element_text(color="black", size=10),
             axis_title=element_text(color="black", size=12),
             legend_position="right",
@@ -289,6 +307,7 @@ def _bubble_data(dbe_table: pd.DataFrame, compound_categories: pd.DataFrame) -> 
 
 
 def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame) -> None:
+    ax.figure.patch.set_facecolor("white")
     ax.set_facecolor("white")
     for category in CATEGORY_ORDER:
         subset = data[data["Category"] == category]
@@ -307,8 +326,7 @@ def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame) -> None:
         )
     ax.set_xlim(0, 60)
     ax.set_ylim(0, 30)
-    ax.grid(which="major", color="gray", alpha=0.2, linewidth=0.2)
-    ax.grid(which="minor", visible=False)
+    ax.grid(False)
     ax.set_title("DBE for all compounds", fontsize=16, fontweight="bold", loc="center", pad=28)
     ax.text(0.5, 1.01, "classified by elemental composition", ha="center", va="bottom", transform=ax.transAxes, fontsize=12)
     ax.set_xlabel("Carbon number", fontsize=16, fontweight="bold")
@@ -334,7 +352,7 @@ def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame) -> None:
 
 
 def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame) -> None:
-    font_family = "Times New Roman" if _font_available("Times New Roman") else None
+    font_family = PLOT_FONT_FAMILY
     for category in CATEGORY_ORDER:
         subset = data[data["Category"] == category]
         if subset.empty:
@@ -386,11 +404,4 @@ def _boxplot_summary(plot_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _font_warnings() -> list[str]:
-    messages = []
-    if not _font_available("Times New Roman"):
-        messages.append("Times New Roman is not available; Van Krevelen font may differ from the R output.")
-    return messages
-
-
-def _font_available(name: str) -> bool:
-    return any(font.name == name for font in fm.fontManager.ttflist)
+    return list(PLOT_STYLE_WARNINGS)

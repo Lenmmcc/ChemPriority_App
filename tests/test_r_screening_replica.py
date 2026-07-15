@@ -2,8 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import pandas as pd
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from src.r_screening_replica import plots
 from src.r_screening_replica import (
@@ -13,9 +14,27 @@ from src.r_screening_replica import (
     classify_compounds,
     run_screening_pipeline,
 )
+from src.r_screening_replica.plots import _draw_compound_bubble
 
 
 class RScreeningReplicaUnitTests(unittest.TestCase):
+    def test_dbe_bubble_has_white_background_and_no_grid(self):
+        data = pd.DataFrame(
+            {
+                "Category": ["CH"],
+                "carbon_count": [12],
+                "DBE": [5.0],
+                "area_level": pd.Categorical(["Level 2"]),
+            }
+        )
+        fig, ax = plt.subplots()
+        _draw_compound_bubble(ax, data)
+        self.assertEqual(ax.get_facecolor(), mcolors.to_rgba("white"))
+        self.assertEqual(fig.get_facecolor(), mcolors.to_rgba("white"))
+        self.assertFalse(any(line.get_visible() for line in ax.get_xgridlines()))
+        self.assertFalse(any(line.get_visible() for line in ax.get_ygridlines()))
+        plt.close(fig)
+
     def test_formula_parser_calculates_ratios_and_dbe(self):
         result = calculate_ratios_and_dbe(pd.Series(["C16 H22 O4", "C6H6Cl2N"]))
 

@@ -3,6 +3,8 @@ import ast
 import unittest
 from pathlib import Path
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
@@ -16,6 +18,7 @@ from src.cp_screening_workflow import (
     build_pbm_toxpi_input,
     build_screening_workbook,
     calculate_pbm_toxpi,
+    generate_pbm_toxpi_bar_plot,
     limit_toxpi_plot_rows,
 )
 
@@ -55,6 +58,28 @@ def load_screening_mapping_normalizer():
 
 
 class CpScreeningWorkflowTests(unittest.TestCase):
+    def test_pbm_toxpi_bar_plot_uses_times_new_roman(self):
+        toxpi_results = pd.DataFrame(
+            {
+                "compound": ["Compound A", "Compound B"],
+                "toxpi": [0.8, 0.4],
+            }
+        )
+
+        figure = generate_pbm_toxpi_bar_plot(toxpi_results)
+        try:
+            texts = [
+                text
+                for text in figure.findobj(matplotlib.text.Text)
+                if text.get_text().strip()
+            ]
+            self.assertTrue(texts)
+            self.assertTrue(
+                all(text.get_fontfamily()[0] == "Times New Roman" for text in texts)
+            )
+        finally:
+            plt.close(figure)
+
     def test_screening_default_mapping_detects_recognized_mol_column(self):
         page_path = Path("pages/0_综合筛查流程.py")
         page_module = ast.parse(page_path.read_text(encoding="utf-8"), filename=str(page_path))

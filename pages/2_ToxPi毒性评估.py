@@ -13,6 +13,7 @@ PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.plot_style import configure_plot_style  # noqa: E402
 from src.toxpi_calc import (  # noqa: E402
     calculate_toxpi,
     generate_multi_toxpi_plot,
@@ -124,6 +125,8 @@ def combine_seed_summaries(seed_results, top_k):
 
 
 st.title("ToxPi 毒性评估与排序稳健性分析")
+for plot_warning in configure_plot_style():
+    st.warning(plot_warning)
 st.caption("上传 Excel 后在线计算、预览图表，并通过下载按钮获取 PDF 或 Excel 结果。")
 st.markdown("---")
 
