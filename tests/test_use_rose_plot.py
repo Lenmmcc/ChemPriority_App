@@ -5,6 +5,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from src.echa_use import classify_use_cn
 from src.use_rose_plot import (
     build_compound_universe,
     build_epa_echa_combined_rose_data,
@@ -117,6 +118,72 @@ class UseRosePlotTests(unittest.TestCase):
         self.assertEqual(result["display_label"], "Industrial category")
         self.assertEqual(result["evidence_count"], 5)
         self.assertEqual(result["classification_reason"], "unique_top_reported_category")
+
+    def test_real_echa_chinese_categories_keep_distinct_stable_english_labels(self):
+        industrial_category = classify_use_cn("industrial use")
+        consumer_category = classify_use_cn("consumer use")
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "use_en": "Industrial use at industrial sites",
+                    "use_cn": industrial_category,
+                    "evidence_count": 2,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Use at industrial sites",
+                    "use_cn": industrial_category,
+                    "evidence_count": 3,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Consumer use in household products",
+                    "use_cn": consumer_category,
+                    "evidence_count": 4,
+                },
+                {
+                    "compound": "B",
+                    "use_en": "Consumer use by the general public",
+                    "use_cn": consumer_category,
+                    "evidence_count": 1,
+                },
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="ECHA reported",
+            source_type=None,
+            use_key="category",
+            require_reported_flag=False,
+        ).set_index("compound")
+
+        self.assertEqual(result.loc["A", "evidence_count"], 5)
+        self.assertEqual(result.loc["A", "display_label"], "Industrial use")
+        self.assertEqual(result.loc["B", "display_label"], "Consumer use")
+        self.assertNotEqual(
+            result.loc["A", "display_label"], result.loc["B", "display_label"]
+        )
+
+        figure = generate_reported_functional_use_pie_plot(
+            result.reset_index(), "ECHA reported"
+        )
+        try:
+            legend_labels = {
+                text.get_text()
+                for legend in figure.legends
+                for text in legend.get_texts()
+            }
+            self.assertEqual(len(figure.axes[0].patches), 2)
+            self.assertEqual(
+                legend_labels,
+                {"Consumer use (1, 50.0%)", "Industrial use (1, 50.0%)"},
+            )
+        finally:
+            plt.close(figure)
 
     def test_reported_classification_fails_closed_when_source_type_is_missing(self):
         universe = build_compound_universe(pd.DataFrame({"compound": ["A"]}))

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import math
 import re
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
 
+from src.echa_use import USE_TRANSLATION_RULES
 from src.plot_style import apply_figure_font, configure_plot_style
 
 
@@ -83,6 +85,10 @@ REPORTED_OTHERS_NOTE = (
 )
 PIE_INSIDE_LABEL_MIN_PERCENT = 5.0
 PIE_OUTSIDE_LABEL_MIN_PERCENT = 1.0
+ECHA_CATEGORY_ENGLISH_LABELS = {
+    category_cn: keywords[0].capitalize()
+    for keywords, category_cn in USE_TRANSLATION_RULES
+}
 
 
 def build_compound_universe(input_df):
@@ -170,8 +176,10 @@ def extract_top_reported_functional_use_data(
             if pd.isna(weight) or float(weight) <= 0:
                 weight = 1.0
             totals[category_key] = totals.get(category_key, 0.0) + float(weight)
-            labels[category_key] = _ascii_label(
-                category_value, "Reported use"
+            labels[category_key] = (
+                _echa_category_display_label(category_value)
+                if use_key == "category"
+                else _ascii_label(category_value, "Reported use")
             )
             use_cn_values[category_key] = _first_clean(
                 candidate.get("use_cn"), use_value
@@ -1228,6 +1236,17 @@ def _candidate_use_values(candidate, use_key):
     if use_key == "raw":
         return raw or category, raw or category
     return category, raw or category
+
+
+def _echa_category_display_label(category_value):
+    category = _clean_text(category_value)
+    mapped = ECHA_CATEGORY_ENGLISH_LABELS.get(category)
+    if mapped:
+        return mapped
+    if category.isascii():
+        return _ascii_label(category, "Reported use")
+    digest = hashlib.sha1(category.encode("utf-8")).hexdigest()[:8]
+    return f"ECHA category {digest}"
 
 
 def _functional_source_bucket(candidate):
