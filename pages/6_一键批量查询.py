@@ -6,6 +6,7 @@ import streamlit as st
 from src.auto_query_workflow import (
     AutoWorkflowConfig,
     AutoWorkflowMapping,
+    INTERNAL_TABLE_NAMES,
     build_auto_workflow_charts,
     build_auto_workflow_zip,
     detect_default_mapping,
@@ -96,6 +97,7 @@ def _result_dashboard_groups(result, charts):
                 "Sample_Peak_Area",
                 "Group_Area_Raw_Long",
                 "Group_Area_Mean_By_Sample",
+                "Plot_Warnings",
             ],
             ("Local_",),
         ),
@@ -104,7 +106,15 @@ def _result_dashboard_groups(result, charts):
         (
             "comptox",
             "EPA CompTox",
-            ["CompTox_Summary", "CompTox_Candidates", "CompTox_Errors"],
+            [
+                "CompTox_Summary",
+                "Product_Use_Categories",
+                "Functional_Uses_Predicted",
+                "Functional_Uses_Reported",
+                "EPA_Predicted_Pie_Data",
+                "EPA_Reported_Pie_Data",
+                "CompTox_Errors",
+            ],
             ("EPA_",),
         ),
         (
@@ -112,7 +122,8 @@ def _result_dashboard_groups(result, charts):
             "ECHA",
             [
                 "ECHA_Use_Summary",
-                "ECHA_Use_Candidates",
+                "ECHA_Uses_Reported",
+                "ECHA_Reported_Pie_Data",
                 "ECHA_Use_Dossiers",
                 "ECHA_Use_Errors",
                 "ECHA_GHS_Summary",
@@ -124,8 +135,13 @@ def _result_dashboard_groups(result, charts):
         (
             "source",
             "来源属性",
-            ["Source_Origin_Summary", "Source_Origin_Evidence", "Source_Origin_Errors"],
-            (),
+            [
+                "Source_Origin_Summary",
+                "Source_Origin_Evidence",
+                "Source_Origin_Errors",
+                "Source_Origin_Pie_Data",
+            ],
+            ("Source_",),
         ),
         (
             "toxpi",
@@ -162,6 +178,11 @@ def _result_dashboard_groups(result, charts):
 def _is_audit_table(table_name):
     return table_name.endswith(("_Errors", "_Warnings", "_Raw_Results")) or table_name in {
         "Structure_Preparation",
+        "Plot_Warnings",
+        "EPA_Predicted_Pie_Data",
+        "EPA_Reported_Pie_Data",
+        "ECHA_Reported_Pie_Data",
+        "Source_Origin_Pie_Data",
         "ECHA_Use_Dossiers",
         "ECHA_GHS_Classifications",
     }
@@ -452,7 +473,7 @@ if result is not None:
         with st.expander("Warnings", expanded=False):
             _show_dataframe(result.warnings)
 
-    table_names = list(result.tables.keys())
+    table_names = [name for name in result.tables if name not in INTERNAL_TABLE_NAMES]
     if table_names:
         selected_table = st.selectbox("查看结果表", table_names)
         _show_dataframe(result.tables[selected_table])
