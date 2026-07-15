@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,11 @@ class ScreeningAxisRanges:
             ("Van Krevelen X", self.vk_x_min, self.vk_x_max),
             ("Van Krevelen Y", self.vk_y_min, self.vk_y_max),
         ):
-            if float(upper) <= float(lower):
+            lower_value = float(lower)
+            upper_value = float(upper)
+            if not math.isfinite(lower_value) or not math.isfinite(upper_value):
+                raise ValueError(f"{label} bounds must be finite")
+            if upper_value <= lower_value:
                 raise ValueError(f"{label} maximum must be greater than minimum")
 
     @property

@@ -19,9 +19,33 @@ from src.r_screening_replica.schema import ScreeningAxisRanges
 
 
 class RScreeningReplicaUnitTests(unittest.TestCase):
-    def test_screening_axis_ranges_validate_minimum_before_maximum(self):
-        with self.assertRaisesRegex(ValueError, "DBE X"):
-            ScreeningAxisRanges(dbe_x_min=5, dbe_x_max=5)
+    def test_screening_axis_ranges_reject_equal_and_reversed_bounds(self):
+        cases = (
+            ("DBE X", {"dbe_x_min": 5, "dbe_x_max": 5}),
+            ("DBE Y", {"dbe_y_min": 9, "dbe_y_max": 8}),
+            ("Van Krevelen X", {"vk_x_min": 0.5, "vk_x_max": 0.5}),
+            ("Van Krevelen Y", {"vk_y_min": 2.0, "vk_y_max": 1.0}),
+        )
+        for label, bounds in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError,
+                rf"{label} maximum must be greater than minimum",
+            ):
+                ScreeningAxisRanges(**bounds)
+
+    def test_screening_axis_ranges_reject_non_finite_bounds(self):
+        cases = (
+            ("DBE X", {"dbe_x_min": float("nan")}),
+            ("DBE Y", {"dbe_y_max": float("nan")}),
+            ("Van Krevelen X", {"vk_x_min": float("-inf")}),
+            ("Van Krevelen Y", {"vk_y_max": float("inf")}),
+        )
+        for label, bounds in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError,
+                rf"{label} bounds must be finite",
+            ):
+                ScreeningAxisRanges(**bounds)
 
     def test_dbe_and_vk_drawers_apply_custom_axis_ranges(self):
         ranges = ScreeningAxisRanges(
