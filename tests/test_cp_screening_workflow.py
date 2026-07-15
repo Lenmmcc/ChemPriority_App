@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -21,7 +22,9 @@ from src.cp_screening_workflow import (
     build_screening_workbook,
     calculate_pbm_toxpi,
     generate_pbm_toxpi_bar_plot,
+    generate_pbm_toxpi_robustness_plot,
     limit_toxpi_plot_rows,
+    run_pbm_toxpi_robustness,
 )
 
 
@@ -550,6 +553,138 @@ class CpScreeningWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result["compound"].tolist(), ["B", "C", "A"])
         self.assertEqual(result["final_rank"].tolist(), [1, 2, 3])
+
+    def test_toxpi_robustness_is_reproducible_and_uses_configured_display_top_n(self):
+        data = pd.DataFrame(
+            {
+                "compound": [f"C{i}" for i in range(6)],
+                "Peak_Area": [1e8, 1e7, 1e6, 1e5, 1e4, 1e3],
+                "Scores": [1, 4, 3, 6, 2, 5],
+                "DF": [0.9, 0.2, 0.8, 0.4, 0.7, 0.1],
+            }
+        )
+        config = PBMToxPiConfig(
+            candidate_top_n=6,
+            display_top_n=2,
+            perturbation_fraction=0.35,
+            n_iter=40,
+            seed=77,
+        )
+
+        first = run_pbm_toxpi_robustness(calculate_pbm_toxpi(data, config), config)
+        second = run_pbm_toxpi_robustness(calculate_pbm_toxpi(data, config), config)
+
+        pd.testing.assert_frame_equal(first.robustness_summary, second.robustness_summary)
+        pd.testing.assert_frame_equal(first.robustness_correlations, second.robustness_correlations)
+        self.assertEqual(first.robustness_stats.loc[0, "perturbation_fraction"], 0.35)
+        self.assertEqual(first.robustness_stats.loc[0, "display_top_n"], 2)
+        self.assertTrue(first.robustness_summary["top_n_frequency_percent"].between(0, 100).all())
+
+    def test_toxpi_robustness_plot_renders_rank_correlation_distribution(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C"],
+                "Peak_Area": [1e6, 1e4, 1e2],
+                "Scores": [1, 5, 3],
+                "DF": [0.9, 0.2, 0.6],
+            }
+        )
+        config = PBMToxPiConfig(candidate_top_n=3, display_top_n=2, n_iter=10, seed=7)
+        result = run_pbm_toxpi_robustness(calculate_pbm_toxpi(data, config), config)
+
+        fig = generate_pbm_toxpi_robustness_plot(result)
+
+        try:
+            self.assertEqual(fig.axes[0].get_title(), "ToxPi Rank Robustness")
+            self.assertEqual(
+                fig.axes[0].get_xlabel(),
+                "Spearman correlation with baseline ranking",
+            )
+        finally:
+            plt.close(fig)
+
+    def test_toxpi_robustness_plot_rejects_empty_correlations(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["A", "B"],
+                "Peak_Area": [100, 10],
+                "Scores": [2, 1],
+                "DF": [1, 0],
+            }
+        )
+        result = calculate_pbm_toxpi(
+            data,
+            PBMToxPiConfig(
+                candidate_top_n=2,
+                display_top_n=2,
+                robustness_enabled=False,
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Robustness correlations are empty"):
+            generate_pbm_toxpi_robustness_plot(result)
+
+    def test_calculate_pbm_toxpi_runs_enabled_robustness_analysis(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C"],
+                "Peak_Area": [1000, 100, 10],
+                "Scores": [1, 3, 2],
+                "DF": [0.8, 0.2, 0.5],
+            }
+        )
+
+        result = calculate_pbm_toxpi(
+            data,
+            PBMToxPiConfig(candidate_top_n=3, display_top_n=2, n_iter=12),
+        )
+
+        self.assertEqual(len(result.robustness_correlations), 12)
+        self.assertEqual(len(result.robustness_summary), 3)
+        self.assertEqual(len(result.robustness_stats), 1)
+
+    def test_calculate_pbm_toxpi_leaves_robustness_tables_empty_when_disabled(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["A", "B"],
+                "Peak_Area": [100, 10],
+                "Scores": [2, 1],
+                "DF": [1, 0],
+            }
+        )
+
+        result = calculate_pbm_toxpi(
+            data,
+            PBMToxPiConfig(
+                candidate_top_n=2,
+                display_top_n=2,
+                robustness_enabled=False,
+            ),
+        )
+
+        self.assertTrue(result.robustness_summary.empty)
+        self.assertTrue(result.robustness_stats.empty)
+        self.assertTrue(result.robustness_correlations.empty)
+
+    def test_calculate_pbm_toxpi_keeps_one_candidate_without_running_robustness(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["Only"],
+                "Peak_Area": [100],
+                "Scores": [2],
+                "DF": [1],
+            }
+        )
+
+        result = calculate_pbm_toxpi(
+            data,
+            PBMToxPiConfig(candidate_top_n=1, display_top_n=1),
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Only"])
+        self.assertTrue(result.robustness_summary.empty)
+        self.assertTrue(result.robustness_stats.empty)
+        self.assertTrue(result.robustness_correlations.empty)
 
     def test_pbm_scores_are_normalized_in_positive_direction_for_toxpi(self):
         toxpi_input = pd.DataFrame(

@@ -7,6 +7,7 @@ from typing import Iterable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 from src.plot_style import apply_figure_font, configure_plot_style
 
@@ -486,6 +487,62 @@ def _sort_toxpi_stage(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.
     return ranked
 
 
+def run_pbm_toxpi_robustness(
+    result: PBMToxPiResult,
+    config: PBMToxPiConfig,
+) -> PBMToxPiResult:
+    candidates = result.final_ranking.copy()
+    if len(candidates) < 2:
+        raise ValueError("At least 2 candidates are required for robustness analysis")
+
+    cols = ["norm_peak_area", "norm_pbm", "norm_df"]
+    matrix = candidates[cols].to_numpy(dtype=float)
+    baseline = np.array([result.normalized_weights[name] for name in PBM_TOXPI_WEIGHTS])
+    rng = np.random.default_rng(int(config.seed))
+    lower = 1.0 - float(config.perturbation_fraction)
+    upper = 1.0 + float(config.perturbation_fraction)
+    multipliers = rng.uniform(lower, upper, size=(int(config.n_iter), len(baseline)))
+    weights = multipliers * baseline
+    weights = weights / weights.sum(axis=1, keepdims=True)
+    baseline_ranks = candidates["final_rank"].to_numpy(dtype=float)
+    counts = np.zeros(len(candidates), dtype=int)
+    correlations = []
+    top_n = result.effective_display_top_n
+
+    for index, simulated_weights in enumerate(weights, start=1):
+        scores = _weighted_indicator_scores(matrix, simulated_weights)
+        order = np.argsort(-scores, kind="stable")
+        ranks = np.empty(len(order), dtype=float)
+        ranks[order] = np.arange(1, len(order) + 1)
+        rho = spearmanr(baseline_ranks, ranks).statistic
+        correlations.append(
+            {"iteration": index, "spearman_rho": 0.0 if np.isnan(rho) else float(rho)}
+        )
+        counts[order[:top_n]] += 1
+
+    correlation_df = pd.DataFrame(correlations)
+    result.robustness_correlations = correlation_df
+    result.robustness_summary = candidates[["compound", "toxpi", "final_rank"]].assign(
+        top_n_frequency_percent=np.round(counts / int(config.n_iter) * 100, 2)
+    )
+    rho_values = correlation_df["spearman_rho"]
+    result.robustness_stats = pd.DataFrame(
+        [
+            {
+                "mean_rho": rho_values.mean(),
+                "sd_rho": rho_values.std(ddof=0),
+                "ci_lower": rho_values.quantile(0.025),
+                "ci_upper": rho_values.quantile(0.975),
+                "perturbation_fraction": float(config.perturbation_fraction),
+                "iterations": int(config.n_iter),
+                "seed": int(config.seed),
+                "display_top_n": top_n,
+            }
+        ]
+    )
+    return result
+
+
 def calculate_pbm_toxpi(
     toxpi_input: pd.DataFrame,
     config: PBMToxPiConfig | None = None,
@@ -510,7 +567,7 @@ def calculate_pbm_toxpi(
     final_ranking = _sort_toxpi_stage(candidate_normalized, "toxpi", "final_rank")
     display_n = min(int(config.display_top_n), len(final_ranking))
     display_rows = final_ranking.head(display_n).copy()
-    return PBMToxPiResult(
+    result = PBMToxPiResult(
         config=config,
         source_metrics=source,
         global_screen=global_screen,
@@ -521,6 +578,9 @@ def calculate_pbm_toxpi(
         effective_candidate_top_n=candidate_n,
         effective_display_top_n=display_n,
     )
+    if config.robustness_enabled and len(result.final_ranking) >= 2:
+        run_pbm_toxpi_robustness(result, config)
+    return result
 
 
 def limit_toxpi_plot_rows(
@@ -591,6 +651,30 @@ def generate_pbm_toxpi_bar_plot(toxpi_results: pd.DataFrame, top_n: int = 15):
     ax.set_ylabel("ToxPi Score")
     ax.tick_params(axis="x", rotation=90)
     ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
+    fig.tight_layout()
+    return apply_figure_font(fig)
+
+
+def generate_pbm_toxpi_robustness_plot(result: PBMToxPiResult):
+    if (
+        result.robustness_correlations.empty
+        or "spearman_rho" not in result.robustness_correlations.columns
+    ):
+        raise ValueError("Robustness correlations are empty")
+    values = result.robustness_correlations["spearman_rho"]
+    mean_rho = float(result.robustness_stats.loc[0, "mean_rho"])
+    fig, ax = plt.subplots(figsize=(8, 5.5), facecolor="white")
+    ax.hist(
+        values,
+        bins=min(30, max(5, int(np.sqrt(len(values))))),
+        color="#2E8B57",
+        edgecolor="black",
+    )
+    ax.axvline(mean_rho, color="#D62728", linestyle="--", linewidth=1.3)
+    ax.set_title("ToxPi Rank Robustness")
+    ax.set_xlabel("Spearman correlation with baseline ranking")
+    ax.set_ylabel("Frequency")
+    ax.text(0.02, 0.96, f"Mean rho = {mean_rho:.3f}", transform=ax.transAxes, va="top")
     fig.tight_layout()
     return apply_figure_font(fig)
 
