@@ -428,6 +428,162 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             self.assertIsInstance(kwargs[name], pd.DataFrame)
             self.assertTrue(kwargs[name].empty)
 
+    @patch("src.auto_query_workflow.run_source_origin_batch")
+    @patch("src.auto_query_workflow.run_echa_use_batch")
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_identifier_exception_preserves_original_compound_universe(
+        self,
+        run_identifier,
+        run_comptox,
+        run_echa_use,
+        run_source_origin,
+    ):
+        compounds = ["Compound A", "Compound B", "Compound C"]
+        run_identifier.side_effect = RuntimeError("identifier unavailable")
+        run_comptox.return_value = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        run_echa_use.return_value = (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+        run_source_origin.return_value = (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(compounds),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_comptox=True,
+                run_echa_use=True,
+                run_source_origin=True,
+                identifier_delay_seconds=0,
+                use_delay_seconds=0,
+                echa_delay_seconds=0,
+                source_origin_delay_seconds=0,
+            ),
+        )
+
+        for batch in (run_comptox, run_echa_use, run_source_origin):
+            self.assertEqual(batch.call_args.args[0]["compound"].tolist(), compounds)
+        for table_name in (
+            "EPA_Predicted_Pie_Data",
+            "EPA_Reported_Pie_Data",
+            "ECHA_Reported_Pie_Data",
+            "Source_Origin_Pie_Data",
+        ):
+            table = result.tables[table_name]
+            self.assertEqual(len(table), 3)
+            self.assertEqual(table["compound_key"].nunique(), 3)
+
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_partial_identifier_completion_enriches_without_dropping_original_rows(
+        self,
+        run_identifier,
+        run_comptox,
+    ):
+        compounds = ["Compound A", "Compound B", "Compound C"]
+        run_identifier.return_value = (
+            _completed_identifier_rows(["Compound B"]),
+            pd.DataFrame(),
+        )
+        run_comptox.return_value = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(compounds),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_comptox=True,
+                identifier_delay_seconds=0,
+                use_delay_seconds=0,
+            ),
+        )
+
+        query_input = run_comptox.call_args.args[0]
+        self.assertEqual(query_input["compound"].tolist(), compounds)
+        self.assertEqual(query_input.loc[1, "smiles"], "CCO")
+        self.assertEqual(query_input.loc[[0, 2], "smiles"].tolist(), ["", ""])
+        for table_name in ("EPA_Predicted_Pie_Data", "EPA_Reported_Pie_Data"):
+            table = result.tables[table_name]
+            self.assertEqual(len(table), 3)
+            self.assertEqual(table["compound_key"].nunique(), 3)
+
+    @patch("src.auto_query_workflow.run_source_origin_batch")
+    @patch("src.auto_query_workflow.run_echa_use_batch")
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_selected_use_module_exceptions_create_full_universe_audit_tables_only(
+        self,
+        run_identifier,
+        run_comptox,
+        run_echa_use,
+        run_source_origin,
+    ):
+        compounds = ["Compound A", "Compound B", "Compound C"]
+        run_identifier.return_value = (_completed_identifier_rows(compounds), pd.DataFrame())
+        run_comptox.side_effect = RuntimeError("EPA unavailable")
+        run_echa_use.side_effect = RuntimeError("ECHA unavailable")
+        run_source_origin.side_effect = RuntimeError("source unavailable")
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(compounds),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_comptox=True,
+                run_echa_use=True,
+                run_source_origin=True,
+                identifier_delay_seconds=0,
+                use_delay_seconds=0,
+                echa_delay_seconds=0,
+                source_origin_delay_seconds=0,
+            ),
+        )
+
+        for table_name in (
+            "Product_Use_Categories",
+            "Functional_Uses_Predicted",
+            "Functional_Uses_Reported",
+            "EPA_Predicted_Pie_Data",
+            "EPA_Reported_Pie_Data",
+            "ECHA_Uses_Reported",
+            "ECHA_Reported_Pie_Data",
+            "Source_Origin_Pie_Data",
+        ):
+            self.assertIn(table_name, result.tables)
+        for table_name, missing_label in (
+            ("EPA_Predicted_Pie_Data", "Others"),
+            ("EPA_Reported_Pie_Data", "Others"),
+            ("ECHA_Uses_Reported", "Others"),
+            ("ECHA_Reported_Pie_Data", "Others"),
+            ("Source_Origin_Pie_Data", "Unknown"),
+        ):
+            table = result.tables[table_name]
+            self.assertEqual(len(table), 3)
+            self.assertEqual(table["compound_key"].nunique(), 3)
+            self.assertEqual(set(table["display_label"]), {missing_label})
+
+        source_only = run_auto_query_workflow(
+            _workflow_input_rows(compounds),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_source_origin=True,
+                identifier_delay_seconds=0,
+                source_origin_delay_seconds=0,
+            ),
+        )
+        self.assertIn("Source_Origin_Pie_Data", source_only.tables)
+        self.assertNotIn("EPA_Predicted_Pie_Data", source_only.tables)
+        self.assertNotIn("ECHA_Reported_Pie_Data", source_only.tables)
+
     @patch("src.auto_query_workflow.run_epi_web_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
     def test_identifier_runs_as_dependency_when_epi_is_selected(self, run_identifier, run_epi):
@@ -692,6 +848,163 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn("ECHA_Uses_Reported", sheets)
         self.assertNotIn("CompTox_Candidates", sheets)
         self.assertNotIn("ECHA_Use_Candidates", sheets)
+
+    def test_root_and_module_workbooks_use_exact_public_table_allowlists(self):
+        public_by_module = OrderedDict(
+            [
+                (
+                    "01_Local_Screening/Local_Screening_Results.xlsx",
+                    (
+                        "Structure_Preparation",
+                        "Input_Check",
+                        "Elemental_Ratios_DBE",
+                        "Category_Summary",
+                        "DF_Table",
+                        "Sample_Peak_Area",
+                        "Group_Area_Raw_Long",
+                        "Group_Area_Mean_By_Sample",
+                        "Plot_Warnings",
+                    ),
+                ),
+                (
+                    "02_Identifier_Completion/Identifier_Completion_Results.xlsx",
+                    ("Identifier_Completion", "Identifier_Warnings"),
+                ),
+                (
+                    "03_EPI_Suite/EPI_Suite_Results.xlsx",
+                    ("EPI_Results", "EPI_Raw_Results", "EPI_Errors"),
+                ),
+                (
+                    "04_EPA_CompTox/EPA_CompTox_Results.xlsx",
+                    (
+                        "CompTox_Summary",
+                        "Product_Use_Categories",
+                        "Functional_Uses_Predicted",
+                        "Functional_Uses_Reported",
+                        "EPA_Predicted_Pie_Data",
+                        "EPA_Reported_Pie_Data",
+                        "CompTox_Errors",
+                    ),
+                ),
+                (
+                    "05_ECHA/ECHA_Results.xlsx",
+                    (
+                        "ECHA_Use_Summary",
+                        "ECHA_Uses_Reported",
+                        "ECHA_Reported_Pie_Data",
+                        "ECHA_Use_Dossiers",
+                        "ECHA_Use_Errors",
+                        "ECHA_GHS_Summary",
+                        "ECHA_GHS_Classifications",
+                        "ECHA_GHS_Errors",
+                    ),
+                ),
+                (
+                    "06_Source_Origin/Source_Origin_Results.xlsx",
+                    (
+                        "Source_Origin_Summary",
+                        "Source_Origin_Evidence",
+                        "Source_Origin_Errors",
+                        "Source_Origin_Pie_Data",
+                    ),
+                ),
+                (
+                    "07_Pov_LRTP_PBM_ToxPi/Pov_LRTP_PBM_ToxPi_Results.xlsx",
+                    (
+                        "Pov_LRTP_Input",
+                        "Pov_LRTP",
+                        "ToxPi_Input",
+                        "ToxPi_Normalized",
+                        "ToxPi_Results",
+                    ),
+                ),
+            ]
+        )
+        root_only = ("Identifier_Input", "EPI_Input", "Warnings")
+        public_tables = tuple(
+            dict.fromkeys(
+                [name for names in public_by_module.values() for name in names]
+                + list(root_only)
+            )
+        )
+        injected = OrderedDict(
+            (name, pd.DataFrame({"value": [name]})) for name in public_tables
+        )
+        injected.update(
+            {
+                "CompTox_Candidates": pd.DataFrame({"value": ["internal"]}),
+                "ECHA_Use_Candidates": pd.DataFrame({"value": ["internal"]}),
+                "ECHA_Use_Rose_Plot": pd.DataFrame({"value": ["obsolete"]}),
+                "EPA_Arbitrary_Extra": pd.DataFrame({"value": ["stale"]}),
+                "ECHA_Arbitrary_Extra": pd.DataFrame({"value": ["stale"]}),
+                "Unknown_External_Table": pd.DataFrame({"value": ["external"]}),
+            }
+        )
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=injected,
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        root_sheets = set(pd.ExcelFile(build_auto_workflow_workbook(result)).sheet_names)
+        self.assertEqual(
+            root_sheets,
+            {"Run_Log", "Representative_Input", *public_tables},
+        )
+
+        package = build_auto_workflow_zip(result, charts=OrderedDict())
+        with zipfile.ZipFile(package) as archive:
+            for workbook_path, expected_tables in public_by_module.items():
+                sheets = pd.ExcelFile(io.BytesIO(archive.read(workbook_path))).sheet_names
+                self.assertEqual(sheets, list(expected_tables))
+
+    def test_chart_map_and_zip_use_exact_chart_allowlists(self):
+        allowed_charts = (
+            "Local_Chemical_Type_Distribution",
+            "Local_DBE_Bubble_Plot",
+            "Local_Van_Krevelen_Plot",
+            "EPA_Product_Use_Category_Rose_Plot",
+            "EPA_Top_Predicted_Functional_Use",
+            "EPA_Reported_Functional_Use_Distribution",
+            "EPA_Reported_Functional_Use_Evidence",
+            "ECHA_Reported_Use_Distribution",
+            "ECHA_Reported_Use_Evidence",
+            "Source_Origin_Distribution",
+        )
+        stale_charts = (
+            "Local_Unknown_Chart",
+            "EPA_Arbitrary_Extra",
+            "ECHA_Use_Rose_Plot",
+            "ECHA_Arbitrary_Extra",
+            "Source_Origin_Stale",
+            "External_Chart",
+        )
+        chart = AutoWorkflowChart("chart", b"\x89PNG\r\n\x1a\n", b"%PDF-1.4")
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(),
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+            charts=OrderedDict((key, chart) for key in (*allowed_charts, *stale_charts)),
+        )
+
+        charts = build_auto_workflow_charts(result)
+
+        self.assertEqual(set(charts), set(allowed_charts))
+        package = build_auto_workflow_zip(result, charts=result.charts)
+        with zipfile.ZipFile(package) as archive:
+            figure_stems = {
+                Path(name).stem
+                for name in archive.namelist()
+                if "/figures/" in name
+            }
+        self.assertEqual(
+            figure_stems,
+            {key.removeprefix("Local_") for key in allowed_charts},
+        )
 
     def test_module_workbooks_keep_empty_public_split_sheets(self):
         result = AutoWorkflowResult(

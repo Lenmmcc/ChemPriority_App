@@ -285,6 +285,24 @@ class UseRosePlotTests(unittest.TestCase):
             },
         )
 
+    def test_source_origin_duplicate_rows_aggregate_presence_in_both_orders(self):
+        universe = build_compound_universe(
+            pd.DataFrame({"compound": ["Compound A", "Compound A"]})
+        )
+        evidence_rows = [
+            {"compound": "Compound A", "人为源证据数": 2, "天然源证据数": 0},
+            {"compound": "Compound A", "人为源证据数": 0, "天然源证据数": 3},
+        ]
+
+        for rows in (evidence_rows, list(reversed(evidence_rows))):
+            with self.subTest(rows=rows):
+                result = extract_source_origin_pie_data(pd.DataFrame(rows), universe)
+
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result["compound_key"].nunique(), 1)
+                self.assertEqual(result.loc[0, "display_label"], "Both")
+                self.assertEqual(result.loc[0, "evidence_count"], 2)
+
     def test_reported_pie_uses_tiered_labels_footnote_and_keeps_rare_categories(self):
         rows = []
         for category, count in [("Major", 950), ("Medium", 40), ("Rare", 9), ("Tiny", 1)]:

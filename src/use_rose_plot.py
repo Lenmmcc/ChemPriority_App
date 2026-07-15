@@ -223,21 +223,35 @@ def extract_source_origin_pie_data(summary_df, compound_universe):
     summary = (
         summary_df.copy() if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()
     )
-    summary_by_key = {
-        _normalize_compound_key(row.get("compound")): row
-        for _, row in summary.iterrows()
-        if _normalize_compound_key(row.get("compound"))
-    }
+    summary_by_key = {}
+    for _, row in summary.iterrows():
+        compound_key = _normalize_compound_key(row.get("compound"))
+        if not compound_key:
+            continue
+        evidence = summary_by_key.setdefault(
+            compound_key,
+            {"anthropogenic": 0.0, "natural": 0.0},
+        )
+        human_value = _to_number(row.get("人为源证据数"))
+        natural_value = _to_number(row.get("天然源证据数"))
+        evidence["anthropogenic"] = max(
+            evidence["anthropogenic"],
+            float(not pd.isna(human_value) and human_value > 0),
+        )
+        evidence["natural"] = max(
+            evidence["natural"],
+            float(not pd.isna(natural_value) and natural_value > 0),
+        )
     rows = []
     for _, compound_row in universe.iterrows():
         source_row = summary_by_key.get(compound_row["compound_key"])
         human = (
-            _to_number(source_row.get("人为源证据数"))
+            source_row["anthropogenic"]
             if source_row is not None
             else 0
         )
         natural = (
-            _to_number(source_row.get("天然源证据数"))
+            source_row["natural"]
             if source_row is not None
             else 0
         )
