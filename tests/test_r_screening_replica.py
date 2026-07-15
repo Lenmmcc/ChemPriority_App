@@ -14,10 +14,44 @@ from src.r_screening_replica import (
     classify_compounds,
     run_screening_pipeline,
 )
-from src.r_screening_replica.plots import _draw_compound_bubble
+from src.r_screening_replica.plots import _draw_compound_bubble, _draw_van_krevelen
+from src.r_screening_replica.schema import ScreeningAxisRanges
 
 
 class RScreeningReplicaUnitTests(unittest.TestCase):
+    def test_screening_axis_ranges_validate_minimum_before_maximum(self):
+        with self.assertRaisesRegex(ValueError, "DBE X"):
+            ScreeningAxisRanges(dbe_x_min=5, dbe_x_max=5)
+
+    def test_dbe_and_vk_drawers_apply_custom_axis_ranges(self):
+        ranges = ScreeningAxisRanges(
+            dbe_x_min=10,
+            dbe_x_max=40,
+            dbe_y_min=2,
+            dbe_y_max=18,
+            vk_x_min=0.2,
+            vk_x_max=0.9,
+            vk_y_min=0.4,
+            vk_y_max=2.1,
+        )
+        bubble_data = pd.DataFrame(
+            {
+                "carbon_count": [20.0],
+                "DBE": [8.0],
+                "area_level": ["Level 1"],
+                "Category": ["CH"],
+            }
+        )
+        vk_data = pd.DataFrame({"o_c": [0.5], "h_c": [1.2], "Category": ["CHO"]})
+        fig, (dbe_ax, vk_ax) = plt.subplots(1, 2)
+        _draw_compound_bubble(dbe_ax, bubble_data, ranges)
+        _draw_van_krevelen(vk_ax, vk_data, ranges)
+        self.assertEqual(dbe_ax.get_xlim(), (10.0, 40.0))
+        self.assertEqual(dbe_ax.get_ylim(), (2.0, 18.0))
+        self.assertEqual(vk_ax.get_xlim(), (0.2, 0.9))
+        self.assertEqual(vk_ax.get_ylim(), (0.4, 2.1))
+        plt.close(fig)
+
     def test_dbe_bubble_has_white_background_and_no_grid(self):
         data = pd.DataFrame(
             {
@@ -28,7 +62,7 @@ class RScreeningReplicaUnitTests(unittest.TestCase):
             }
         )
         fig, ax = plt.subplots()
-        _draw_compound_bubble(ax, data)
+        _draw_compound_bubble(ax, data, ScreeningAxisRanges())
         self.assertEqual(ax.get_facecolor(), mcolors.to_rgba("white"))
         self.assertEqual(fig.get_facecolor(), mcolors.to_rgba("white"))
         self.assertFalse(any(line.get_visible() for line in ax.get_xgridlines()))
@@ -158,6 +192,16 @@ class RScreeningReplicaIntegrationTests(unittest.TestCase):
                 ScreeningConfig(
                     output_dir=tmp_path / "out",
                     sample_cols=["HH_alk", "WH_alk"],
+                    axis_ranges=ScreeningAxisRanges(
+                        dbe_x_min=10,
+                        dbe_x_max=40,
+                        dbe_y_min=2,
+                        dbe_y_max=18,
+                        vk_x_min=0.2,
+                        vk_x_max=0.9,
+                        vk_y_min=0.4,
+                        vk_y_max=2.1,
+                    ),
                 ),
             )
 
@@ -178,6 +222,10 @@ class RScreeningReplicaIntegrationTests(unittest.TestCase):
                 pdf = tmp_path / "out" / "figures" / f"{name}.pdf"
                 self.assertGreater(png.stat().st_size, 1000)
                 self.assertGreater(pdf.stat().st_size, 1000)
+
+            for name in ["compound_bubble_plot", "VanKrevelen"]:
+                self.assertTrue(result.figure_paths[name]["png"].exists())
+                self.assertTrue(result.figure_paths[name]["pdf"].exists())
 
 
 if __name__ == "__main__":

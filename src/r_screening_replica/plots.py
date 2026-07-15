@@ -37,6 +37,7 @@ from src.plot_style import (
 )
 
 from .classification import CATEGORY_ORDER, DISPLAY_CATEGORY_LABELS
+from .schema import ScreeningAxisRanges
 
 
 PLOT_STYLE_WARNINGS = configure_plot_style()
@@ -82,14 +83,15 @@ def generate_all_figures(
     compound_categories: pd.DataFrame,
     sample_peak_area_long: pd.DataFrame,
     output_dir: Path,
+    axis_ranges: ScreeningAxisRanges,
 ) -> tuple[dict[str, dict[str, Path]], list[str]]:
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     warnings_list = _font_warnings()
     figure_paths = {
         "category_percent_donut_with_total": save_category_donut(category_summary, figures_dir),
-        "compound_bubble_plot": save_compound_bubble_plot(dbe_table, compound_categories, figures_dir),
-        "VanKrevelen": save_van_krevelen_plot(compound_categories, figures_dir),
+        "compound_bubble_plot": save_compound_bubble_plot(dbe_table, compound_categories, figures_dir, axis_ranges),
+        "VanKrevelen": save_van_krevelen_plot(compound_categories, figures_dir, axis_ranges),
         "boxplot_log_transformed": save_boxplot_log_transformed(sample_peak_area_long, compound_categories, figures_dir),
     }
     return figure_paths, warnings_list
@@ -114,7 +116,9 @@ def save_compound_bubble_plot(
     dbe_table: pd.DataFrame,
     compound_categories: pd.DataFrame,
     output_dir: Path,
+    axis_ranges: ScreeningAxisRanges | None = None,
 ) -> dict[str, Path]:
+    axis_ranges = axis_ranges or ScreeningAxisRanges()
     data = _bubble_data(dbe_table, compound_categories)
     paths = {
         "png": output_dir / "compound_bubble_plot.png",
@@ -122,14 +126,19 @@ def save_compound_bubble_plot(
     }
     for path in paths.values():
         fig, ax = plt.subplots(figsize=(12, 8), facecolor="white")
-        _draw_compound_bubble(ax, data)
+        _draw_compound_bubble(ax, data, axis_ranges)
         apply_figure_font(fig)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         plt.close(fig)
     return paths
 
 
-def save_van_krevelen_plot(compound_categories: pd.DataFrame, output_dir: Path) -> dict[str, Path]:
+def save_van_krevelen_plot(
+    compound_categories: pd.DataFrame,
+    output_dir: Path,
+    axis_ranges: ScreeningAxisRanges | None = None,
+) -> dict[str, Path]:
+    axis_ranges = axis_ranges or ScreeningAxisRanges()
     data = compound_categories.copy()
     data["o_c"] = pd.to_numeric(data["O.C"], errors="coerce")
     data["h_c"] = pd.to_numeric(data["H.C"], errors="coerce")
@@ -140,7 +149,7 @@ def save_van_krevelen_plot(compound_categories: pd.DataFrame, output_dir: Path) 
     }
     for path in paths.values():
         fig, ax = plt.subplots(figsize=(12, 8), facecolor="white")
-        _draw_van_krevelen(ax, data)
+        _draw_van_krevelen(ax, data, axis_ranges)
         apply_figure_font(fig)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         plt.close(fig)
@@ -306,7 +315,7 @@ def _bubble_data(dbe_table: pd.DataFrame, compound_categories: pd.DataFrame) -> 
     return data
 
 
-def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame) -> None:
+def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame, axis_ranges: ScreeningAxisRanges) -> None:
     ax.figure.patch.set_facecolor("white")
     ax.set_facecolor("white")
     for category in CATEGORY_ORDER:
@@ -324,8 +333,8 @@ def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame) -> None:
             edgecolors="none",
             label=DISPLAY_CATEGORY_LABELS[category],
         )
-    ax.set_xlim(0, 60)
-    ax.set_ylim(0, 30)
+    ax.set_xlim(*axis_ranges.dbe_xlim)
+    ax.set_ylim(*axis_ranges.dbe_ylim)
     ax.grid(False)
     ax.set_title("DBE for all compounds", fontsize=16, fontweight="bold", loc="center", pad=28)
     ax.text(0.5, 1.01, "classified by elemental composition", ha="center", va="bottom", transform=ax.transAxes, fontsize=12)
@@ -351,7 +360,7 @@ def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame) -> None:
     ax.legend(handles=color_handles, title="Compound category", loc="upper left", bbox_to_anchor=(1.02, 0.55), frameon=False)
 
 
-def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame) -> None:
+def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame, axis_ranges: ScreeningAxisRanges) -> None:
     font_family = PLOT_FONT_FAMILY
     for category in CATEGORY_ORDER:
         subset = data[data["Category"] == category]
@@ -371,10 +380,10 @@ def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame) -> None:
     for label, xmin, xmax, ymin, ymax, label_x, label_y in VK_REGIONS:
         ax.add_patch(Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, fill=False, edgecolor="#333333", linestyle="--", linewidth=1.0))
         ax.text(label_x, label_y, label, ha="center", va="center", fontsize=12, fontweight="bold", color="#333333", family=font_family)
-    ax.set_xlim(0, 1.1)
-    ax.set_ylim(0, 2.6)
     ax.set_xticks(np.arange(0, 1.21, 0.2))
     ax.set_yticks(np.arange(0, 2.61, 0.5))
+    ax.set_xlim(*axis_ranges.vk_xlim)
+    ax.set_ylim(*axis_ranges.vk_ylim)
     ax.set_xlabel("O/C Ratio", fontsize=16, fontweight="bold", color="black", family=font_family)
     ax.set_ylabel("H/C Ratio", fontsize=16, fontweight="bold", color="black", family=font_family)
     ax.set_title("Van Krevelen Diagram", fontsize=18, fontweight="bold", color="black", family=font_family)

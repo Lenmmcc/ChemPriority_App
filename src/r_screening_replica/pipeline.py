@@ -62,6 +62,7 @@ def run_screening_pipeline(input_file: str | Path | Any, config: ScreeningConfig
         compound_categories,
         sample_peak_area_long,
         output_dir,
+        axis_ranges=config.axis_ranges,
     )
 
     return ScreeningResult(
