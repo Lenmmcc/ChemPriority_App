@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import src.auto_query_workflow as auto_query_workflow
 
 from src.auto_query_workflow import (
     AutoWorkflowConfig,
@@ -25,6 +26,7 @@ from src.auto_query_workflow import (
     detect_default_mapping,
     run_auto_query_workflow,
 )
+from src.cp_screening_workflow import PBMToxPiConfig
 from src.mol_structure_parser import prepare_structure_dataframe
 from src.use_rose_plot import (
     build_compound_universe,
@@ -96,6 +98,89 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertTrue(charts["Local_Chemical_Type_Distribution"].png.startswith(b"\x89PNG"))
         self.assertTrue(charts["Local_Van_Krevelen_Plot"].pdf.startswith(b"%PDF"))
+
+    def test_one_click_toxpi_output_contains_two_stage_tables_and_three_charts(self):
+        self.assertTrue(hasattr(auto_query_workflow, "_build_pbm_toxpi_output"))
+        toxpi_input = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C", "D"],
+                "Peak_Area": [1e8, 1e7, 1e6, 1e5],
+                "Scores": [1.0, 4.0, 2.0, 3.0],
+                "DF": [0.9, 0.4, 0.7, 0.2],
+            }
+        )
+
+        output = auto_query_workflow._build_pbm_toxpi_output(
+            toxpi_input,
+            PBMToxPiConfig(candidate_top_n=4, display_top_n=2, n_iter=20, seed=5),
+        )
+
+        self.assertTrue(
+            {
+                "ToxPi_Global_Screen",
+                "ToxPi_Normalized",
+                "ToxPi_Results",
+                "ToxPi_Display",
+                "ToxPi_Settings",
+                "ToxPi_Robustness",
+                "ToxPi_Robust_Stats",
+            }.issubset(output.tables)
+        )
+        self.assertEqual(
+            set(output.charts),
+            {
+                "ToxPi_Radial_Plot",
+                "ToxPi_Ranking_Bar",
+                "ToxPi_Robustness_Histogram",
+            },
+        )
+
+    def test_one_click_toxpi_charts_and_tables_are_exported_in_module_zip(self):
+        self.assertTrue(hasattr(auto_query_workflow, "_build_pbm_toxpi_output"))
+        toxpi_input = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C"],
+                "Peak_Area": [1e7, 1e6, 1e5],
+                "Scores": [1.0, 3.0, 2.0],
+                "DF": [0.8, 0.3, 0.6],
+            }
+        )
+        output = auto_query_workflow._build_pbm_toxpi_output(
+            toxpi_input,
+            PBMToxPiConfig(candidate_top_n=3, display_top_n=2, n_iter=10, seed=5),
+        )
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["A", "B", "C"]}),
+            tables=output.tables,
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+            charts=output.charts,
+        )
+
+        package = build_auto_workflow_zip(result, charts=result.charts)
+
+        with zipfile.ZipFile(package) as archive:
+            names = set(archive.namelist())
+            self.assertIn(
+                "07_Pov_LRTP_PBM_ToxPi/figures/ToxPi_Radial_Plot.png", names
+            )
+            self.assertIn(
+                "07_Pov_LRTP_PBM_ToxPi/figures/ToxPi_Ranking_Bar.pdf", names
+            )
+            self.assertIn(
+                "07_Pov_LRTP_PBM_ToxPi/figures/ToxPi_Robustness_Histogram.png",
+                names,
+            )
+            workbook = pd.ExcelFile(
+                io.BytesIO(
+                    archive.read(
+                        "07_Pov_LRTP_PBM_ToxPi/Pov_LRTP_PBM_ToxPi_Results.xlsx"
+                    )
+                )
+            )
+            self.assertIn("ToxPi_Global_Screen", workbook.sheet_names)
+            self.assertIn("ToxPi_Robustness", workbook.sheet_names)
 
     def test_missing_local_screening_charts_are_skipped_with_warnings(self):
         charts, warnings = _load_local_screening_charts(
@@ -934,8 +1019,13 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                         "Pov_LRTP_Input",
                         "Pov_LRTP",
                         "ToxPi_Input",
+                        "ToxPi_Global_Screen",
                         "ToxPi_Normalized",
                         "ToxPi_Results",
+                        "ToxPi_Display",
+                        "ToxPi_Settings",
+                        "ToxPi_Robustness",
+                        "ToxPi_Robust_Stats",
                     ),
                 ),
             ]
@@ -992,6 +1082,9 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "ECHA_Reported_Use_Distribution",
             "ECHA_Reported_Use_Evidence",
             "Source_Origin_Distribution",
+            "ToxPi_Radial_Plot",
+            "ToxPi_Ranking_Bar",
+            "ToxPi_Robustness_Histogram",
         )
         stale_charts = (
             "Local_Unknown_Chart",
@@ -1098,6 +1191,44 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         screening_definition = page_text.split('"screening"', 1)[1].split('"identifier"', 1)[0]
 
         self.assertIn('("Local_",)', screening_definition)
+
+    def test_page_6_exposes_typed_axis_and_toxpi_settings_and_dashboard_outputs(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        toxpi_definition = page_text.split('"toxpi"', 1)[1].split(
+            "available_charts", 1
+        )[0]
+
+        for token in (
+            "ScreeningAxisRanges(",
+            "PBMToxPiConfig(",
+            "candidate_top_n",
+            "display_top_n",
+            "peak_area_weight",
+            "pbm_weight",
+            "df_weight",
+            "robustness_enabled",
+            "perturbation_percent",
+            "robustness_iterations",
+            "robustness_seed",
+            "axis_ranges=axis_ranges",
+            "toxpi_config=toxpi_config",
+        ):
+            self.assertIn(token, page_text)
+        for table_name in (
+            "ToxPi_Global_Screen",
+            "ToxPi_Normalized",
+            "ToxPi_Results",
+            "ToxPi_Display",
+            "ToxPi_Settings",
+            "ToxPi_Robustness",
+            "ToxPi_Robust_Stats",
+        ):
+            self.assertIn(f'"{table_name}"', toxpi_definition)
+        self.assertIn('("ToxPi_",)', toxpi_definition)
+        audit_definition = page_text.split("def _is_audit_table", 1)[1]
+        self.assertIn('"ToxPi_Settings"', audit_definition)
+        self.assertIn('"ToxPi_Robustness"', audit_definition)
+        self.assertIn('"ToxPi_Robust_Stats"', audit_definition)
 
     def test_page_6_renders_module_dashboard_without_removing_exports(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:

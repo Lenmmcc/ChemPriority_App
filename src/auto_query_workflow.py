@@ -17,11 +17,14 @@ from src.comptox_use import (
     run_comptox_use_batch,
 )
 from src.cp_screening_workflow import (
+    PBMToxPiConfig,
     build_detection_frequency,
     build_group_area_mean_by_sample,
     build_pbm_toxpi_input,
     build_peak_area_long,
     calculate_pbm_toxpi,
+    generate_pbm_toxpi_bar_plot,
+    generate_pbm_toxpi_robustness_plot,
 )
 from src.echa_ghs import run_echa_ghs_batch
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
@@ -31,8 +34,9 @@ from src.mol_structure_parser import find_mol_text_column, prepare_structure_dat
 from src.pov_lrtp_replica import run_pov_lrtp_batch
 from src.plot_style import configure_plot_style
 from src.r_screening_replica.pipeline import run_screening_pipeline
-from src.r_screening_replica.schema import ScreeningConfig
+from src.r_screening_replica.schema import ScreeningAxisRanges, ScreeningConfig
 from src.source_origin import run_source_origin_batch
+from src.toxpi_calc import generate_r_style_toxpi_plot
 from src.use_rose_plot import (
     build_compound_universe,
     extract_candidate_use_plot_data,
@@ -136,8 +140,19 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
     (
         "07_Pov_LRTP_PBM_ToxPi",
         "Pov_LRTP_PBM_ToxPi_Results.xlsx",
-        ("Pov_LRTP_Input", "Pov_LRTP", "ToxPi_Input", "ToxPi_Normalized", "ToxPi_Results"),
-        (),
+        (
+            "Pov_LRTP_Input",
+            "Pov_LRTP",
+            "ToxPi_Input",
+            "ToxPi_Global_Screen",
+            "ToxPi_Normalized",
+            "ToxPi_Results",
+            "ToxPi_Display",
+            "ToxPi_Settings",
+            "ToxPi_Robustness",
+            "ToxPi_Robust_Stats",
+        ),
+        ("ToxPi_Radial_Plot", "ToxPi_Ranking_Bar", "ToxPi_Robustness_Histogram"),
     ),
 )
 
@@ -177,6 +192,8 @@ class AutoWorkflowConfig:
     run_source_origin: bool = False
     run_pov_lrtp_toxpi: bool = False
     detection_threshold: float = 1e5
+    axis_ranges: ScreeningAxisRanges = field(default_factory=ScreeningAxisRanges)
+    toxpi_config: PBMToxPiConfig = field(default_factory=PBMToxPiConfig)
     use_pubchem: bool = True
     use_epa_identifier: bool = True
     use_echa_identifier: bool = True
@@ -226,6 +243,12 @@ class LocalScreeningOutput:
     tables: OrderedDict[str, pd.DataFrame]
     charts: OrderedDict[str, AutoWorkflowChart]
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PbmToxPiOutput:
+    tables: OrderedDict[str, pd.DataFrame]
+    charts: OrderedDict[str, AutoWorkflowChart]
 
 
 ProgressCallback = Callable[[str, int, int, str], None]
@@ -343,7 +366,12 @@ def run_auto_query_workflow(
     if run_local_r_df:
         local_value = run_step(
             R_DF_STEP_LABEL,
-            lambda: _run_r_replicate_df(normalized, mapping, config.detection_threshold),
+            lambda: _run_r_replicate_df(
+                normalized,
+                mapping,
+                config.detection_threshold,
+                config.axis_ranges,
+            ),
         )
         if local_value is not None:
             for key, table in local_value.tables.items():
@@ -594,12 +622,23 @@ def run_auto_query_workflow(
     if config.run_pov_lrtp_toxpi:
         toxpi_value = run_step(
             "Pov-LRTP / PBM / ToxPi",
-            lambda: _run_pov_lrtp_toxpi(representative, completed_identifiers, epi_results, tables),
+            lambda: _run_pov_lrtp_toxpi(
+                representative,
+                completed_identifiers,
+                epi_results,
+                tables,
+                config.toxpi_config,
+            ),
         )
         if toxpi_value is not None:
-            for key, table in toxpi_value.items():
+            for key, table in toxpi_value.tables.items():
                 tables[key] = table
-            record("Pov-LRTP / PBM / ToxPi", "完成", len(toxpi_value.get("ToxPi_Results", pd.DataFrame())))
+            charts.update(toxpi_value.charts)
+            record(
+                "Pov-LRTP / PBM / ToxPi",
+                "完成",
+                len(toxpi_value.tables.get("ToxPi_Results", pd.DataFrame())),
+            )
 
     warnings = pd.DataFrame(warning_rows, columns=["stage", "message"])
     tables["Warnings"] = warnings
@@ -882,7 +921,12 @@ def _load_local_screening_charts(screening_result):
     return charts, warnings
 
 
-def _run_r_replicate_df(input_df: pd.DataFrame, mapping: AutoWorkflowMapping, detection_threshold: float):
+def _run_r_replicate_df(
+    input_df: pd.DataFrame,
+    mapping: AutoWorkflowMapping,
+    detection_threshold: float,
+    axis_ranges: ScreeningAxisRanges | None = None,
+):
     area_cols = [column for column in mapping.group_area_cols if column in input_df.columns]
     if not area_cols and mapping.peak_area_col in input_df.columns:
         area_cols = [mapping.peak_area_col]
@@ -903,6 +947,7 @@ def _run_r_replicate_df(input_df: pd.DataFrame, mapping: AutoWorkflowMapping, de
         group_area_col="Group_Area_Mean",
         sample_cols=["Group_Area_Mean"],
         output_dir=output_dir,
+        axis_ranges=axis_ranges or ScreeningAxisRanges(),
     )
     screening_result = run_screening_pipeline(_dataframe_to_excel_bytes(working), config=config)
     df_table, sample_peak_area = build_detection_frequency(
@@ -943,7 +988,8 @@ def _run_pov_lrtp_toxpi(
     completed_identifiers: pd.DataFrame,
     epi_results: pd.DataFrame,
     tables: OrderedDict[str, pd.DataFrame],
-):
+    config: PBMToxPiConfig,
+) -> PbmToxPiOutput:
     if completed_identifiers is None or completed_identifiers.empty:
         raise ValueError("缺少标识符补全结果，无法运行 Pov-LRTP / PBM / ToxPi。")
     if epi_results is None or epi_results.empty:
@@ -964,16 +1010,72 @@ def _run_pov_lrtp_toxpi(
     df_table = tables.get("DF_Table", pd.DataFrame())
     sample_peak_area = tables.get("Group_Area_Mean_By_Sample", pd.DataFrame())
     toxpi_input = build_pbm_toxpi_input(df_table, pov_lrtp_results, peak_area_long=sample_peak_area)
-    normalized_toxpi, toxpi_results = calculate_pbm_toxpi(toxpi_input)
-    return OrderedDict(
+    output = _build_pbm_toxpi_output(toxpi_input, config)
+    return PbmToxPiOutput(
+        tables=OrderedDict(
+            [
+                ("Pov_LRTP_Input", pov_lrtp_input),
+                ("Pov_LRTP", pov_lrtp_results),
+                *output.tables.items(),
+            ]
+        ),
+        charts=output.charts,
+    )
+
+
+def _build_pbm_toxpi_output(
+    toxpi_input: pd.DataFrame,
+    config: PBMToxPiConfig,
+) -> PbmToxPiOutput:
+    toxpi_result = calculate_pbm_toxpi(toxpi_input, config)
+    tables = OrderedDict(
         [
-            ("Pov_LRTP_Input", pov_lrtp_input),
-            ("Pov_LRTP", pov_lrtp_results),
             ("ToxPi_Input", toxpi_input),
-            ("ToxPi_Normalized", normalized_toxpi),
-            ("ToxPi_Results", toxpi_results),
+            ("ToxPi_Global_Screen", toxpi_result.global_screen),
+            ("ToxPi_Normalized", toxpi_result.candidate_normalized),
+            ("ToxPi_Results", toxpi_result.final_ranking),
+            ("ToxPi_Display", toxpi_result.display_rows),
+            ("ToxPi_Settings", toxpi_result.settings_table()),
+            ("ToxPi_Robustness", toxpi_result.robustness_summary),
+            ("ToxPi_Robust_Stats", toxpi_result.robustness_stats),
         ]
     )
+    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
+    if not toxpi_result.display_rows.empty:
+        radial = generate_r_style_toxpi_plot(
+            toxpi_result.display_rows,
+            custom_weights=toxpi_result.normalized_weights,
+            toxic_cols=["peak_area", "pbm", "df"],
+            label_wrap_width=20,
+        )
+        charts["ToxPi_Radial_Plot"] = _auto_workflow_chart_from_figure(
+            radial,
+            "ToxPi Radial Plot",
+        )
+        bar = generate_pbm_toxpi_bar_plot(
+            toxpi_result.display_rows,
+            top_n=toxpi_result.effective_display_top_n,
+        )
+        charts["ToxPi_Ranking_Bar"] = _auto_workflow_chart_from_figure(
+            bar,
+            "ToxPi Ranking Bar",
+        )
+    if not toxpi_result.robustness_correlations.empty:
+        robustness = generate_pbm_toxpi_robustness_plot(toxpi_result)
+        charts["ToxPi_Robustness_Histogram"] = _auto_workflow_chart_from_figure(
+            robustness,
+            "ToxPi Robustness Histogram",
+        )
+    return PbmToxPiOutput(tables=tables, charts=charts)
+
+
+def _auto_workflow_chart_from_figure(fig, title: str) -> AutoWorkflowChart:
+    try:
+        png = figure_to_png_bytes(fig).getvalue()
+        pdf = figure_to_pdf_bytes(fig).getvalue()
+        return AutoWorkflowChart(title=title, png=png, pdf=pdf)
+    finally:
+        plt.close(fig)
 
 
 def _build_identifier_input(representative: pd.DataFrame) -> pd.DataFrame:

@@ -13,8 +13,10 @@ from src.auto_query_workflow import (
     read_input_workbook,
     run_auto_query_workflow,
 )
+from src.cp_screening_workflow import PBMToxPiConfig
 from src.query_cache import clear_query_cache, current_cache_path
 from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
+from src.r_screening_replica.schema import ScreeningAxisRanges
 from src.auto_query_progress import (
     build_selected_steps,
     create_progress_state,
@@ -146,8 +148,19 @@ def _result_dashboard_groups(result, charts):
         (
             "toxpi",
             "Pov-LRTP / PBM / ToxPi",
-            ["Pov_LRTP_Input", "Pov_LRTP", "ToxPi_Input", "ToxPi_Normalized", "ToxPi_Results"],
-            (),
+            [
+                "Pov_LRTP_Input",
+                "Pov_LRTP",
+                "ToxPi_Input",
+                "ToxPi_Global_Screen",
+                "ToxPi_Normalized",
+                "ToxPi_Results",
+                "ToxPi_Display",
+                "ToxPi_Settings",
+                "ToxPi_Robustness",
+                "ToxPi_Robust_Stats",
+            ],
+            ("ToxPi_",),
         ),
     ]
     available_charts = charts or {}
@@ -185,6 +198,9 @@ def _is_audit_table(table_name):
         "Source_Origin_Pie_Data",
         "ECHA_Use_Dossiers",
         "ECHA_GHS_Classifications",
+        "ToxPi_Settings",
+        "ToxPi_Robustness",
+        "ToxPi_Robust_Stats",
     }
 
 
@@ -368,9 +384,76 @@ with st.expander("运行设置", expanded=False):
         echa_ghs_max_workers = st.number_input("ECHA GHS 并发数", min_value=1, max_value=8, value=2, step=1)
         source_origin_max_workers = st.number_input("来源属性并发数", min_value=1, max_value=8, value=2, step=1)
 
+    st.caption("本地筛查图坐标范围")
+    axis_dbe_x, axis_dbe_y, axis_vk_x, axis_vk_y = st.columns(4)
+    with axis_dbe_x:
+        dbe_x_min = st.number_input("DBE X 最小值", value=0.0)
+        dbe_x_max = st.number_input("DBE X 最大值", value=60.0)
+    with axis_dbe_y:
+        dbe_y_min = st.number_input("DBE Y 最小值", value=0.0)
+        dbe_y_max = st.number_input("DBE Y 最大值", value=30.0)
+    with axis_vk_x:
+        vk_x_min = st.number_input("Van Krevelen X 最小值", value=0.0)
+        vk_x_max = st.number_input("Van Krevelen X 最大值", value=1.1)
+    with axis_vk_y:
+        vk_y_min = st.number_input("Van Krevelen Y 最小值", value=0.0)
+        vk_y_max = st.number_input("Van Krevelen Y 最大值", value=2.6)
+
+    st.caption("ToxPi 两阶段排名与稳健性")
+    toxpi_top_n, toxpi_weights = st.columns(2)
+    with toxpi_top_n:
+        candidate_top_n = st.number_input("Candidate Top N", min_value=1, value=100, step=1)
+        display_top_n = st.number_input("Display Top N", min_value=1, value=20, step=1)
+    with toxpi_weights:
+        peak_area_weight = st.number_input("Peak Area 权重 (%)", min_value=0.0, value=40.0)
+        pbm_weight = st.number_input("PBM 权重 (%)", min_value=0.0, value=40.0)
+        df_weight = st.number_input("DF 权重 (%)", min_value=0.0, value=20.0)
+    robustness_enabled = st.checkbox("启用 ToxPi 排名稳健性分析", value=True)
+    robust_a, robust_b, robust_c = st.columns(3)
+    with robust_a:
+        perturbation_percent = st.number_input(
+            "权重扰动 (%)", min_value=0.0, max_value=100.0, value=20.0
+        )
+    with robust_b:
+        robustness_iterations = st.number_input("稳健性迭代次数", min_value=1, value=1000, step=1)
+    with robust_c:
+        robustness_seed = st.number_input("稳健性随机种子", value=123, step=1)
+
 start_run = st.button("开始一键运行", type="primary")
 
 if start_run:
+    try:
+        axis_ranges = ScreeningAxisRanges(
+            dbe_x_min=float(dbe_x_min),
+            dbe_x_max=float(dbe_x_max),
+            dbe_y_min=float(dbe_y_min),
+            dbe_y_max=float(dbe_y_max),
+            vk_x_min=float(vk_x_min),
+            vk_x_max=float(vk_x_max),
+            vk_y_min=float(vk_y_min),
+            vk_y_max=float(vk_y_max),
+        )
+    except ValueError as exc:
+        st.error(f"坐标范围设置无效：{exc}")
+        st.stop()
+    try:
+        toxpi_config = PBMToxPiConfig(
+            candidate_top_n=int(candidate_top_n),
+            display_top_n=int(display_top_n),
+            weights={
+                "peak_area": float(peak_area_weight) / 100.0,
+                "pbm": float(pbm_weight) / 100.0,
+                "df": float(df_weight) / 100.0,
+            },
+            robustness_enabled=bool(robustness_enabled),
+            perturbation_fraction=float(perturbation_percent) / 100.0,
+            n_iter=int(robustness_iterations),
+            seed=int(robustness_seed),
+        )
+    except ValueError as exc:
+        st.error(f"ToxPi 设置无效：{exc}")
+        st.stop()
+
     selected_steps = build_selected_steps(
         run_r_replicate_df=run_r_replicate_df,
         run_identifier=run_identifier,
@@ -438,6 +521,8 @@ if start_run:
         run_source_origin=run_source_origin,
         run_pov_lrtp_toxpi=run_pov_toxpi,
         detection_threshold=float(detection_threshold),
+        axis_ranges=axis_ranges,
+        toxpi_config=toxpi_config,
         cache_enabled=bool(cache_enabled),
         identifier_max_workers=int(identifier_max_workers),
         epi_max_workers=int(epi_max_workers),
