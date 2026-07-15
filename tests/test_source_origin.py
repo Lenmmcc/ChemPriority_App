@@ -194,15 +194,16 @@ class SourceOriginBatchTests(unittest.TestCase):
     @patch("src.source_origin.fetch_coconut_evidence", return_value=[])
     @patch("src.source_origin.fetch_chebi_evidence", return_value=[_natural_evidence()])
     def test_result_workbook_contains_summary_evidence_and_warnings(self, fetch_chebi, fetch_coconut):
+        input_df = pd.DataFrame([_input_row("Caffeine")])
         summary, evidence, errors = run_source_origin_batch(
-            pd.DataFrame([_input_row("Caffeine")]),
+            input_df,
             comptox_candidates_df=pd.DataFrame(),
             echa_candidates_df=pd.DataFrame(),
             delay_seconds=0,
         )
 
         workbook = build_result_workbook(
-            pd.DataFrame([_input_row("Caffeine")]),
+            input_df,
             summary_df=summary,
             evidence_df=evidence,
             errors_df=errors,
@@ -210,8 +211,18 @@ class SourceOriginBatchTests(unittest.TestCase):
         book = load_workbook(io.BytesIO(workbook.getvalue()), read_only=True)
 
         self.assertIn("Source_Origin_Summary", book.sheetnames)
+        self.assertIn("Source_Origin_Pie_Data", book.sheetnames)
         self.assertIn("Source_Origin_Evidence", book.sheetnames)
         self.assertIn("Source_Origin_Warnings", book.sheetnames)
+        source_pie = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="Source_Origin_Pie_Data"
+        )
+        self.assertEqual(len(source_pie), len(input_df.drop_duplicates("compound")))
+        self.assertTrue(
+            set(source_pie["display_label"]).issubset(
+                {"Anthropogenic", "Natural", "Both", "Unknown"}
+            )
+        )
 
     @patch("src.source_origin.fetch_coconut_evidence", return_value=[])
     @patch("src.source_origin.fetch_chebi_evidence", return_value=[])

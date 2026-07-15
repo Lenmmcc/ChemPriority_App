@@ -540,9 +540,34 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertAlmostEqual(functional_df.loc[0, "预测概率"], 0.9126)
 
         workbook = comptox_use.build_result_workbook(
-            input_df,
+            pd.DataFrame(
+                [
+                    {"compound": "2CB", "dtxsid": "DTXSID2069284"},
+                    {"compound": "Reported Example", "dtxsid": "DTXSID0000002"},
+                    {"compound": "No Evidence", "dtxsid": "DTXSID0000003"},
+                ]
+            ),
             summary_df=summary_df,
-            candidates_df=candidates_df,
+            candidates_df=pd.concat(
+                [
+                    candidates_df,
+                    pd.DataFrame(
+                        [
+                            {
+                                **_candidate(
+                                    "functional_use",
+                                    raw_use="solvent",
+                                    use_cn="溶剂",
+                                    functional_use_source="reported",
+                                ),
+                                "compound": "Reported Example",
+                                "dtxsid": "DTXSID0000002",
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            ),
             errors_df=pd.DataFrame(),
         )
         book = load_workbook(io.BytesIO(workbook.getvalue()), read_only=True)
@@ -551,8 +576,27 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertNotIn("Functional_Uses", book.sheetnames)
         self.assertIn("Functional_Uses_Predicted", book.sheetnames)
         self.assertIn("Functional_Uses_Reported", book.sheetnames)
+        self.assertIn("EPA_Predicted_Pie_Data", book.sheetnames)
+        self.assertIn("EPA_Reported_Pie_Data", book.sheetnames)
+        self.assertNotIn("All_Use_Candidates", book.sheetnames)
         self.assertIn("Product_Use_Categories", book.sheetnames)
         self.assertIn("Evidence_Metadata", book.sheetnames)
+        predicted = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="Functional_Uses_Predicted"
+        )
+        reported = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="Functional_Uses_Reported"
+        )
+        self.assertEqual(set(predicted["来源类型"].dropna().str.lower()), {"predicted"})
+        self.assertEqual(set(reported["来源类型"].dropna().str.lower()), {"reported"})
+        predicted_pie = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="EPA_Predicted_Pie_Data"
+        )
+        reported_pie = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="EPA_Reported_Pie_Data"
+        )
+        self.assertEqual(len(predicted_pie), 3)
+        self.assertEqual(len(reported_pie), 3)
         self.assertEqual(
             [cell.value for cell in next(book["Warnings"].iter_rows(min_row=1, max_row=1))],
             comptox_use.WARNING_COLUMNS,

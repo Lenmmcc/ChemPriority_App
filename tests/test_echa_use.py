@@ -148,8 +148,9 @@ class EchaUseSummaryTests(unittest.TestCase):
         fetch_dossiers.return_value = ([_dossier()], [])
         extract_candidates.return_value = [_candidate(), _candidate("Consumer use", "消费者用途")]
 
+        input_df = pd.DataFrame([{"compound": "Example", "cas": "50-00-0"}])
         summary_df, candidates_df, dossiers_df, errors_df = echa_use.run_echa_use_batch(
-            pd.DataFrame([{"compound": "Example", "cas": "50-00-0"}]),
+            input_df,
             delay_seconds=0,
         )
 
@@ -161,7 +162,7 @@ class EchaUseSummaryTests(unittest.TestCase):
             self.assertNotIn(column, summary_df.columns)
 
         workbook = echa_use.build_result_workbook(
-            pd.DataFrame([{"compound": "Example", "cas": "50-00-0"}]),
+            input_df,
             summary_df=summary_df,
             candidates_df=candidates_df,
             dossiers_df=dossiers_df,
@@ -170,6 +171,13 @@ class EchaUseSummaryTests(unittest.TestCase):
         book = load_workbook(io.BytesIO(workbook.getvalue()), read_only=True)
         self.assertIn("ECHA_Use_Summary", book.sheetnames)
         self.assertNotIn("ECHA_Top5_Use_Summary", book.sheetnames)
+        self.assertIn("ECHA_Uses_Reported", book.sheetnames)
+        self.assertIn("ECHA_Reported_Pie_Data", book.sheetnames)
+        self.assertNotIn("ECHA_All_Use_Candidates", book.sheetnames)
+        echa_pie = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="ECHA_Reported_Pie_Data"
+        )
+        self.assertEqual(len(echa_pie), len(input_df.drop_duplicates("compound")))
 
     def test_empty_summary_template_has_no_top_ranking_columns(self):
         template = echa_use.build_empty_summary_template(pd.DataFrame([{"compound": "Example"}]))
