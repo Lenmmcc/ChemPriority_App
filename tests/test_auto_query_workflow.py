@@ -1,4 +1,6 @@
 from collections import OrderedDict
+import ast
+import importlib
 import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -46,6 +48,24 @@ M  END
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_page_6_auto_query_imports_resolve_to_real_exports(self):
+        page_path = Path("pages/6_一键批量查询.py")
+        page_tree = ast.parse(page_path.read_text(encoding="utf-8"))
+        imported_names = {
+            alias.name
+            for node in ast.walk(page_tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "src.auto_query_workflow"
+            for alias in node.names
+        }
+        workflow_module = importlib.import_module("src.auto_query_workflow")
+
+        missing_exports = sorted(
+            name for name in imported_names if not hasattr(workflow_module, name)
+        )
+
+        self.assertEqual(missing_exports, [])
+
     def test_local_screening_chart_paths_become_portable_png_pdf_bytes(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

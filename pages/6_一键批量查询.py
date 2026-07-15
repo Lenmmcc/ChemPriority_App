@@ -6,7 +6,7 @@ import streamlit as st
 from src.auto_query_workflow import (
     AutoWorkflowConfig,
     AutoWorkflowMapping,
-    INTERNAL_TABLE_NAMES,
+    PUBLIC_TABLE_NAMES,
     build_auto_workflow_charts,
     build_auto_workflow_zip,
     detect_default_mapping,
@@ -473,7 +473,7 @@ if result is not None:
         with st.expander("Warnings", expanded=False):
             _show_dataframe(result.warnings)
 
-    table_names = [name for name in result.tables if name not in INTERNAL_TABLE_NAMES]
+    table_names = [name for name in result.tables if name in PUBLIC_TABLE_NAMES]
     if table_names:
         selected_table = st.selectbox("查看结果表", table_names)
         _show_dataframe(result.tables[selected_table])
