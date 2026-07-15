@@ -11,12 +11,10 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
 
+from src.plot_style import apply_figure_font, configure_plot_style
 
-# The rose plot is exported on hosts that may not include Chinese fonts. Keep
-# all plot text ASCII and use Matplotlib's bundled cross-platform sans-serif.
-plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "sans-serif"]
-plt.rcParams["axes.unicode_minus"] = False
-plt.rcParams["pdf.fonttype"] = 42
+
+configure_plot_style()
 
 
 USE_COLOR_PALETTE = [
@@ -41,6 +39,7 @@ PLOT_DATA_COLUMNS = [
 
 TOP_PREDICTED_FUNCTIONAL_COLUMNS = [
     "source",
+    "compound_key",
     "compound",
     "compound_label",
     "use_cn",
@@ -48,6 +47,23 @@ TOP_PREDICTED_FUNCTIONAL_COLUMNS = [
     "display_label",
     "probability",
     "status",
+    "classification_reason",
+    "is_other",
+]
+
+COMPOUND_UNIVERSE_COLUMNS = ["compound_key", "compound", "compound_label"]
+
+COMPOUND_CLASSIFICATION_COLUMNS = [
+    "source",
+    "compound_key",
+    "compound",
+    "compound_label",
+    "use_cn",
+    "use_label",
+    "display_label",
+    "evidence_count",
+    "classification_reason",
+    "is_other",
 ]
 
 REPORTED_FUNCTIONAL_PRESENCE_COLUMNS = [
@@ -61,6 +77,181 @@ REPORTED_FUNCTIONAL_PRESENCE_COLUMNS = [
 
 HIGH_CONFIDENCE_PROBABILITY_THRESHOLD = 0.8
 TOP_PREDICTED_PIE_MAX_CATEGORIES = 12
+REPORTED_OTHERS_NOTE = (
+    "Others includes compounds with no reported result or with a tie for the "
+    "most frequently reported category."
+)
+PIE_INSIDE_LABEL_MIN_PERCENT = 5.0
+PIE_OUTSIDE_LABEL_MIN_PERCENT = 1.0
+
+
+def build_compound_universe(input_df):
+    """Return one stable row for every valid input compound."""
+    if input_df is None or not isinstance(input_df, pd.DataFrame) or input_df.empty:
+        return pd.DataFrame(columns=COMPOUND_UNIVERSE_COLUMNS)
+
+    rows = []
+    seen = set()
+    for position, (_, row) in enumerate(input_df.iterrows(), start=1):
+        compound = _first_clean(
+            row.get("compound"),
+            row.get("Name"),
+            row.get("name"),
+            row.get("cas"),
+            row.get("ec"),
+            row.get("dtxsid"),
+            row.get("echa_id"),
+            row.get("smiles"),
+        )
+        if not compound:
+            continue
+        compound_key = _normalize_label_key(compound)
+        if not compound_key or compound_key in seen:
+            continue
+        seen.add(compound_key)
+        rows.append(
+            {
+                "compound_key": compound_key,
+                "compound": compound,
+                "compound_label": _ascii_label(compound, f"Compound {position}"),
+            }
+        )
+    return pd.DataFrame(rows, columns=COMPOUND_UNIVERSE_COLUMNS)
+
+
+def extract_top_reported_functional_use_data(
+    candidates_df,
+    compound_universe,
+    source_label,
+    source_type=None,
+    use_key="raw",
+    require_reported_flag=True,
+):
+    """Classify every universe compound by its unique top reported use."""
+    universe = compound_universe.copy()
+    if universe.empty:
+        return pd.DataFrame(columns=COMPOUND_CLASSIFICATION_COLUMNS)
+
+    candidates = (
+        candidates_df.copy()
+        if isinstance(candidates_df, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    if source_type is not None and "source_type" in candidates.columns:
+        candidates = candidates[candidates["source_type"].eq(source_type)].copy()
+    if require_reported_flag and not candidates.empty:
+        candidates = candidates[
+            candidates.apply(
+                lambda row: _functional_source_bucket(row) == "reported", axis=1
+            )
+        ].copy()
+
+    groups = {}
+    for _, candidate in candidates.iterrows():
+        compound_key = _normalize_label_key(candidate.get("compound"))
+        if compound_key:
+            groups.setdefault(compound_key, []).append(candidate)
+
+    rows = []
+    for _, compound_row in universe.iterrows():
+        totals = {}
+        labels = {}
+        use_cn_values = {}
+        for candidate in groups.get(compound_row["compound_key"], []):
+            use_value, english_value = _candidate_use_values(candidate, use_key)
+            category_key = _normalize_label_key(english_value or use_value)
+            if not category_key:
+                continue
+            weight = _to_number(candidate.get("evidence_count"))
+            if pd.isna(weight) or float(weight) <= 0:
+                weight = 1.0
+            totals[category_key] = totals.get(category_key, 0.0) + float(weight)
+            labels[category_key] = _ascii_label(
+                english_value or use_value, "Reported use"
+            )
+            use_cn_values[category_key] = _first_clean(
+                candidate.get("use_cn"), use_value
+            )
+
+        highest = 0.0
+        if not totals:
+            winner = None
+            reason = "no_reported_result"
+        else:
+            highest = max(totals.values())
+            winners = [key for key, value in totals.items() if value == highest]
+            winner = winners[0] if len(winners) == 1 else None
+            reason = (
+                "unique_top_reported_category"
+                if winner
+                else "tie_for_top_reported_category"
+            )
+        is_other = winner is None
+        rows.append(
+            {
+                "source": source_label,
+                **compound_row.to_dict(),
+                "use_cn": "Others" if is_other else use_cn_values[winner],
+                "use_label": "Others" if is_other else labels[winner],
+                "display_label": "Others" if is_other else labels[winner],
+                "evidence_count": highest,
+                "classification_reason": reason,
+                "is_other": is_other,
+            }
+        )
+    return pd.DataFrame(rows, columns=COMPOUND_CLASSIFICATION_COLUMNS)
+
+
+def extract_source_origin_pie_data(summary_df, compound_universe):
+    """Classify every universe compound into a fixed source-origin category."""
+    universe = compound_universe.copy()
+    if universe.empty:
+        return pd.DataFrame(columns=COMPOUND_CLASSIFICATION_COLUMNS)
+
+    summary = (
+        summary_df.copy() if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()
+    )
+    summary_by_key = {
+        _normalize_label_key(row.get("compound")): row
+        for _, row in summary.iterrows()
+        if _normalize_label_key(row.get("compound"))
+    }
+    rows = []
+    for _, compound_row in universe.iterrows():
+        source_row = summary_by_key.get(compound_row["compound_key"])
+        human = (
+            _to_number(source_row.get("人为源证据数"))
+            if source_row is not None
+            else 0
+        )
+        natural = (
+            _to_number(source_row.get("天然源证据数"))
+            if source_row is not None
+            else 0
+        )
+        human = 0 if pd.isna(human) else float(human)
+        natural = 0 if pd.isna(natural) else float(natural)
+        if human > 0 and natural > 0:
+            category, reason = "Both", "both_source_types"
+        elif human > 0:
+            category, reason = "Anthropogenic", "anthropogenic_only"
+        elif natural > 0:
+            category, reason = "Natural", "natural_only"
+        else:
+            category, reason = "Unknown", "insufficient_source_evidence"
+        rows.append(
+            {
+                "source": "Source origin",
+                **compound_row.to_dict(),
+                "use_cn": category,
+                "use_label": category,
+                "display_label": category,
+                "evidence_count": human + natural,
+                "classification_reason": reason,
+                "is_other": category == "Unknown",
+            }
+        )
+    return pd.DataFrame(rows, columns=COMPOUND_CLASSIFICATION_COLUMNS)
 
 
 def extract_use_rose_data(summary_df, source_label, use_prefix="用途"):
@@ -191,21 +382,31 @@ def extract_candidate_use_plot_data(
     return pd.DataFrame(rows, columns=PLOT_DATA_COLUMNS)
 
 
-def extract_top_predicted_functional_use_data(candidates_df, source_label="EPA FC"):
+def extract_top_predicted_functional_use_data(
+    candidates_df,
+    source_label="EPA FC",
+    compound_universe=None,
+):
     """Return one highest-probability predicted functional use per compound."""
-    if candidates_df is None or not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
-        return _empty_top_predicted_functional_data()
-    if "source_type" not in candidates_df.columns:
-        return _empty_top_predicted_functional_data()
-
-    functional_df = candidates_df[candidates_df["source_type"].eq("functional_use")].copy()
-    if functional_df.empty:
-        return _empty_top_predicted_functional_data()
+    candidates = (
+        candidates_df.copy()
+        if isinstance(candidates_df, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    if "source_type" in candidates.columns:
+        functional_df = candidates[candidates["source_type"].eq("functional_use")].copy()
+    else:
+        functional_df = pd.DataFrame(columns=["compound"])
 
     reported_keys_by_compound = {}
-    reported_df = functional_df[
-        functional_df.apply(lambda row: _functional_source_bucket(row) == "reported", axis=1)
-    ]
+    if functional_df.empty:
+        reported_df = functional_df
+    else:
+        reported_df = functional_df[
+            functional_df.apply(
+                lambda row: _functional_source_bucket(row) == "reported", axis=1
+            )
+        ]
     for compound, compound_df in reported_df.groupby("compound", sort=False):
         reported_keys_by_compound[_clean_text(compound)] = {
             key
@@ -213,12 +414,14 @@ def extract_top_predicted_functional_use_data(candidates_df, source_label="EPA F
             for key in _functional_candidate_match_keys(candidate)
         }
 
-    predicted_df = functional_df[
-        functional_df.apply(lambda row: _functional_source_bucket(row) == "predicted", axis=1)
-    ]
-    if predicted_df.empty:
-        return _empty_top_predicted_functional_data()
-
+    if functional_df.empty:
+        predicted_df = functional_df
+    else:
+        predicted_df = functional_df[
+            functional_df.apply(
+                lambda row: _functional_source_bucket(row) == "predicted", axis=1
+            )
+        ]
     rows = []
     for compound_index, (compound, compound_df) in enumerate(predicted_df.groupby("compound", sort=False), start=1):
         compound = _clean_text(compound) or "未命名化合物"
@@ -246,6 +449,7 @@ def extract_top_predicted_functional_use_data(candidates_df, source_label="EPA F
         rows.append(
             {
                 "source": source_label,
+                "compound_key": _normalize_label_key(compound),
                 "compound": compound,
                 "compound_label": _ascii_label(compound, f"Compound {compound_index}"),
                 "use_cn": use_cn,
@@ -253,25 +457,69 @@ def extract_top_predicted_functional_use_data(candidates_df, source_label="EPA F
                 "display_label": use_label,
                 "probability": best_probability,
                 "status": status,
+                "classification_reason": "top_predicted_probability",
+                "is_other": False,
             }
         )
 
-    return pd.DataFrame(rows, columns=TOP_PREDICTED_FUNCTIONAL_COLUMNS)
+    selected = pd.DataFrame(rows, columns=TOP_PREDICTED_FUNCTIONAL_COLUMNS)
+    if compound_universe is None:
+        return selected
+
+    universe = compound_universe.copy()
+    if universe.empty:
+        return _empty_top_predicted_functional_data()
+    selected_by_key = {
+        row["compound_key"]: row for _, row in selected.iterrows()
+    }
+    completed_rows = []
+    for _, compound_row in universe.iterrows():
+        compound_key = compound_row["compound_key"]
+        selected_row = selected_by_key.get(compound_key)
+        if selected_row is not None:
+            completed = selected_row.to_dict()
+            completed.update(compound_row.to_dict())
+            completed_rows.append(completed)
+            continue
+        completed_rows.append(
+            {
+                "source": source_label,
+                **compound_row.to_dict(),
+                "use_cn": "Others",
+                "use_label": "Others",
+                "display_label": "Others",
+                "probability": pd.NA,
+                "status": "no_predicted_result",
+                "classification_reason": "no_predicted_result",
+                "is_other": True,
+            }
+        )
+    return pd.DataFrame(completed_rows, columns=TOP_PREDICTED_FUNCTIONAL_COLUMNS)
 
 
-def extract_reported_functional_use_presence_data(candidates_df, source_label="EPA FC"):
+def extract_reported_functional_use_presence_data(
+    candidates_df,
+    source_label="EPA FC",
+    source_type="functional_use",
+    use_key="raw",
+    require_reported_flag=True,
+):
     """Return binary reported functional-use evidence dots by compound and use."""
     if candidates_df is None or not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
         return _empty_reported_functional_presence_data()
-    if "source_type" not in candidates_df.columns:
+    reported_df = candidates_df.copy()
+    if source_type is not None:
+        if "source_type" not in reported_df.columns:
+            return _empty_reported_functional_presence_data()
+        reported_df = reported_df[reported_df["source_type"].eq(source_type)].copy()
+    if reported_df.empty:
         return _empty_reported_functional_presence_data()
-
-    functional_df = candidates_df[candidates_df["source_type"].eq("functional_use")].copy()
-    if functional_df.empty:
-        return _empty_reported_functional_presence_data()
-    reported_df = functional_df[
-        functional_df.apply(lambda row: _functional_source_bucket(row) == "reported", axis=1)
-    ]
+    if require_reported_flag:
+        reported_df = reported_df[
+            reported_df.apply(
+                lambda row: _functional_source_bucket(row) == "reported", axis=1
+            )
+        ]
     if reported_df.empty:
         return _empty_reported_functional_presence_data()
 
@@ -280,7 +528,7 @@ def extract_reported_functional_use_presence_data(candidates_df, source_label="E
         compound = _clean_text(compound) or "未命名化合物"
         seen = set()
         for _, candidate in compound_df.iterrows():
-            use_value, english_value = _candidate_use_values(candidate, "raw")
+            use_value, english_value = _candidate_use_values(candidate, use_key)
             if not use_value:
                 continue
             key = _normalize_label_key(use_value)
@@ -556,36 +804,128 @@ def generate_top_predicted_functional_use_lollipop_plot(plot_df, title):
     return fig
 
 
-def generate_top_predicted_functional_use_pie_plot(plot_df, title):
-    if plot_df is None or plot_df.empty:
-        raise ValueError("No top predicted functional-use data is available.")
+def _spread_external_labels(items, minimum_gap=0.12, lower=-0.92, upper=0.92):
+    items = sorted(items, key=lambda item: item["desired_y"])
+    previous = lower - minimum_gap
+    for item in items:
+        item["label_y"] = max(item["desired_y"], previous + minimum_gap)
+        previous = item["label_y"]
+    overflow = previous - upper
+    if overflow > 0:
+        for item in items:
+            item["label_y"] -= overflow
+    for index in range(len(items) - 2, -1, -1):
+        allowed = items[index + 1]["label_y"] - minimum_gap
+        items[index]["label_y"] = min(items[index]["label_y"], allowed)
+    return items
 
-    summary = _summarize_top_predicted_functional_use(plot_df)
-    if summary.empty:
-        raise ValueError("No valid top predicted functional-use category is available.")
+
+def generate_compound_classification_pie_plot(
+    plot_df,
+    title,
+    footnote=None,
+    max_categories=None,
+    fixed_categories=None,
+):
+    """Render a total-preserving compound classification donut."""
+    if plot_df is None or plot_df.empty:
+        raise ValueError("No compound classification data is available.")
+
+    data = plot_df.copy()
+    if "compound_key" in data.columns:
+        data["_compound_key"] = data["compound_key"].map(_normalize_label_key)
+    elif "compound" in data.columns:
+        data["_compound_key"] = data["compound"].map(_normalize_label_key)
+    else:
+        data["_compound_key"] = [f"compound-{index + 1}" for index in range(len(data))]
+    data["_display_label"] = data["display_label"].map(
+        lambda value: _ascii_label(value, "Others")
+    )
+    summary = (
+        data.groupby("_display_label", sort=False)["_compound_key"]
+        .nunique()
+        .rename("compound_count")
+        .reset_index()
+        .rename(columns={"_display_label": "display_label"})
+    )
+    if fixed_categories:
+        order = {label: index for index, label in enumerate(fixed_categories)}
+        summary["_order"] = summary["display_label"].map(order).fillna(len(order))
+        summary = summary.sort_values(["_order", "display_label"]).drop(columns="_order")
+    else:
+        summary = summary.sort_values(
+            ["compound_count", "display_label"], ascending=[False, True]
+        )
+    if max_categories is not None and len(summary) > max_categories:
+        kept = summary.head(max_categories - 1).copy()
+        remainder_count = int(
+            summary.iloc[max_categories - 1 :]["compound_count"].sum()
+        )
+        summary = pd.concat(
+            [
+                kept,
+                pd.DataFrame(
+                    [{"display_label": "Others", "compound_count": remainder_count}]
+                ),
+            ],
+            ignore_index=True,
+        )
+        summary = (
+            summary.groupby("display_label", sort=False)["compound_count"]
+            .sum()
+            .reset_index()
+        )
 
     total_count = int(summary["compound_count"].sum())
-    counts = summary["compound_count"].astype(float).to_numpy()
-    color_map = _build_use_color_map(summary["use_key"].tolist())
-    colors = [color_map[value] for value in summary["use_key"]]
+    summary["percent"] = summary["compound_count"] / total_count * 100
+    color_map = _build_use_color_map(summary["display_label"].tolist())
+    colors = [color_map[label] for label in summary["display_label"]]
 
-    fig, ax = plt.subplots(figsize=(8.4, 6.2))
-    fig.subplots_adjust(left=0.05, right=0.72, top=0.86, bottom=0.10)
-
-    wedges, _, autotexts = ax.pie(
-        counts,
+    fig, ax = plt.subplots(figsize=(8.8, 6.4), facecolor="white")
+    fig.subplots_adjust(left=0.06, right=0.72, top=0.86, bottom=0.12)
+    wedges, _ = ax.pie(
+        summary["compound_count"],
         colors=colors,
         startangle=90,
         counterclock=False,
-        autopct=lambda pct: f"{pct:.1f}%" if pct >= 1.0 else "",
-        pctdistance=0.78,
         wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 1.2},
-        textprops={"fontsize": 9, "fontweight": "bold", "color": "#111111"},
     )
-    for autotext in autotexts:
-        autotext.set_fontsize(9)
-        autotext.set_fontweight("bold")
-
+    external = {-1: [], 1: []}
+    for wedge, percent in zip(wedges, summary["percent"]):
+        angle = math.radians((wedge.theta1 + wedge.theta2) / 2)
+        if percent >= PIE_INSIDE_LABEL_MIN_PERCENT:
+            ax.text(
+                0.78 * math.cos(angle),
+                0.78 * math.sin(angle),
+                f"{percent:.1f}%",
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+            )
+        elif percent >= PIE_OUTSIDE_LABEL_MIN_PERCENT:
+            side = 1 if math.cos(angle) >= 0 else -1
+            external[side].append(
+                {"angle": angle, "percent": percent, "desired_y": math.sin(angle)}
+            )
+    for side, items in external.items():
+        for item in _spread_external_labels(items):
+            ax.annotate(
+                f"{item['percent']:.1f}%",
+                xy=(
+                    0.98 * math.cos(item["angle"]),
+                    0.98 * math.sin(item["angle"]),
+                ),
+                xytext=(1.22 * side, item["label_y"]),
+                ha="left" if side > 0 else "right",
+                va="center",
+                fontsize=8.5,
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": "#555555",
+                    "linewidth": 0.8,
+                },
+            )
     ax.text(
         0,
         0,
@@ -594,44 +934,61 @@ def generate_top_predicted_functional_use_pie_plot(plot_df, title):
         va="center",
         fontsize=11,
         fontweight="bold",
-        color="#111111",
     )
     ax.set_title(
-        _ascii_label(title, "Top Predicted Functional Use Distribution"),
+        _ascii_label(title, "Compound Distribution"),
         fontsize=14,
         fontweight="bold",
         pad=18,
     )
     ax.set_aspect("equal")
-
-    legend_labels = [
-        f"{row.display_label} ({int(row.compound_count)}, {row.percent:.1f}%)"
-        for row in summary.itertuples(index=False)
-    ]
-    legend_handles = [
-        Patch(facecolor=color, edgecolor="white", label=label)
-        for color, label in zip(colors, legend_labels)
+    handles = [
+        Patch(
+            facecolor=color,
+            edgecolor="white",
+            label=(
+                f"{row.display_label} "
+                f"({int(row.compound_count)}, {row.percent:.1f}%)"
+            ),
+        )
+        for color, row in zip(colors, summary.itertuples(index=False))
     ]
     fig.legend(
-        handles=legend_handles,
+        handles=handles,
         loc="center right",
-        bbox_to_anchor=(0.98, 0.52),
+        bbox_to_anchor=(0.99, 0.52),
         frameon=False,
-        fontsize=9,
-        title="Functional use",
-        title_fontsize=10,
-        handletextpad=0.6,
+        title="Category",
     )
-    fig.text(
-        0.98,
-        0.02,
-        "Slice size = number of compounds by top predicted functional use.",
-        ha="right",
-        va="bottom",
-        fontsize=8.5,
-        color="#333333",
+    if footnote:
+        fig.text(
+            0.99,
+            0.02,
+            footnote,
+            ha="right",
+            va="bottom",
+            fontsize=8.5,
+            color="#333333",
+        )
+    return apply_figure_font(fig)
+
+
+def generate_reported_functional_use_pie_plot(plot_df, title):
+    return generate_compound_classification_pie_plot(
+        plot_df,
+        title,
+        footnote=REPORTED_OTHERS_NOTE,
+        max_categories=None,
     )
-    return fig
+
+
+def generate_top_predicted_functional_use_pie_plot(plot_df, title):
+    return generate_compound_classification_pie_plot(
+        plot_df,
+        title,
+        footnote="Slice size = number of compounds by top predicted functional use.",
+        max_categories=TOP_PREDICTED_PIE_MAX_CATEGORIES,
+    )
 
 
 def generate_reported_functional_use_presence_plot(plot_df, title):
@@ -984,4 +1341,4 @@ def _clean_text(value):
     except Exception:
         pass
     text = str(value).strip()
-    return "" if text.lower() in {"nan", "none", "<na>"} else text
+    return "" if text.lower() in {"nan", "<na>"} else text
