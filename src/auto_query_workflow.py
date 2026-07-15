@@ -503,11 +503,11 @@ def run_auto_query_workflow(
             "来源属性评估",
             lambda: run_source_origin_batch(
                 query_input,
-                comptox_summary_df=comptox_summary,
-                comptox_candidates_df=comptox_candidates,
-                echa_summary_df=echa_summary,
-                echa_candidates_df=echa_candidates,
-                echa_dossiers_df=echa_dossiers,
+                comptox_summary_df=comptox_summary if config.run_comptox else None,
+                comptox_candidates_df=comptox_candidates if config.run_comptox else None,
+                echa_summary_df=echa_summary if config.run_echa_use else None,
+                echa_candidates_df=echa_candidates if config.run_echa_use else None,
+                echa_dossiers_df=echa_dossiers if config.run_echa_use else None,
                 echa_base=config.echa_base,
                 timeout=int(config.source_origin_timeout),
                 delay_seconds=float(config.source_origin_delay_seconds),
@@ -571,7 +571,7 @@ def _build_module_workbook(result: AutoWorkflowResult, table_names: tuple[str, .
             if name in INTERNAL_TABLE_NAMES:
                 continue
             table = result.tables.get(name)
-            if isinstance(table, pd.DataFrame) and not table.empty:
+            if isinstance(table, pd.DataFrame):
                 table.to_excel(writer, sheet_name=_safe_sheet_name(name), index=False)
     buffer.seek(0)
     return buffer
@@ -613,7 +613,8 @@ def build_auto_workflow_zip(
             table_names = tuple(
                 name
                 for name in table_candidates
-                if isinstance(result.tables.get(name), pd.DataFrame) and not result.tables[name].empty
+                if name not in INTERNAL_TABLE_NAMES
+                and isinstance(result.tables.get(name), pd.DataFrame)
             )
             chart_keys = tuple(
                 key

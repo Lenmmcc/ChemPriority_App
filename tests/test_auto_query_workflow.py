@@ -345,6 +345,89 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertEqual(len(result.tables["Source_Origin_Pie_Data"]), 3)
         self.assertEqual(result.step_status["status"].tolist(), ["完成"] * 6)
 
+    @patch("src.auto_query_workflow.run_source_origin_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_source_origin_only_leaves_upstream_use_inputs_as_none(
+        self,
+        run_identifier,
+        run_source_origin,
+    ):
+        run_identifier.return_value = (_completed_identifier_rows(["Compound A"]), pd.DataFrame())
+        run_source_origin.return_value = (
+            pd.DataFrame({"compound": ["Compound A"]}),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=False,
+                run_source_origin=True,
+                identifier_delay_seconds=0,
+                source_origin_delay_seconds=0,
+            ),
+        )
+
+        kwargs = run_source_origin.call_args.kwargs
+        self.assertIsNone(kwargs["comptox_summary_df"])
+        self.assertIsNone(kwargs["comptox_candidates_df"])
+        self.assertIsNone(kwargs["echa_summary_df"])
+        self.assertIsNone(kwargs["echa_candidates_df"])
+        self.assertIsNone(kwargs["echa_dossiers_df"])
+
+    @patch("src.auto_query_workflow.run_source_origin_batch")
+    @patch("src.auto_query_workflow.run_echa_use_batch")
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_source_origin_reuses_empty_results_from_executed_upstream_queries(
+        self,
+        run_identifier,
+        run_comptox,
+        run_echa_use,
+        run_source_origin,
+    ):
+        run_identifier.return_value = (_completed_identifier_rows(["Compound A"]), pd.DataFrame())
+        run_comptox.return_value = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        run_echa_use.return_value = (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+        run_source_origin.return_value = (
+            pd.DataFrame({"compound": ["Compound A"]}),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=False,
+                run_comptox=True,
+                run_echa_use=True,
+                run_source_origin=True,
+                identifier_delay_seconds=0,
+                use_delay_seconds=0,
+                echa_delay_seconds=0,
+                source_origin_delay_seconds=0,
+            ),
+        )
+
+        kwargs = run_source_origin.call_args.kwargs
+        for name in (
+            "comptox_summary_df",
+            "comptox_candidates_df",
+            "echa_summary_df",
+            "echa_candidates_df",
+            "echa_dossiers_df",
+        ):
+            self.assertIsInstance(kwargs[name], pd.DataFrame)
+            self.assertTrue(kwargs[name].empty)
+
     @patch("src.auto_query_workflow.run_epi_web_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
     def test_identifier_runs_as_dependency_when_epi_is_selected(self, run_identifier, run_epi):
@@ -610,6 +693,38 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertNotIn("CompTox_Candidates", sheets)
         self.assertNotIn("ECHA_Use_Candidates", sheets)
 
+    def test_module_workbooks_keep_empty_public_split_sheets(self):
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [
+                    (
+                        "Functional_Uses_Reported",
+                        pd.DataFrame(columns=["compound", "raw_use"]),
+                    ),
+                    (
+                        "ECHA_Uses_Reported",
+                        pd.DataFrame(columns=["compound", "category"]),
+                    ),
+                ]
+            ),
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        package = build_auto_workflow_zip(result, charts=OrderedDict())
+
+        with zipfile.ZipFile(package) as archive:
+            epa_sheets = pd.ExcelFile(
+                io.BytesIO(archive.read("04_EPA_CompTox/EPA_CompTox_Results.xlsx"))
+            ).sheet_names
+            echa_sheets = pd.ExcelFile(
+                io.BytesIO(archive.read("05_ECHA/ECHA_Results.xlsx"))
+            ).sheet_names
+        self.assertEqual(epa_sheets, ["Functional_Uses_Reported"])
+        self.assertEqual(echa_sheets, ["ECHA_Uses_Reported"])
+
     def test_page_6_previews_charts_and_downloads_zip(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
             page_text = page_file.read()
@@ -729,6 +844,29 @@ def _example_echa_candidates():
                 "evidence_count": 1,
             },
         ]
+    )
+
+
+def _workflow_input_rows(compounds):
+    return pd.DataFrame(
+        {
+            "Name": compounds,
+            "NIST Lib Hit Formula": ["C2H6O"] * len(compounds),
+            "Avg TIC": [100.0] * len(compounds),
+        }
+    )
+
+
+def _completed_identifier_rows(compounds):
+    return pd.DataFrame(
+        {
+            "compound": compounds,
+            "smiles": ["CCO"] * len(compounds),
+            "cas": ["64-17-5"] * len(compounds),
+            "ec": ["200-578-6"] * len(compounds),
+            "dtxsid": ["DTXSID9020584"] * len(compounds),
+            "echa_id": ["100.000.526"] * len(compounds),
+        }
     )
 
 
