@@ -16,6 +16,7 @@ from src.use_rose_plot import (
     figure_to_pdf_bytes,
     figure_to_png_bytes,
     generate_combined_use_rose_plot,
+    generate_compound_classification_pie_plot,
     generate_reported_functional_use_presence_plot,
     generate_reported_functional_use_pie_plot,
     generate_top_predicted_functional_use_lollipop_plot,
@@ -78,6 +79,97 @@ class UseRosePlotTests(unittest.TestCase):
 
         self.assertEqual(result.loc["A", "display_label"], "Industrial use")
         self.assertEqual(result.loc["B", "display_label"], "Others")
+
+    def test_echa_reported_aggregates_distinct_evidence_by_true_category(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "use_en": "Industrial manufacture",
+                    "use_cn": "Industrial category",
+                    "evidence_count": 2,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Industrial processing",
+                    "use_cn": "Industrial category",
+                    "evidence_count": 3,
+                },
+                {
+                    "compound": "A",
+                    "use_en": "Consumer use",
+                    "use_cn": "Consumer category",
+                    "evidence_count": 4,
+                },
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="ECHA reported",
+            source_type=None,
+            use_key="category",
+            require_reported_flag=False,
+        ).iloc[0]
+
+        self.assertEqual(result["display_label"], "Industrial category")
+        self.assertEqual(result["evidence_count"], 5)
+        self.assertEqual(result["classification_reason"], "unique_top_reported_category")
+
+    def test_reported_classification_fails_closed_when_source_type_is_missing(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "raw_use": "Solvent",
+                    "functional_use_source": "reported",
+                    "evidence_count": 3,
+                }
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="EPA FC reported",
+            source_type="functional_use",
+            use_key="raw",
+            require_reported_flag=True,
+        ).iloc[0]
+
+        self.assertEqual(result["display_label"], "Others")
+        self.assertEqual(result["classification_reason"], "no_reported_result")
+
+    def test_literal_none_is_valid_only_as_a_compound_identifier(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["None"]}))
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "None",
+                    "source_type": "functional_use",
+                    "functional_use_source": "reported",
+                    "raw_use": "None",
+                    "evidence_count": 2,
+                }
+            ]
+        )
+
+        result = extract_top_reported_functional_use_data(
+            candidates,
+            universe,
+            source_label="EPA FC reported",
+            source_type="functional_use",
+            use_key="raw",
+            require_reported_flag=True,
+        ).iloc[0]
+
+        self.assertEqual(len(universe), 1)
+        self.assertEqual(universe.loc[0, "compound_key"], "none")
+        self.assertEqual(result["display_label"], "Others")
+        self.assertEqual(result["classification_reason"], "no_reported_result")
 
     def test_predicted_fills_missing_universe_compound_as_others(self):
         universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B"]}))
@@ -173,6 +265,29 @@ class UseRosePlotTests(unittest.TestCase):
                     if text.get_text().strip()
                 )
             )
+        finally:
+            plt.close(figure)
+
+    def test_compound_classification_pie_assigns_duplicate_compound_to_first_category(self):
+        plot_df = pd.DataFrame(
+            [
+                {"compound_key": "compound-a", "display_label": "Alpha"},
+                {"compound_key": "compound-a", "display_label": "Beta"},
+                {"compound_key": "compound-b", "display_label": "Beta"},
+            ]
+        )
+
+        figure = generate_compound_classification_pie_plot(plot_df, "Classification")
+        try:
+            axis_text = {text.get_text() for text in figure.axes[0].texts}
+            legend_labels = {
+                text.get_text()
+                for legend in figure.legends
+                for text in legend.get_texts()
+            }
+
+            self.assertIn("Total compounds\n2", axis_text)
+            self.assertEqual(legend_labels, {"Alpha (1, 50.0%)", "Beta (1, 50.0%)"})
         finally:
             plt.close(figure)
 

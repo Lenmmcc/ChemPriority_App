@@ -93,7 +93,7 @@ def build_compound_universe(input_df):
     rows = []
     seen = set()
     for position, (_, row) in enumerate(input_df.iterrows(), start=1):
-        compound = _first_clean(
+        compound = _first_compound_identifier(
             row.get("compound"),
             row.get("Name"),
             row.get("name"),
@@ -105,7 +105,7 @@ def build_compound_universe(input_df):
         )
         if not compound:
             continue
-        compound_key = _normalize_label_key(compound)
+        compound_key = _normalize_compound_key(compound)
         if not compound_key or compound_key in seen:
             continue
         seen.add(compound_key)
@@ -137,8 +137,11 @@ def extract_top_reported_functional_use_data(
         if isinstance(candidates_df, pd.DataFrame)
         else pd.DataFrame()
     )
-    if source_type is not None and "source_type" in candidates.columns:
-        candidates = candidates[candidates["source_type"].eq(source_type)].copy()
+    if source_type is not None:
+        if "source_type" not in candidates.columns:
+            candidates = pd.DataFrame()
+        else:
+            candidates = candidates[candidates["source_type"].eq(source_type)].copy()
     if require_reported_flag and not candidates.empty:
         candidates = candidates[
             candidates.apply(
@@ -148,7 +151,7 @@ def extract_top_reported_functional_use_data(
 
     groups = {}
     for _, candidate in candidates.iterrows():
-        compound_key = _normalize_label_key(candidate.get("compound"))
+        compound_key = _normalize_compound_key(candidate.get("compound"))
         if compound_key:
             groups.setdefault(compound_key, []).append(candidate)
 
@@ -159,7 +162,8 @@ def extract_top_reported_functional_use_data(
         use_cn_values = {}
         for candidate in groups.get(compound_row["compound_key"], []):
             use_value, english_value = _candidate_use_values(candidate, use_key)
-            category_key = _normalize_label_key(english_value or use_value)
+            category_value = use_value if use_key == "category" else english_value or use_value
+            category_key = _normalize_label_key(category_value)
             if not category_key:
                 continue
             weight = _to_number(candidate.get("evidence_count"))
@@ -167,7 +171,7 @@ def extract_top_reported_functional_use_data(
                 weight = 1.0
             totals[category_key] = totals.get(category_key, 0.0) + float(weight)
             labels[category_key] = _ascii_label(
-                english_value or use_value, "Reported use"
+                category_value, "Reported use"
             )
             use_cn_values[category_key] = _first_clean(
                 candidate.get("use_cn"), use_value
@@ -212,9 +216,9 @@ def extract_source_origin_pie_data(summary_df, compound_universe):
         summary_df.copy() if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()
     )
     summary_by_key = {
-        _normalize_label_key(row.get("compound")): row
+        _normalize_compound_key(row.get("compound")): row
         for _, row in summary.iterrows()
-        if _normalize_label_key(row.get("compound"))
+        if _normalize_compound_key(row.get("compound"))
     }
     rows = []
     for _, compound_row in universe.iterrows():
@@ -449,7 +453,7 @@ def extract_top_predicted_functional_use_data(
         rows.append(
             {
                 "source": source_label,
-                "compound_key": _normalize_label_key(compound),
+                "compound_key": _normalize_compound_key(compound),
                 "compound": compound,
                 "compound_label": _ascii_label(compound, f"Compound {compound_index}"),
                 "use_cn": use_cn,
@@ -833,14 +837,15 @@ def generate_compound_classification_pie_plot(
 
     data = plot_df.copy()
     if "compound_key" in data.columns:
-        data["_compound_key"] = data["compound_key"].map(_normalize_label_key)
+        data["_compound_key"] = data["compound_key"].map(_normalize_compound_key)
     elif "compound" in data.columns:
-        data["_compound_key"] = data["compound"].map(_normalize_label_key)
+        data["_compound_key"] = data["compound"].map(_normalize_compound_key)
     else:
         data["_compound_key"] = [f"compound-{index + 1}" for index in range(len(data))]
     data["_display_label"] = data["display_label"].map(
         lambda value: _ascii_label(value, "Others")
     )
+    data = data.drop_duplicates("_compound_key", keep="first")
     summary = (
         data.groupby("_display_label", sort=False)["_compound_key"]
         .nunique()
@@ -1251,6 +1256,32 @@ def _functional_candidate_match_keys(candidate):
     return keys
 
 
+def _first_compound_identifier(*values):
+    for value in values:
+        cleaned = _clean_compound_identifier(value)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _clean_compound_identifier(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "<na>"} else text
+
+
+def _normalize_compound_key(value):
+    text = _clean_compound_identifier(value).lower()
+    text = re.sub(r"[_\-/]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _first_clean(*values):
     for value in values:
         cleaned = _clean_text(value)
@@ -1341,4 +1372,4 @@ def _clean_text(value):
     except Exception:
         pass
     text = str(value).strip()
-    return "" if text.lower() in {"nan", "<na>"} else text
+    return "" if text.lower() in {"nan", "none", "<na>"} else text
