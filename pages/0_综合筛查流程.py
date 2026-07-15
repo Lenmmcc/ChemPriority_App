@@ -57,10 +57,7 @@ if not hasattr(toxpi_calc, "generate_r_style_toxpi_plot"):
 generate_r_style_toxpi_plot = toxpi_calc.generate_r_style_toxpi_plot
 
 
-STATE_KEYS = (
-    "cp_screening_front",
-    "cp_screening_downstream",
-    "cp_screening_workbook",
+DOWNSTREAM_PLOT_STATE_KEYS = (
     "cp_screening_bar_png",
     "cp_screening_bar_pdf",
     "cp_screening_radial_png",
@@ -68,6 +65,13 @@ STATE_KEYS = (
     "cp_screening_radial_plot_version",
     "cp_screening_robustness_png",
     "cp_screening_robustness_pdf",
+)
+
+STATE_KEYS = (
+    "cp_screening_front",
+    "cp_screening_downstream",
+    "cp_screening_workbook",
+    *DOWNSTREAM_PLOT_STATE_KEYS,
     "cp_screening_settings_signature",
 )
 
@@ -1105,6 +1109,8 @@ with tab_downstream:
                 "effective_candidate_top_n": toxpi_result.effective_candidate_top_n,
                 "effective_display_top_n": toxpi_result.effective_display_top_n,
             }
+            for key in DOWNSTREAM_PLOT_STATE_KEYS:
+                st.session_state.pop(key, None)
             if not toxpi_result.display_rows.empty and toxpi_result.display_rows["toxpi"].notna().any():
                 refresh_toxpi_radial_plot(st.session_state["cp_screening_downstream"], force=True)
                 bar_fig = generate_pbm_toxpi_bar_plot(

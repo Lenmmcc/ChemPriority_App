@@ -587,6 +587,43 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(token, page_text)
 
+    def test_comprehensive_page_clears_downstream_plot_artifacts_before_regeneration(self):
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+        state_keys_token = "DOWNSTREAM_PLOT_STATE_KEYS = ("
+        self.assertIn(state_keys_token, page_text)
+        state_keys_start = page_text.index(state_keys_token)
+        state_keys_end = page_text.index(")", state_keys_start)
+        state_keys_text = page_text[state_keys_start:state_keys_end]
+        for key in (
+            "cp_screening_bar_png",
+            "cp_screening_bar_pdf",
+            "cp_screening_radial_png",
+            "cp_screening_radial_pdf",
+            "cp_screening_radial_plot_version",
+            "cp_screening_robustness_png",
+            "cp_screening_robustness_pdf",
+        ):
+            self.assertIn(key, state_keys_text)
+
+        result_state_index = page_text.index('st.session_state["cp_screening_downstream"] = {')
+        clear_index = page_text.index(
+            "for key in DOWNSTREAM_PLOT_STATE_KEYS:",
+            result_state_index,
+        )
+        display_plot_index = page_text.index(
+            "if not toxpi_result.display_rows.empty",
+            result_state_index,
+        )
+        robustness_plot_index = page_text.index(
+            "if not toxpi_result.robustness_correlations.empty",
+            result_state_index,
+        )
+        self.assertLess(result_state_index, clear_index)
+        self.assertLess(clear_index, display_plot_index)
+        self.assertLess(clear_index, robustness_plot_index)
+        clear_block = page_text[clear_index:display_plot_index]
+        self.assertIn("st.session_state.pop(key, None)", clear_block)
+
     def test_toxpi_robustness_is_reproducible_and_uses_configured_display_top_n(self):
         data = pd.DataFrame(
             {
