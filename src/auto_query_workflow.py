@@ -7,7 +7,7 @@ import io
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -160,6 +160,55 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
     ),
 )
 
+AUTO_WORKFLOW_CHECKPOINT_EXPORTS = {
+    R_DF_STEP_LABEL: (
+        "local_screening",
+        "Local_Screening_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[0][2],
+    ),
+    "标识符补全": (
+        "identifier_completion",
+        "Identifier_Completion_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[1][2],
+    ),
+    "EPI Suite 环境归趋": (
+        "epi_suite",
+        "EPI_Suite_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[2][2],
+    ),
+    "EPA CompTox 用途": (
+        "comptox_use",
+        "EPA_CompTox_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[3][2],
+    ),
+    "ECHA REACH 用途": (
+        "echa_reach_use",
+        "ECHA_REACH_Use_Results.xlsx",
+        (
+            "ECHA_Use_Summary",
+            "ECHA_Uses_Reported",
+            "ECHA_Reported_Pie_Data",
+            "ECHA_Use_Dossiers",
+            "ECHA_Use_Errors",
+        ),
+    ),
+    "ECHA GHS/C&L 危害": (
+        "echa_ghs_cl",
+        "ECHA_GHS_CL_Results.xlsx",
+        ("ECHA_GHS_Summary", "ECHA_GHS_Classifications", "ECHA_GHS_Errors"),
+    ),
+    "来源属性评估": (
+        "source_origin",
+        "Source_Origin_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[5][2],
+    ),
+    "Pov-LRTP / PBM / ToxPi": (
+        "pov_lrtp_pbm_toxpi",
+        "Pov_LRTP_PBM_ToxPi_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[6][2],
+    ),
+}
+
 PUBLIC_TABLE_NAMES = frozenset(
     name
     for _, _, table_names, _ in AUTO_WORKFLOW_EXPORT_MODULES
@@ -240,6 +289,14 @@ class AutoWorkflowResult:
     step_status: pd.DataFrame
     warnings: pd.DataFrame
     charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
+
+
+@dataclass(frozen=True)
+class AutoWorkflowModuleWorkbook:
+    step: str
+    slug: str
+    file_name: str
+    data: bytes
 
 
 @dataclass(frozen=True)
@@ -754,6 +811,45 @@ def _build_module_workbook(result: AutoWorkflowResult, table_names: tuple[str, .
             table = result.tables.get(name)
             if isinstance(table, pd.DataFrame):
                 table.to_excel(writer, sheet_name=_safe_sheet_name(name), index=False)
+    buffer.seek(0)
+    return buffer
+
+
+def build_auto_workflow_module_workbook(
+    result: AutoWorkflowResult,
+    step: str,
+) -> AutoWorkflowModuleWorkbook | None:
+    export = AUTO_WORKFLOW_CHECKPOINT_EXPORTS.get(step)
+    if export is None:
+        return None
+    slug, file_name, candidates = export
+    table_names = tuple(
+        name
+        for name in candidates
+        if name in PUBLIC_TABLE_NAMES and isinstance(result.tables.get(name), pd.DataFrame)
+    )
+    if not table_names:
+        return None
+    return AutoWorkflowModuleWorkbook(
+        step=step,
+        slug=slug,
+        file_name=file_name,
+        data=_build_module_workbook(result, table_names).getvalue(),
+    )
+
+
+def build_auto_workflow_partial_zip(
+    result: AutoWorkflowResult,
+    module_workbooks: Mapping[str, AutoWorkflowModuleWorkbook],
+) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "Partial_Auto_Query_Workflow_Results.xlsx",
+            build_auto_workflow_workbook(result).getvalue(),
+        )
+        for module in module_workbooks.values():
+            archive.writestr(f"modules/{module.file_name}", module.data)
     buffer.seek(0)
     return buffer
 

@@ -22,6 +22,8 @@ from src.auto_query_workflow import (
     R_DF_STEP_LABEL,
     _load_local_screening_charts,
     build_auto_workflow_charts,
+    build_auto_workflow_module_workbook,
+    build_auto_workflow_partial_zip,
     build_auto_workflow_workbook,
     build_auto_workflow_zip,
     detect_default_mapping,
@@ -924,6 +926,59 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertTrue(puc_chart.png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(puc_chart.pdf.startswith(b"%PDF"))
         self.assertNotIn("EPA_Product_Use_Category_Rose_Plot", charts)
+
+    def test_checkpoint_module_workbooks_split_echa_use_and_ghs(self):
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [
+                    ("ECHA_Use_Summary", pd.DataFrame({"compound": ["Compound A"]})),
+                    ("ECHA_GHS_Summary", pd.DataFrame({"compound": ["Compound A"]})),
+                ]
+            ),
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        use_book = build_auto_workflow_module_workbook(result, "ECHA REACH 用途")
+        ghs_book = build_auto_workflow_module_workbook(result, "ECHA GHS/C&L 危害")
+
+        self.assertEqual(use_book.file_name, "ECHA_REACH_Use_Results.xlsx")
+        self.assertEqual(ghs_book.file_name, "ECHA_GHS_CL_Results.xlsx")
+        self.assertEqual(
+            pd.ExcelFile(io.BytesIO(use_book.data)).sheet_names,
+            ["ECHA_Use_Summary"],
+        )
+        self.assertEqual(
+            pd.ExcelFile(io.BytesIO(ghs_book.data)).sheet_names,
+            ["ECHA_GHS_Summary"],
+        )
+
+    def test_partial_zip_contains_only_named_partial_log_and_completed_module_books(self):
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [("Identifier_Completion", pd.DataFrame({"compound": ["Compound A"]}))]
+            ),
+            step_status=pd.DataFrame(
+                {"step": ["标识符补全"], "status": ["完成"], "rows": [1], "message": [""]}
+            ),
+            warnings=pd.DataFrame(columns=["stage", "message"]),
+        )
+        module = build_auto_workflow_module_workbook(result, "标识符补全")
+
+        package = build_auto_workflow_partial_zip(result, {module.slug: module})
+
+        with zipfile.ZipFile(package) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {
+                    "Partial_Auto_Query_Workflow_Results.xlsx",
+                    "modules/Identifier_Completion_Results.xlsx",
+                },
+            )
 
     def test_auto_workflow_zip_groups_results_by_module(self):
         local_chart = AutoWorkflowChart(
