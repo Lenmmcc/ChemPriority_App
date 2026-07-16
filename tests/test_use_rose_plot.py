@@ -7,11 +7,13 @@ import pandas as pd
 
 from src.echa_use import classify_use_cn
 from src.use_rose_plot import (
+    PRODUCT_USE_CATEGORY_OTHERS_NOTE,
     build_compound_universe,
     build_epa_echa_combined_rose_data,
     extract_source_origin_pie_data,
     extract_reported_functional_use_presence_data,
     extract_candidate_use_plot_data,
+    extract_top_product_use_category_data,
     extract_top_reported_functional_use_data,
     extract_top_predicted_functional_use_data,
     figure_to_pdf_bytes,
@@ -28,6 +30,76 @@ from src.use_rose_plot import (
 
 
 class UseRosePlotTests(unittest.TestCase):
+    def test_puc_classification_uses_unique_top_tie_missing_and_fallback_weight(self):
+        universe = build_compound_universe(
+            pd.DataFrame({"compound": ["A", "B", "C", "D", "E", "A"]})
+        )
+        candidates = pd.DataFrame(
+            [
+                {"compound": "A", "source_type": "product_category", "raw_use": "Food contact", "evidence_count": 2},
+                {"compound": "A", "source_type": "product_category", "raw_use": "Food contact", "evidence_count": 1},
+                {"compound": "A", "source_type": "product_category", "raw_use": "Consumer products", "evidence_count": 2},
+                {"compound": "B", "source_type": "product_category", "raw_use": "Industrial", "evidence_count": 2},
+                {"compound": "B", "source_type": "product_category", "raw_use": "Commercial", "evidence_count": 2},
+                {"compound": "D", "source_type": "product_category", "raw_use": "Household", "evidence_count": None},
+                {"compound": "E", "source_type": "product_category", "raw_use": "Manufacturing", "evidence_count": -3},
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Solvent", "evidence_count": 99},
+            ]
+        )
+
+        result = extract_top_product_use_category_data(candidates, universe).set_index("compound")
+
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result.loc["A", "display_label"], "Food contact")
+        self.assertEqual(result.loc["A", "evidence_count"], 3)
+        self.assertEqual(result.loc["A", "classification_reason"], "unique_top_product_use_category")
+        self.assertEqual(result.loc["B", "display_label"], "Others")
+        self.assertEqual(result.loc["B", "classification_reason"], "tie_for_top_product_use_category")
+        self.assertEqual(result.loc["C", "classification_reason"], "no_product_use_category_result")
+        self.assertEqual(result.loc["D", "evidence_count"], 1)
+        self.assertEqual(result.loc["E", "evidence_count"], 1)
+
+    def test_puc_classification_returns_all_others_for_empty_candidates(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B"]}))
+
+        result = extract_top_product_use_category_data(pd.DataFrame(), universe)
+
+        self.assertEqual(result["display_label"].tolist(), ["Others", "Others"])
+        self.assertEqual(
+            result["classification_reason"].tolist(),
+            ["no_product_use_category_result", "no_product_use_category_result"],
+        )
+
+    def test_puc_distribution_donut_preserves_compound_total(self):
+        universe = build_compound_universe(pd.DataFrame({"compound": ["A", "B", "C"]}))
+        plot_df = extract_top_product_use_category_data(
+            pd.DataFrame(
+                [
+                    {"compound": "A", "source_type": "product_category", "raw_use": "Industrial", "evidence_count": 2},
+                    {"compound": "B", "source_type": "product_category", "raw_use": "Consumer", "evidence_count": 1},
+                ]
+            ),
+            universe,
+        )
+        figure = generate_compound_classification_pie_plot(
+            plot_df,
+            "EPA CompTox Product-Use Category Distribution",
+            footnote=PRODUCT_USE_CATEGORY_OTHERS_NOTE,
+        )
+        try:
+            self.assertIn("Total compounds\n3", {text.get_text() for text in figure.axes[0].texts})
+            legend_labels = {
+                text.get_text()
+                for legend in figure.legends
+                for text in legend.get_texts()
+            }
+            self.assertEqual(
+                legend_labels,
+                {"Consumer (1, 33.3%)", "Industrial (1, 33.3%)", "Others (1, 33.3%)"},
+            )
+        finally:
+            plt.close(figure)
+
     def test_reported_classification_uses_unique_top_tie_and_missing(self):
         universe = build_compound_universe(
             pd.DataFrame({"compound": ["A", "B", "C", "A"]})

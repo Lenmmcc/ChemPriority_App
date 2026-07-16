@@ -83,6 +83,11 @@ REPORTED_OTHERS_NOTE = (
     "Others includes compounds with no reported result or with a tie for the "
     "most frequently reported category."
 )
+PRODUCT_USE_CATEGORY_OTHERS_NOTE = (
+    "Slice size = number of compounds by unique top product-use category. "
+    "Others includes compounds with no product-use category result or with a tie "
+    "for the highest-evidence category."
+)
 PIE_INSIDE_LABEL_MIN_PERCENT = 5.0
 PIE_OUTSIDE_LABEL_MIN_PERCENT = 1.0
 ECHA_CATEGORY_ENGLISH_LABELS = {
@@ -212,6 +217,32 @@ def extract_top_reported_functional_use_data(
             }
         )
     return pd.DataFrame(rows, columns=COMPOUND_CLASSIFICATION_COLUMNS)
+
+
+def extract_top_product_use_category_data(
+    candidates_df,
+    compound_universe,
+    source_label="EPA PUC",
+):
+    """Classify every universe compound by its unique top product-use category."""
+    result = extract_top_reported_functional_use_data(
+        candidates_df,
+        compound_universe,
+        source_label=source_label,
+        source_type="product_category",
+        use_key="raw",
+        require_reported_flag=False,
+    )
+    if result.empty:
+        return result
+    reason_map = {
+        "unique_top_reported_category": "unique_top_product_use_category",
+        "tie_for_top_reported_category": "tie_for_top_product_use_category",
+        "no_reported_result": "no_product_use_category_result",
+    }
+    result = result.copy()
+    result["classification_reason"] = result["classification_reason"].replace(reason_map)
+    return result
 
 
 def extract_source_origin_pie_data(summary_df, compound_universe):
