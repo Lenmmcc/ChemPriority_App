@@ -13,6 +13,7 @@ import pandas as pd
 import src.auto_query_workflow as auto_query_workflow
 
 from src.auto_query_workflow import (
+    AutoWorkflowCheckpointContext,
     AutoWorkflowConfig,
     AutoWorkflowChart,
     AutoWorkflowMapping,
@@ -589,6 +590,86 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             table = result.tables[table_name]
             self.assertEqual(len(table), 3)
             self.assertEqual(table["compound_key"].nunique(), 3)
+
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_workflow_emits_one_checkpoint_per_terminal_step_and_one_final_checkpoint(
+        self,
+        run_identifier,
+        run_comptox,
+    ):
+        run_identifier.return_value = (
+            pd.DataFrame(
+                {
+                    "compound": ["Compound A"],
+                    "smiles": [""],
+                    "cas": [""],
+                    "ec": [""],
+                    "dtxsid": [""],
+                    "echa_id": [""],
+                }
+            ),
+            pd.DataFrame(),
+        )
+        run_comptox.side_effect = RuntimeError("EPA unavailable")
+        checkpoints = []
+        context = AutoWorkflowCheckpointContext(
+            run_id="run-1",
+            input_signature="input-sha",
+            settings_signature="settings-sha",
+            selected_steps=("标识符补全", "EPI Suite 环境归趋", "EPA CompTox 用途"),
+        )
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                run_comptox=True,
+                identifier_delay_seconds=0,
+                use_delay_seconds=0,
+            ),
+            checkpoint_context=context,
+            checkpoint_callback=checkpoints.append,
+        )
+
+        self.assertEqual(
+            [checkpoint.current_step for checkpoint in checkpoints],
+            ["标识符补全", "EPI Suite 环境归趋", "EPA CompTox 用途", None],
+        )
+        self.assertEqual(checkpoints[-1].status, "completed")
+        self.assertEqual(checkpoints[-1].finished_steps, context.selected_steps)
+        status_by_step = result.step_status.set_index("step")["status"].to_dict()
+        self.assertEqual(status_by_step["EPI Suite 环境归趋"], "跳过")
+        self.assertEqual(status_by_step["EPA CompTox 用途"], "失败")
+
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_checkpoint_callback_failure_adds_warning_without_stopping_workflow(
+        self,
+        run_identifier,
+    ):
+        run_identifier.return_value = (_completed_identifier_rows(["Compound A"]), pd.DataFrame())
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                identifier_delay_seconds=0,
+            ),
+            checkpoint_context=AutoWorkflowCheckpointContext(
+                run_id="run-2",
+                input_signature="input-sha",
+                settings_signature="settings-sha",
+                selected_steps=("标识符补全",),
+            ),
+            checkpoint_callback=lambda checkpoint: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        self.assertEqual(result.step_status.iloc[0]["status"], "完成")
+        self.assertTrue(result.warnings["stage"].eq("Checkpoint").any())
+        self.assertTrue(result.warnings["message"].str.contains("disk full").any())
 
     @patch("src.auto_query_workflow.run_comptox_use_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
