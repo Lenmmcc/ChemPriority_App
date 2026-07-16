@@ -30,6 +30,7 @@ from src.cp_screening_workflow import PBMToxPiConfig
 from src.mol_structure_parser import prepare_structure_dataframe
 from src.use_rose_plot import (
     build_compound_universe,
+    extract_top_product_use_category_data,
     extract_source_origin_pie_data,
     extract_top_predicted_functional_use_data,
     extract_top_reported_functional_use_data,
@@ -438,6 +439,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "Product_Use_Categories",
             "Functional_Uses_Predicted",
             "Functional_Uses_Reported",
+            "EPA_PUC_Pie_Data",
             "EPA_Predicted_Pie_Data",
             "EPA_Reported_Pie_Data",
             "ECHA_Uses_Reported",
@@ -445,6 +447,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "Source_Origin_Pie_Data",
         ):
             self.assertIn(table_name, result.tables)
+        self.assertEqual(len(result.tables["EPA_PUC_Pie_Data"]), 3)
         self.assertEqual(len(result.tables["EPA_Reported_Pie_Data"]), 3)
         self.assertEqual(len(result.tables["ECHA_Reported_Pie_Data"]), 3)
         self.assertEqual(len(result.tables["Source_Origin_Pie_Data"]), 3)
@@ -577,6 +580,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         for batch in (run_comptox, run_echa_use, run_source_origin):
             self.assertEqual(batch.call_args.args[0]["compound"].tolist(), compounds)
         for table_name in (
+            "EPA_PUC_Pie_Data",
             "EPA_Predicted_Pie_Data",
             "EPA_Reported_Pie_Data",
             "ECHA_Reported_Pie_Data",
@@ -615,7 +619,11 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertEqual(query_input["compound"].tolist(), compounds)
         self.assertEqual(query_input.loc[1, "smiles"], "CCO")
         self.assertEqual(query_input.loc[[0, 2], "smiles"].tolist(), ["", ""])
-        for table_name in ("EPA_Predicted_Pie_Data", "EPA_Reported_Pie_Data"):
+        for table_name in (
+            "EPA_PUC_Pie_Data",
+            "EPA_Predicted_Pie_Data",
+            "EPA_Reported_Pie_Data",
+        ):
             table = result.tables[table_name]
             self.assertEqual(len(table), 3)
             self.assertEqual(table["compound_key"].nunique(), 3)
@@ -656,6 +664,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "Product_Use_Categories",
             "Functional_Uses_Predicted",
             "Functional_Uses_Reported",
+            "EPA_PUC_Pie_Data",
             "EPA_Predicted_Pie_Data",
             "EPA_Reported_Pie_Data",
             "ECHA_Uses_Reported",
@@ -664,6 +673,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(table_name, result.tables)
         for table_name, missing_label in (
+            ("EPA_PUC_Pie_Data", "Others"),
             ("EPA_Predicted_Pie_Data", "Others"),
             ("EPA_Reported_Pie_Data", "Others"),
             ("ECHA_Uses_Reported", "Others"),
@@ -686,6 +696,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             ),
         )
         self.assertIn("Source_Origin_Pie_Data", source_only.tables)
+        self.assertNotIn("EPA_PUC_Pie_Data", source_only.tables)
         self.assertNotIn("EPA_Predicted_Pie_Data", source_only.tables)
         self.assertNotIn("ECHA_Reported_Pie_Data", source_only.tables)
 
@@ -813,7 +824,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         charts = build_auto_workflow_charts(result)
 
         expected = {
-            "EPA_Product_Use_Category_Rose_Plot",
+            "EPA_Product_Use_Category_Distribution",
             "EPA_Top_Predicted_Functional_Use",
             "EPA_Reported_Functional_Use_Distribution",
             "EPA_Reported_Functional_Use_Evidence",
@@ -827,6 +838,11 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertEqual(top_chart.title, "EPA CompTox Top Predicted Functional Use Distribution")
         self.assertTrue(top_chart.png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(top_chart.pdf.startswith(b"%PDF"))
+        puc_chart = charts["EPA_Product_Use_Category_Distribution"]
+        self.assertEqual(puc_chart.title, "EPA CompTox Product-Use Category Distribution")
+        self.assertTrue(puc_chart.png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(puc_chart.pdf.startswith(b"%PDF"))
+        self.assertNotIn("EPA_Product_Use_Category_Rose_Plot", charts)
 
     def test_auto_workflow_zip_groups_results_by_module(self):
         local_chart = AutoWorkflowChart(
@@ -867,8 +883,8 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 "01_Local_Screening/figures/Chemical_Type_Distribution.pdf",
                 "02_Identifier_Completion/Identifier_Completion_Results.xlsx",
                 "04_EPA_CompTox/EPA_CompTox_Results.xlsx",
-                "04_EPA_CompTox/figures/EPA_Product_Use_Category_Rose_Plot.png",
-                "04_EPA_CompTox/figures/EPA_Product_Use_Category_Rose_Plot.pdf",
+                "04_EPA_CompTox/figures/EPA_Product_Use_Category_Distribution.png",
+                "04_EPA_CompTox/figures/EPA_Product_Use_Category_Distribution.pdf",
                 "04_EPA_CompTox/figures/EPA_Top_Predicted_Functional_Use.png",
                 "04_EPA_CompTox/figures/EPA_Top_Predicted_Functional_Use.pdf",
                 "04_EPA_CompTox/figures/EPA_Reported_Functional_Use_Distribution.png",
@@ -922,6 +938,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                     "Product_Use_Categories",
                     "Functional_Uses_Predicted",
                     "Functional_Uses_Reported",
+                    "EPA_PUC_Pie_Data",
                     "EPA_Predicted_Pie_Data",
                     "EPA_Reported_Pie_Data",
                 ],
@@ -986,6 +1003,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                         "Product_Use_Categories",
                         "Functional_Uses_Predicted",
                         "Functional_Uses_Reported",
+                        "EPA_PUC_Pie_Data",
                         "EPA_Predicted_Pie_Data",
                         "EPA_Reported_Pie_Data",
                         "CompTox_Errors",
@@ -1075,7 +1093,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "Local_Chemical_Type_Distribution",
             "Local_DBE_Bubble_Plot",
             "Local_Van_Krevelen_Plot",
-            "EPA_Product_Use_Category_Rose_Plot",
+            "EPA_Product_Use_Category_Distribution",
             "EPA_Top_Predicted_Functional_Use",
             "EPA_Reported_Functional_Use_Distribution",
             "EPA_Reported_Functional_Use_Evidence",
@@ -1174,6 +1192,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn('"来源属性"', page_text)
         self.assertIn('"Pov-LRTP / PBM / ToxPi"', page_text)
         self.assertIn('"Product_Use_Categories"', page_text)
+        self.assertIn('"EPA_PUC_Pie_Data"', page_text)
         self.assertIn('"ECHA_Uses_Reported"', page_text)
         self.assertIn('"Source_Origin_Pie_Data"', page_text)
         self.assertNotIn('"CompTox_Candidates"', page_text)
@@ -1404,6 +1423,10 @@ def _example_pie_tables():
     )
     return OrderedDict(
         [
+            (
+                "EPA_PUC_Pie_Data",
+                extract_top_product_use_category_data(comptox_candidates, universe),
+            ),
             (
                 "EPA_Predicted_Pie_Data",
                 extract_top_predicted_functional_use_data(

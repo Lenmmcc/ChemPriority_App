@@ -38,10 +38,12 @@ from src.r_screening_replica.schema import ScreeningAxisRanges, ScreeningConfig
 from src.source_origin import run_source_origin_batch
 from src.toxpi_calc import generate_r_style_toxpi_plot
 from src.use_rose_plot import (
+    PRODUCT_USE_CATEGORY_OTHERS_NOTE,
     build_compound_universe,
     extract_candidate_use_plot_data,
     extract_reported_functional_use_presence_data,
     extract_source_origin_pie_data,
+    extract_top_product_use_category_data,
     extract_top_predicted_functional_use_data,
     extract_top_reported_functional_use_data,
     figure_to_pdf_bytes,
@@ -97,12 +99,13 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
             "Product_Use_Categories",
             "Functional_Uses_Predicted",
             "Functional_Uses_Reported",
+            "EPA_PUC_Pie_Data",
             "EPA_Predicted_Pie_Data",
             "EPA_Reported_Pie_Data",
             "CompTox_Errors",
         ),
         (
-            "EPA_Product_Use_Category_Rose_Plot",
+            "EPA_Product_Use_Category_Distribution",
             "EPA_Top_Predicted_Functional_Use",
             "EPA_Reported_Functional_Use_Distribution",
             "EPA_Reported_Functional_Use_Evidence",
@@ -486,6 +489,10 @@ def run_auto_query_workflow(
                 comptox_candidates,
                 functional_source="reported",
             )
+            tables["EPA_PUC_Pie_Data"] = extract_top_product_use_category_data(
+                comptox_candidates,
+                compound_universe,
+            )
             tables["EPA_Predicted_Pie_Data"] = extract_top_predicted_functional_use_data(
                 comptox_candidates,
                 compound_universe=compound_universe,
@@ -510,6 +517,10 @@ def run_auto_query_workflow(
             tables["Functional_Uses_Reported"] = build_functional_use_table(
                 comptox_candidates,
                 functional_source="reported",
+            )
+            tables["EPA_PUC_Pie_Data"] = extract_top_product_use_category_data(
+                comptox_candidates,
+                compound_universe,
             )
             tables["EPA_Predicted_Pie_Data"] = extract_top_predicted_functional_use_data(
                 comptox_candidates,
@@ -766,25 +777,26 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
     chart_sources = []
     comptox_candidates = result.tables.get("CompTox_Candidates")
     if isinstance(comptox_candidates, pd.DataFrame) and not comptox_candidates.empty:
-        chart_sources.extend(
-            [
-                {
-                    "chart_type": "rose",
-                    "source_label": "EPA PUC",
-                    "candidates_df": comptox_candidates,
-                    "source_type": "product_category",
-                    "use_key": "raw",
-                    "title": "EPA CompTox Product-Use Category Rose Plot",
-                    "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
-                },
-                {
-                    "chart_type": "reported_presence",
-                    "source_label": "EPA FC reported",
-                    "candidates_df": comptox_candidates,
-                    "title": "EPA CompTox Reported Functional Use Evidence",
-                    "file_prefix": "EPA_Reported_Functional_Use_Evidence",
-                },
-            ]
+        chart_sources.append(
+            {
+                "chart_type": "reported_presence",
+                "source_label": "EPA FC reported",
+                "candidates_df": comptox_candidates,
+                "title": "EPA CompTox Reported Functional Use Evidence",
+                "file_prefix": "EPA_Reported_Functional_Use_Evidence",
+            }
+        )
+
+    puc_pie = result.tables.get("EPA_PUC_Pie_Data")
+    if isinstance(puc_pie, pd.DataFrame) and not puc_pie.empty:
+        chart_sources.append(
+            {
+                "chart_type": "classification_pie",
+                "table_df": puc_pie,
+                "title": "EPA CompTox Product-Use Category Distribution",
+                "file_prefix": "EPA_Product_Use_Category_Distribution",
+                "footnote": PRODUCT_USE_CATEGORY_OTHERS_NOTE,
+            }
         )
 
     predicted_pie = result.tables.get("EPA_Predicted_Pie_Data")

@@ -119,6 +119,7 @@ def _result_dashboard_groups(result, charts):
             [
                 "CompTox_Summary",
                 "Product_Use_Categories",
+                "EPA_PUC_Pie_Data",
                 "Functional_Uses_Predicted",
                 "Functional_Uses_Reported",
                 "EPA_Predicted_Pie_Data",
