@@ -956,6 +956,16 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertNotIn("generate_combined_use_rose_plot", page_text)
         self.assertNotIn("build_epa_echa_combined_rose_data", page_text)
 
+    def test_fourth_page_uses_single_puc_distribution_instead_of_rose_plot(self):
+        page_text = Path("pages/4_化合物用途查询.py").read_text(encoding="utf-8")
+
+        self.assertIn("extract_top_product_use_category_data", page_text)
+        self.assertIn("EPA CompTox Product-Use Category Distribution", page_text)
+        self.assertIn("EPA_Product_Use_Category_Distribution", page_text)
+        self.assertIn("PRODUCT_USE_CATEGORY_OTHERS_NOTE", page_text)
+        self.assertNotIn("EPA CompTox Product-Use Category Rose Plot", page_text)
+        self.assertNotIn("EPA_Product_Use_Category_Rose_Plot", page_text)
+
     def test_comprehensive_screening_page_front_half_figures_are_rendered(self):
         page_path = Path("pages/0_综合筛查流程.py")
         page_text = page_path.read_text(encoding="utf-8")

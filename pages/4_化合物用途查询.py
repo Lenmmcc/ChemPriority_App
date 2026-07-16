@@ -73,10 +73,12 @@ from src.mol_structure_parser import (  # noqa: E402
     summarize_structure_preparation,
 )
 from src.use_rose_plot import (  # noqa: E402
+    PRODUCT_USE_CATEGORY_OTHERS_NOTE,
     build_compound_universe,
     extract_reported_functional_use_presence_data,
     extract_candidate_use_plot_data,
     extract_source_origin_pie_data,
+    extract_top_product_use_category_data,
     extract_top_predicted_functional_use_data,
     extract_top_reported_functional_use_data,
     figure_to_pdf_bytes,
@@ -1054,6 +1056,10 @@ with tab_rose:
     source_origin_summary_df = st.session_state.get("source_origin_summary")
 
     compound_universe = build_compound_universe(query_input_df)
+    epa_puc_pie_df = extract_top_product_use_category_data(
+        comptox_candidates_df,
+        compound_universe,
+    )
     epa_predicted_pie_df = extract_top_predicted_functional_use_data(
         comptox_candidates_df,
         source_label="EPA FC",
@@ -1081,15 +1087,13 @@ with tab_rose:
     )
 
     chart_sources = {}
-    if isinstance(comptox_candidates_df, pd.DataFrame) and not comptox_candidates_df.empty:
-        chart_sources["EPA CompTox 产品场景"] = {
-            "chart_type": "rose",
-            "source_label": "EPA PUC",
-            "candidates_df": comptox_candidates_df,
-            "source_type": "product_category",
-            "use_key": "raw",
-            "title": "EPA CompTox Product-Use Category Rose Plot",
-            "file_prefix": "EPA_Product_Use_Category_Rose_Plot",
+    if not epa_puc_pie_df.empty:
+        chart_sources["EPA CompTox 产品用途类别分布"] = {
+            "chart_type": "classification_pie",
+            "table_df": epa_puc_pie_df,
+            "title": "EPA CompTox Product-Use Category Distribution",
+            "file_prefix": "EPA_Product_Use_Category_Distribution",
+            "footnote": PRODUCT_USE_CATEGORY_OTHERS_NOTE,
         }
     if not epa_predicted_pie_df.empty:
         chart_sources["EPA CompTox 最高预测功能用途"] = {
