@@ -197,6 +197,18 @@ class AutoQueryCheckpointTests(unittest.TestCase):
             with self.assertRaises(CheckpointStorageError):
                 load_checkpoint(token, root=root, now=now)
 
+    def test_uncommitted_temporary_artifacts_are_not_loadable(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            token = generate_run_token()
+            digest = __import__("hashlib").sha256(token.encode("ascii")).hexdigest()
+            run_dir = root / digest
+            (run_dir / "tables").mkdir(parents=True)
+            (run_dir / "tables" / ".partial.tmp").write_bytes(b"partial")
+
+            with self.assertRaises(CheckpointStorageError):
+                load_checkpoint(token, root=root)
+
     def test_ttl_boundary_and_targeted_delete(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

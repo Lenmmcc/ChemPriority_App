@@ -1333,6 +1333,22 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(token, page_text)
 
+    def test_page_6_keeps_partial_artifacts_when_full_zip_build_fails(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        run_block = page_text.split("if start_run:", 1)[1]
+
+        self.assertLess(
+            run_block.index("checkpoint_callback=handle_checkpoint"),
+            run_block.index("build_auto_workflow_zip"),
+        )
+        self.assertIn("failed_checkpoint = replace(", run_block)
+        self.assertIn("handle_checkpoint(failed_checkpoint)", run_block)
+        self.assertIn("partial=True", page_text)
+
+    def test_requirements_support_non_rerunning_download_buttons(self):
+        requirements = Path("requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("streamlit>=1.43,<2", requirements)
+
     def test_page_6_renders_recovered_results_before_stopping_for_missing_upload(self):
         page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
         no_upload_block = page_text.split("if not active_uploads:", 1)[1].split(
