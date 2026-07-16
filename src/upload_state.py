@@ -1,6 +1,7 @@
 """Small helpers for keeping Streamlit uploads in session state."""
 
 import hashlib
+import json
 from collections.abc import Mapping
 
 
@@ -51,3 +52,26 @@ def clear_uploads(state, keys):
     """Remove named input or dependent-result state keys."""
     for key in keys:
         state.pop(key, None)
+
+
+def settings_signature(settings):
+    """Build a stable signature from JSON-compatible result settings."""
+    payload = json.dumps(
+        settings,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def invalidate_results_on_settings_change(state, signature_key, settings, result_keys):
+    """Clear dependent results when an existing settings signature changes."""
+    signature = settings_signature(settings)
+    previous = state.get(signature_key)
+    changed = previous is not None and previous != signature
+    if changed:
+        clear_uploads(state, result_keys)
+    state[signature_key] = signature
+    return changed

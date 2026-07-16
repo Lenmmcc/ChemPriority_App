@@ -9,7 +9,6 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -27,8 +26,7 @@ from src.cp_screening_workflow import (  # noqa: E402
     build_pbm_toxpi_input,
     build_screening_workbook,
     calculate_pbm_toxpi,
-    figure_to_pdf_bytes,
-    figure_to_png_bytes,
+    figure_to_png_pdf_bytes,
     generate_pbm_toxpi_bar_plot,
     generate_pbm_toxpi_robustness_plot,
 )
@@ -740,10 +738,10 @@ def refresh_toxpi_radial_plot(downstream_state, force=False):
         toxic_cols=["peak_area", "pbm", "df"],
         label_wrap_width=20,
     )
-    st.session_state["cp_screening_radial_png"] = figure_to_png_bytes(radial_fig)
-    st.session_state["cp_screening_radial_pdf"] = figure_to_pdf_bytes(radial_fig)
+    radial_png, radial_pdf = figure_to_png_pdf_bytes(radial_fig)
+    st.session_state["cp_screening_radial_png"] = radial_png
+    st.session_state["cp_screening_radial_pdf"] = radial_pdf
     st.session_state["cp_screening_radial_plot_version"] = TOXPI_RADIAL_PLOT_VERSION
-    plt.close(radial_fig)
 
 
 st.set_page_config(
@@ -1117,14 +1115,14 @@ with tab_downstream:
                     toxpi_result.display_rows,
                     top_n=len(toxpi_result.display_rows),
                 )
-                st.session_state["cp_screening_bar_png"] = figure_to_png_bytes(bar_fig)
-                st.session_state["cp_screening_bar_pdf"] = figure_to_pdf_bytes(bar_fig)
-                plt.close(bar_fig)
+                bar_png, bar_pdf = figure_to_png_pdf_bytes(bar_fig)
+                st.session_state["cp_screening_bar_png"] = bar_png
+                st.session_state["cp_screening_bar_pdf"] = bar_pdf
             if not toxpi_result.robustness_correlations.empty:
                 robustness_fig = generate_pbm_toxpi_robustness_plot(toxpi_result)
-                st.session_state["cp_screening_robustness_png"] = figure_to_png_bytes(robustness_fig)
-                st.session_state["cp_screening_robustness_pdf"] = figure_to_pdf_bytes(robustness_fig)
-                plt.close(robustness_fig)
+                robustness_png, robustness_pdf = figure_to_png_pdf_bytes(robustness_fig)
+                st.session_state["cp_screening_robustness_png"] = robustness_png
+                st.session_state["cp_screening_robustness_pdf"] = robustness_pdf
             st.session_state["cp_screening_workbook"] = build_screening_workbook(
                 workflow_tables(front_state, st.session_state["cp_screening_downstream"])
             )

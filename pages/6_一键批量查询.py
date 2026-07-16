@@ -24,7 +24,13 @@ from src.auto_query_progress import (
     progress_snapshot,
     record_activity_event,
 )
-from src.upload_state import cached_uploads, clear_uploads, store_uploads, upload_bytes
+from src.upload_state import (
+    cached_uploads,
+    clear_uploads,
+    invalidate_results_on_settings_change,
+    store_uploads,
+    upload_bytes,
+)
 
 
 INPUT_CACHE_KEYS = (
@@ -36,10 +42,12 @@ RESULT_CACHE_KEYS = (
     "auto_query_workflow_charts",
     "auto_query_workflow_zip",
 )
+SETTINGS_SIGNATURE_KEY = "auto_query_settings_signature"
 
 
 def clear_auto_query_state():
     clear_uploads(st.session_state, (*INPUT_CACHE_KEYS, *RESULT_CACHE_KEYS))
+    st.session_state.pop(SETTINGS_SIGNATURE_KEY, None)
     st.session_state.pop("auto_query_upload", None)
 
 
@@ -418,6 +426,65 @@ with st.expander("运行设置", expanded=False):
         robustness_iterations = st.number_input("稳健性迭代次数", min_value=1, value=1000, step=1)
     with robust_c:
         robustness_seed = st.number_input("稳健性随机种子", value=123, step=1)
+
+result_settings = {
+    "mapping": {
+        "compound_col": compound_col,
+        "formula_col": formula_col,
+        "peak_area_col": peak_area_col,
+        "group_area_cols": list(group_area_cols),
+        "mol_column": mol_column,
+        "smiles_col": smiles_col,
+        "cas_col": cas_col,
+    },
+    "modules": {
+        "run_r_replicate_df": bool(run_r_replicate_df),
+        "run_identifier": bool(run_identifier),
+        "run_epi": bool(run_epi),
+        "run_comptox": bool(run_comptox),
+        "run_echa_use": bool(run_echa_use),
+        "run_echa_ghs": bool(run_echa_ghs),
+        "run_source_origin": bool(run_source_origin),
+        "run_pov_toxpi": bool(run_pov_toxpi),
+    },
+    "query": {
+        "detection_threshold": float(detection_threshold),
+        "cache_enabled": bool(cache_enabled),
+        "identifier_max_workers": int(identifier_max_workers),
+        "epi_max_workers": int(epi_max_workers),
+        "comptox_max_workers": int(comptox_max_workers),
+        "echa_max_workers": int(echa_max_workers),
+        "echa_ghs_max_workers": int(echa_ghs_max_workers),
+        "source_origin_max_workers": int(source_origin_max_workers),
+    },
+    "axis_bounds": {
+        "dbe_x_min": float(dbe_x_min),
+        "dbe_x_max": float(dbe_x_max),
+        "dbe_y_min": float(dbe_y_min),
+        "dbe_y_max": float(dbe_y_max),
+        "vk_x_min": float(vk_x_min),
+        "vk_x_max": float(vk_x_max),
+        "vk_y_min": float(vk_y_min),
+        "vk_y_max": float(vk_y_max),
+    },
+    "toxpi": {
+        "candidate_top_n": int(candidate_top_n),
+        "display_top_n": int(display_top_n),
+        "peak_area_weight": float(peak_area_weight),
+        "pbm_weight": float(pbm_weight),
+        "df_weight": float(df_weight),
+        "robustness_enabled": bool(robustness_enabled),
+        "perturbation_percent": float(perturbation_percent),
+        "robustness_iterations": int(robustness_iterations),
+        "robustness_seed": int(robustness_seed),
+    },
+}
+invalidate_results_on_settings_change(
+    st.session_state,
+    SETTINGS_SIGNATURE_KEY,
+    result_settings,
+    RESULT_CACHE_KEYS,
+)
 
 start_run = st.button("开始一键运行", type="primary")
 

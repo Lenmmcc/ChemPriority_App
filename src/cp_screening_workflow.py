@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import io
+import math
 from typing import Iterable
 
 import matplotlib.pyplot as plt
@@ -71,7 +72,10 @@ class PBMToxPiConfig:
             raise ValueError("Display Top N must be at least 1")
         if int(self.display_top_n) > int(self.candidate_top_n):
             raise ValueError("Display Top N cannot exceed Candidate Top N")
-        if float(self.perturbation_fraction) < 0 or float(self.perturbation_fraction) > 1:
+        perturbation_fraction = float(self.perturbation_fraction)
+        if not math.isfinite(perturbation_fraction):
+            raise ValueError("Weight perturbation must be finite")
+        if perturbation_fraction < 0 or perturbation_fraction > 1:
             raise ValueError("Weight perturbation must be between 0% and 100%")
         if int(self.n_iter) < 1:
             raise ValueError("Robustness iterations must be at least 1")
@@ -428,9 +432,11 @@ def build_pbm_toxpi_input(
 
 
 def normalize_pbm_toxpi_weights(weights: dict[str, float] | None = None) -> dict[str, float]:
-    supplied = weights or PBM_TOXPI_WEIGHTS
+    supplied = PBM_TOXPI_WEIGHTS if weights is None else weights
     required = tuple(PBM_TOXPI_WEIGHTS)
     values = {name: float(supplied.get(name, 0.0)) for name in required}
+    if any(not math.isfinite(value) for value in values.values()):
+        raise ValueError("ToxPi weights must be finite")
     if any(value < 0 for value in values.values()):
         raise ValueError("ToxPi weights cannot be negative")
     total = sum(values.values())
@@ -646,6 +652,14 @@ def figure_to_pdf_bytes(fig) -> io.BytesIO:
     fig.savefig(buffer, format="pdf", dpi=300, bbox_inches="tight", facecolor="white")
     buffer.seek(0)
     return buffer
+
+
+def figure_to_png_pdf_bytes(fig) -> tuple[io.BytesIO, io.BytesIO]:
+    """Serialize a figure to both formats and always release it."""
+    try:
+        return figure_to_png_bytes(fig), figure_to_pdf_bytes(fig)
+    finally:
+        plt.close(fig)
 
 
 def generate_pbm_toxpi_bar_plot(toxpi_results: pd.DataFrame, top_n: int = 15):

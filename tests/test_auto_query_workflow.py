@@ -1230,6 +1230,61 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn('"ToxPi_Robustness"', audit_definition)
         self.assertIn('"ToxPi_Robust_Stats"', audit_definition)
 
+    def test_page_6_invalidates_cached_results_from_all_result_settings(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        start_index = page_text.index('start_run = st.button("开始一键运行"')
+
+        self.assertIn("invalidate_results_on_settings_change(", page_text)
+        invalidate_index = page_text.index("invalidate_results_on_settings_change(")
+        self.assertLess(invalidate_index, start_index)
+        settings_block = page_text.split("result_settings = {", 1)[1].split(
+            "invalidate_results_on_settings_change(", 1
+        )[0]
+        for setting in (
+            "compound_col",
+            "formula_col",
+            "peak_area_col",
+            "group_area_cols",
+            "mol_column",
+            "smiles_col",
+            "cas_col",
+            "run_r_replicate_df",
+            "run_identifier",
+            "run_epi",
+            "run_comptox",
+            "run_echa_use",
+            "run_echa_ghs",
+            "run_source_origin",
+            "run_pov_toxpi",
+            "detection_threshold",
+            "cache_enabled",
+            "identifier_max_workers",
+            "epi_max_workers",
+            "comptox_max_workers",
+            "echa_max_workers",
+            "echa_ghs_max_workers",
+            "source_origin_max_workers",
+            "dbe_x_min",
+            "dbe_x_max",
+            "dbe_y_min",
+            "dbe_y_max",
+            "vk_x_min",
+            "vk_x_max",
+            "vk_y_min",
+            "vk_y_max",
+            "candidate_top_n",
+            "display_top_n",
+            "peak_area_weight",
+            "pbm_weight",
+            "df_weight",
+            "robustness_enabled",
+            "perturbation_percent",
+            "robustness_iterations",
+            "robustness_seed",
+        ):
+            self.assertIn(setting, settings_block)
+        self.assertIn("RESULT_CACHE_KEYS", page_text[invalidate_index:start_index])
+
     def test_page_6_renders_module_dashboard_without_removing_exports(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
             page_text = page_file.read()

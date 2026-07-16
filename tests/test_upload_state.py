@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 
+import src.upload_state as upload_state
 from src.upload_state import (
     cached_uploads,
     clear_uploads,
@@ -66,6 +67,64 @@ class UploadStateTests(unittest.TestCase):
         clear_uploads(state, ("files", "signature", "result"))
 
         self.assertEqual(state, {})
+
+    def test_settings_signature_is_stable_for_equivalent_nested_settings(self):
+        self.assertTrue(hasattr(upload_state, "settings_signature"))
+        settings_signature = upload_state.settings_signature
+        first = {
+            "mapping": {"compound_col": "Name", "group_area_cols": ["A", "B"]},
+            "weights": {"peak_area": 0.4, "pbm": 0.4, "df": 0.2},
+        }
+        second = {
+            "weights": {"df": 0.2, "pbm": 0.4, "peak_area": 0.4},
+            "mapping": {"group_area_cols": ["A", "B"], "compound_col": "Name"},
+        }
+
+        self.assertEqual(settings_signature(first), settings_signature(second))
+
+    def test_settings_change_clears_only_result_cache_and_updates_signature(self):
+        self.assertTrue(hasattr(upload_state, "invalidate_results_on_settings_change"))
+        invalidate_results_on_settings_change = upload_state.invalidate_results_on_settings_change
+        result_keys = ("result", "charts", "zip")
+        state = {
+            "input_files": [{"name": "A.xlsx", "bytes": b"A"}],
+            "result": object(),
+            "charts": object(),
+            "zip": object(),
+        }
+        original = {"run_epi": False, "axis": {"dbe_x_max": 60.0}}
+
+        self.assertFalse(
+            invalidate_results_on_settings_change(
+                state,
+                "settings_signature",
+                original,
+                result_keys,
+            )
+        )
+        preserved_signature = state["settings_signature"]
+        self.assertFalse(
+            invalidate_results_on_settings_change(
+                state,
+                "settings_signature",
+                {"axis": {"dbe_x_max": 60.0}, "run_epi": False},
+                result_keys,
+            )
+        )
+        self.assertEqual(state["settings_signature"], preserved_signature)
+        self.assertIn("result", state)
+
+        self.assertTrue(
+            invalidate_results_on_settings_change(
+                state,
+                "settings_signature",
+                {"run_epi": True, "axis": {"dbe_x_max": 60.0}},
+                result_keys,
+            )
+        )
+
+        self.assertEqual(set(state), {"input_files", "settings_signature"})
+        self.assertNotEqual(state["settings_signature"], preserved_signature)
 
     def test_main_upload_pages_declare_a_cache_restore_path(self):
         expected = {

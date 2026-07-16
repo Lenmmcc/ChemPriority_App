@@ -504,6 +504,12 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             result.display_rows["compound"].tolist(),
             result.final_ranking.head(2)["compound"].tolist(),
         )
+        stage_one = result.global_screen.set_index("compound")
+        stage_two = result.candidate_normalized.set_index("compound")
+        self.assertNotEqual(
+            stage_one.loc["B", "norm_peak_area"],
+            stage_two.loc["B", "norm_peak_area"],
+        )
 
     def test_two_stage_toxpi_caps_limits_for_small_inputs(self):
         data = pd.DataFrame(
@@ -534,11 +540,62 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertEqual(pbm_result.final_ranking.loc[0, "compound"], "PBM")
         self.assertAlmostEqual(sum(pa_result.normalized_weights.values()), 1.0)
 
+    def test_custom_weights_can_change_stage_one_candidate_membership(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["PA", "PBM", "Mid"],
+                "Peak_Area": [1e9, 1e2, 1e5],
+                "Scores": [1.0, 10.0, 5.0],
+                "DF": [0.5, 0.5, 0.5],
+            }
+        )
+
+        pa_result = calculate_pbm_toxpi(
+            data,
+            PBMToxPiConfig(
+                candidate_top_n=1,
+                display_top_n=1,
+                weights={"peak_area": 8, "pbm": 1, "df": 1},
+                robustness_enabled=False,
+            ),
+        )
+        pbm_result = calculate_pbm_toxpi(
+            data,
+            PBMToxPiConfig(
+                candidate_top_n=1,
+                display_top_n=1,
+                weights={"peak_area": 1, "pbm": 8, "df": 1},
+                robustness_enabled=False,
+            ),
+        )
+
+        self.assertEqual(pa_result.candidate_normalized["compound"].tolist(), ["PA"])
+        self.assertEqual(pbm_result.candidate_normalized["compound"].tolist(), ["PBM"])
+
     def test_two_stage_toxpi_rejects_invalid_settings(self):
         with self.assertRaisesRegex(ValueError, "positive"):
             PBMToxPiConfig(weights={"peak_area": 0, "pbm": 0, "df": 0})
         with self.assertRaisesRegex(ValueError, "cannot exceed"):
             PBMToxPiConfig(candidate_top_n=10, display_top_n=20)
+
+    def test_two_stage_toxpi_rejects_empty_weights(self):
+        with self.assertRaisesRegex(ValueError, "positive"):
+            PBMToxPiConfig(weights={})
+
+    def test_two_stage_toxpi_rejects_non_finite_weights(self):
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(weight=invalid), self.assertRaisesRegex(ValueError, "finite"):
+                PBMToxPiConfig(
+                    weights={"peak_area": invalid, "pbm": 0.4, "df": 0.2}
+                )
+
+    def test_two_stage_toxpi_rejects_non_finite_perturbation(self):
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(perturbation=invalid), self.assertRaisesRegex(
+                ValueError,
+                "finite",
+            ):
+                PBMToxPiConfig(perturbation_fraction=invalid)
 
     def test_two_stage_toxpi_breaks_score_ties_deterministically(self):
         scored = pd.DataFrame(
@@ -649,6 +706,29 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertEqual(first.robustness_stats.loc[0, "perturbation_fraction"], 0.35)
         self.assertEqual(first.robustness_stats.loc[0, "display_top_n"], 2)
         self.assertTrue(first.robustness_summary["top_n_frequency_percent"].between(0, 100).all())
+        self.assertAlmostEqual(first.robustness_summary["top_n_frequency_percent"].sum(), 200.0)
+
+    def test_toxpi_robustness_handles_missing_indicators(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C", "D"],
+                "Peak_Area": [1e8, float("nan"), 1e5, 1e3],
+                "Scores": [1.0, 8.0, float("nan"), 4.0],
+                "DF": [0.9, 0.7, float("nan"), 0.2],
+            }
+        )
+        config = PBMToxPiConfig(
+            candidate_top_n=4,
+            display_top_n=2,
+            n_iter=40,
+            seed=11,
+        )
+
+        result = calculate_pbm_toxpi(data, config)
+
+        self.assertEqual(len(result.robustness_correlations), 40)
+        self.assertTrue(result.robustness_correlations["spearman_rho"].notna().all())
+        self.assertAlmostEqual(result.robustness_summary["top_n_frequency_percent"].sum(), 200.0)
 
     def test_toxpi_robustness_plot_renders_rank_correlation_distribution(self):
         data = pd.DataFrame(
@@ -693,6 +773,43 @@ class CpScreeningWorkflowTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Robustness correlations are empty"):
             generate_pbm_toxpi_robustness_plot(result)
+
+    def test_figure_pair_serializer_closes_figure_when_serialization_raises(self):
+        self.assertTrue(hasattr(workflow, "figure_to_png_pdf_bytes"))
+        serialize = workflow.figure_to_png_pdf_bytes
+        original_png = workflow.figure_to_png_bytes
+        original_pdf = workflow.figure_to_pdf_bytes
+
+        for failing_format in ("png", "pdf"):
+            with self.subTest(failing_format=failing_format):
+                fig = plt.figure()
+
+                def succeed(_fig):
+                    return io.BytesIO(b"ok")
+
+                def fail(_fig):
+                    raise RuntimeError(f"{failing_format} serialization failed")
+
+                workflow.figure_to_png_bytes = fail if failing_format == "png" else succeed
+                workflow.figure_to_pdf_bytes = fail if failing_format == "pdf" else succeed
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "serialization failed"):
+                        serialize(fig)
+                    self.assertFalse(plt.fignum_exists(fig.number))
+                finally:
+                    workflow.figure_to_png_bytes = original_png
+                    workflow.figure_to_pdf_bytes = original_pdf
+                    plt.close(fig)
+
+    def test_comprehensive_page_uses_closing_serializer_for_all_toxpi_figures(self):
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+
+        self.assertEqual(page_text.count("figure_to_png_pdf_bytes("), 3)
+        plot_block = page_text.split("def refresh_toxpi_radial_plot", 1)[1].split(
+            'st.session_state["cp_screening_workbook"]', 1
+        )[0]
+        self.assertNotIn("figure_to_png_bytes(", plot_block)
+        self.assertNotIn("figure_to_pdf_bytes(", plot_block)
 
     def test_calculate_pbm_toxpi_runs_enabled_robustness_analysis(self):
         data = pd.DataFrame(

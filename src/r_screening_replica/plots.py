@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
+from matplotlib.ticker import AutoLocator
 from plotnine import (
     aes,
     element_blank,
@@ -380,8 +381,8 @@ def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame, axis_ranges: ScreeningA
     for label, xmin, xmax, ymin, ymax, label_x, label_y in VK_REGIONS:
         ax.add_patch(Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, fill=False, edgecolor="#333333", linestyle="--", linewidth=1.0))
         ax.text(label_x, label_y, label, ha="center", va="center", fontsize=12, fontweight="bold", color="#333333", family=font_family)
-    ax.set_xticks(np.arange(0, 1.21, 0.2))
-    ax.set_yticks(np.arange(0, 2.61, 0.5))
+    ax.xaxis.set_major_locator(AutoLocator())
+    ax.yaxis.set_major_locator(AutoLocator())
     ax.set_xlim(*axis_ranges.vk_xlim)
     ax.set_ylim(*axis_ranges.vk_ylim)
     ax.set_xlabel("O/C Ratio", fontsize=16, fontweight="bold", color="black", family=font_family)

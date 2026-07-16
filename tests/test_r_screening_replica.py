@@ -76,6 +76,22 @@ class RScreeningReplicaUnitTests(unittest.TestCase):
         self.assertEqual(vk_ax.get_ylim(), (0.4, 2.1))
         plt.close(fig)
 
+    def test_vk_ticks_expand_with_custom_axis_ranges(self):
+        ranges = ScreeningAxisRanges(
+            vk_x_min=0.0,
+            vk_x_max=4.0,
+            vk_y_min=0.0,
+            vk_y_max=8.0,
+        )
+        data = pd.DataFrame({"o_c": [2.0], "h_c": [4.0], "Category": ["CHO"]})
+        fig, ax = plt.subplots()
+        try:
+            _draw_van_krevelen(ax, data, ranges)
+            self.assertGreaterEqual(max(ax.get_xticks()), 3.0)
+            self.assertGreaterEqual(max(ax.get_yticks()), 7.0)
+        finally:
+            plt.close(fig)
+
     def test_dbe_bubble_has_white_background_and_no_grid(self):
         data = pd.DataFrame(
             {
