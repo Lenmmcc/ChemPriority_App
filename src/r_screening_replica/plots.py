@@ -361,6 +361,16 @@ def _draw_compound_bubble(ax: plt.Axes, data: pd.DataFrame, axis_ranges: Screeni
     ax.legend(handles=color_handles, title="Compound category", loc="upper left", bbox_to_anchor=(1.02, 0.55), frameon=False)
 
 
+def _vk_region_label_is_visible(
+    label_x: float,
+    label_y: float,
+    axis_ranges: ScreeningAxisRanges,
+) -> bool:
+    x_min, x_max = axis_ranges.vk_xlim
+    y_min, y_max = axis_ranges.vk_ylim
+    return x_min <= label_x <= x_max and y_min <= label_y <= y_max
+
+
 def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame, axis_ranges: ScreeningAxisRanges) -> None:
     font_family = PLOT_FONT_FAMILY
     for category in CATEGORY_ORDER:
@@ -379,8 +389,30 @@ def _draw_van_krevelen(ax: plt.Axes, data: pd.DataFrame, axis_ranges: ScreeningA
             label=DISPLAY_CATEGORY_LABELS[category],
         )
     for label, xmin, xmax, ymin, ymax, label_x, label_y in VK_REGIONS:
-        ax.add_patch(Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, fill=False, edgecolor="#333333", linestyle="--", linewidth=1.0))
-        ax.text(label_x, label_y, label, ha="center", va="center", fontsize=12, fontweight="bold", color="#333333", family=font_family)
+        if not _vk_region_label_is_visible(label_x, label_y, axis_ranges):
+            continue
+        ax.add_patch(
+            Rectangle(
+                (xmin, ymin),
+                xmax - xmin,
+                ymax - ymin,
+                fill=False,
+                edgecolor="#333333",
+                linestyle="--",
+                linewidth=1.0,
+            )
+        )
+        ax.text(
+            label_x,
+            label_y,
+            label,
+            ha="center",
+            va="center",
+            fontsize=12,
+            fontweight="bold",
+            color="#333333",
+            family=font_family,
+        )
     ax.xaxis.set_major_locator(AutoLocator())
     ax.yaxis.set_major_locator(AutoLocator())
     ax.set_xlim(*axis_ranges.vk_xlim)

@@ -92,6 +92,44 @@ class RScreeningReplicaUnitTests(unittest.TestCase):
         finally:
             plt.close(fig)
 
+    def test_vk_omits_regions_with_label_centers_outside_x_range(self):
+        ranges = ScreeningAxisRanges(vk_x_min=0.0, vk_x_max=0.7, vk_y_min=0.0, vk_y_max=2.6)
+        data = pd.DataFrame({"o_c": [0.5], "h_c": [1.2], "Category": ["CHO"]})
+        fig, ax = plt.subplots()
+        try:
+            _draw_van_krevelen(ax, data, ranges)
+            labels = {text.get_text() for text in ax.texts}
+            self.assertNotIn("Carbohydrates-like", labels)
+            self.assertNotIn("Highly Oxygenated Compounds", labels)
+            self.assertEqual(len(ax.patches), 5)
+        finally:
+            plt.close(fig)
+
+    def test_vk_omits_regions_with_label_centers_outside_y_range(self):
+        ranges = ScreeningAxisRanges(vk_x_min=0.0, vk_x_max=1.1, vk_y_min=0.0, vk_y_max=1.8)
+        data = pd.DataFrame({"o_c": [0.5], "h_c": [1.2], "Category": ["CHO"]})
+        fig, ax = plt.subplots()
+        try:
+            _draw_van_krevelen(ax, data, ranges)
+            labels = {text.get_text() for text in ax.texts}
+            self.assertIn("Lipids-like", labels)
+            self.assertNotIn("Aliphatic/Peptides-like", labels)
+            self.assertNotIn("Carbohydrates-like", labels)
+        finally:
+            plt.close(fig)
+
+    def test_vk_keeps_region_when_label_center_is_on_axis_boundary(self):
+        ranges = ScreeningAxisRanges(vk_x_min=0.0, vk_x_max=0.85, vk_y_min=0.0, vk_y_max=2.0)
+        data = pd.DataFrame({"o_c": [0.5], "h_c": [1.2], "Category": ["CHO"]})
+        fig, ax = plt.subplots()
+        try:
+            _draw_van_krevelen(ax, data, ranges)
+            labels = {text.get_text() for text in ax.texts}
+            self.assertIn("Carbohydrates-like", labels)
+            self.assertIn("Highly Oxygenated Compounds", labels)
+        finally:
+            plt.close(fig)
+
     def test_dbe_bubble_has_white_background_and_no_grid(self):
         data = pd.DataFrame(
             {
