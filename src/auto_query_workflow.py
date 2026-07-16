@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import io
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -159,6 +160,55 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
     ),
 )
 
+AUTO_WORKFLOW_CHECKPOINT_EXPORTS = {
+    R_DF_STEP_LABEL: (
+        "local_screening",
+        "Local_Screening_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[0][2],
+    ),
+    "标识符补全": (
+        "identifier_completion",
+        "Identifier_Completion_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[1][2],
+    ),
+    "EPI Suite 环境归趋": (
+        "epi_suite",
+        "EPI_Suite_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[2][2],
+    ),
+    "EPA CompTox 用途": (
+        "comptox_use",
+        "EPA_CompTox_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[3][2],
+    ),
+    "ECHA REACH 用途": (
+        "echa_reach_use",
+        "ECHA_REACH_Use_Results.xlsx",
+        (
+            "ECHA_Use_Summary",
+            "ECHA_Uses_Reported",
+            "ECHA_Reported_Pie_Data",
+            "ECHA_Use_Dossiers",
+            "ECHA_Use_Errors",
+        ),
+    ),
+    "ECHA GHS/C&L 危害": (
+        "echa_ghs_cl",
+        "ECHA_GHS_CL_Results.xlsx",
+        ("ECHA_GHS_Summary", "ECHA_GHS_Classifications", "ECHA_GHS_Errors"),
+    ),
+    "来源属性评估": (
+        "source_origin",
+        "Source_Origin_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[5][2],
+    ),
+    "Pov-LRTP / PBM / ToxPi": (
+        "pov_lrtp_pbm_toxpi",
+        "Pov_LRTP_PBM_ToxPi_Results.xlsx",
+        AUTO_WORKFLOW_EXPORT_MODULES[6][2],
+    ),
+}
+
 PUBLIC_TABLE_NAMES = frozenset(
     name
     for _, _, table_names, _ in AUTO_WORKFLOW_EXPORT_MODULES
@@ -241,6 +291,43 @@ class AutoWorkflowResult:
     charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
 
 
+@dataclass(frozen=True)
+class AutoWorkflowModuleWorkbook:
+    step: str
+    slug: str
+    file_name: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class AutoWorkflowCheckpointContext:
+    run_id: str
+    input_signature: str
+    settings_signature: str
+    selected_steps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AutoWorkflowCheckpoint:
+    """Cumulative read-only view delivered to a checkpoint callback.
+
+    The outer object is frozen, while DataFrames inside ``result`` are shared
+    to avoid copying large cumulative tables. Callbacks must not mutate the
+    result, its tables, or any other contained artifact.
+    """
+
+    run_id: str
+    input_signature: str
+    settings_signature: str
+    selected_steps: tuple[str, ...]
+    finished_steps: tuple[str, ...]
+    current_step: str | None
+    status: str
+    result: AutoWorkflowResult
+    error_message: str
+    updated_at: str
+
+
 @dataclass
 class LocalScreeningOutput:
     tables: OrderedDict[str, pd.DataFrame]
@@ -256,6 +343,7 @@ class PbmToxPiOutput:
 
 ProgressCallback = Callable[[str, int, int, str], None]
 ActivityCallback = Callable[[dict], None]
+CheckpointCallback = Callable[[AutoWorkflowCheckpoint], None]
 
 
 def read_input_workbook(file_or_path, sheet_name=0) -> pd.DataFrame:
@@ -289,6 +377,8 @@ def run_auto_query_workflow(
     config: AutoWorkflowConfig | None = None,
     progress_callback: ProgressCallback | None = None,
     activity_callback: ActivityCallback | None = None,
+    checkpoint_context: AutoWorkflowCheckpointContext | None = None,
+    checkpoint_callback: CheckpointCallback | None = None,
 ) -> AutoWorkflowResult:
     config = config or AutoWorkflowConfig()
     mapping = config.mapping or detect_default_mapping(input_df.columns)
@@ -356,6 +446,48 @@ def run_auto_query_workflow(
     def add_warning(stage, message):
         warning_rows.append({"stage": stage, "message": str(message)})
 
+    def current_result():
+        current_warnings = pd.DataFrame(warning_rows, columns=["stage", "message"])
+        current_tables = OrderedDict(tables)
+        current_tables["Warnings"] = current_warnings
+        return AutoWorkflowResult(
+            mapping=mapping,
+            representative_table=representative.copy(),
+            tables=current_tables,
+            step_status=pd.DataFrame(
+                status_rows,
+                columns=["step", "status", "rows", "message"],
+            ),
+            warnings=current_warnings,
+            charts=OrderedDict(charts),
+        )
+
+    def emit_checkpoint(current_step, status="running", error_message=""):
+        if checkpoint_callback is None or checkpoint_context is None:
+            return
+        selected = set(checkpoint_context.selected_steps)
+        finished = tuple(
+            row["step"]
+            for row in status_rows
+            if row["step"] in selected
+        )
+        checkpoint = AutoWorkflowCheckpoint(
+            run_id=checkpoint_context.run_id,
+            input_signature=checkpoint_context.input_signature,
+            settings_signature=checkpoint_context.settings_signature,
+            selected_steps=checkpoint_context.selected_steps,
+            finished_steps=finished,
+            current_step=current_step,
+            status=status,
+            result=current_result(),
+            error_message=error_message,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            checkpoint_callback(checkpoint)
+        except Exception as exc:
+            add_warning("Checkpoint", f"临时恢复保存失败：{exc}")
+
     def run_step(step, func):
         try:
             value = func()
@@ -383,6 +515,7 @@ def run_auto_query_workflow(
             for message in local_value.warnings:
                 add_warning(R_DF_STEP_LABEL, message)
             record(R_DF_STEP_LABEL, "完成", len(local_value.tables.get("DF_Table", pd.DataFrame())))
+        emit_checkpoint(R_DF_STEP_LABEL)
 
     needs_identifier = any(
         [
@@ -427,13 +560,14 @@ def run_auto_query_workflow(
             tables["Identifier_Completion"] = completed_identifiers
             tables["Identifier_Warnings"] = identifier_warnings
             record("标识符补全", "完成", len(completed_identifiers))
+        emit_checkpoint("标识符补全")
 
     query_input = _query_input_from_identifiers(identifier_input, completed_identifiers)
     compound_universe = build_compound_universe(identifier_input)
 
     run_epi_step = config.run_epi or config.run_pov_lrtp_toxpi
     if run_epi_step:
-        if query_input.empty:
+        if query_input.empty or query_input["smiles"].eq("").all():
             record("EPI Suite 环境归趋", "跳过", 0, "缺少可用于 EPI 的 SMILES。")
         else:
             epi_input = query_input.loc[query_input["smiles"].ne(""), ["compound", "smiles", "cas"]].reset_index(drop=True)
@@ -462,6 +596,7 @@ def run_auto_query_workflow(
                 tables["EPI_Raw_Results"] = epi_raw_results
                 tables["EPI_Errors"] = epi_errors
                 record("EPI Suite 环境归趋", "完成", len(epi_results))
+        emit_checkpoint("EPI Suite 环境归趋")
 
     if config.run_comptox:
         comptox_value = run_step(
@@ -534,6 +669,7 @@ def run_auto_query_workflow(
                 use_key="raw",
                 require_reported_flag=True,
             )
+        emit_checkpoint("EPA CompTox 用途")
 
     if config.run_echa_use:
         echa_value = run_step(
@@ -574,6 +710,7 @@ def run_auto_query_workflow(
             )
             tables["ECHA_Uses_Reported"] = echa_reported_audit.copy()
             tables["ECHA_Reported_Pie_Data"] = echa_reported_audit
+        emit_checkpoint("ECHA REACH 用途")
 
     if config.run_echa_ghs:
         ghs_value = run_step(
@@ -594,6 +731,7 @@ def run_auto_query_workflow(
             tables["ECHA_GHS_Classifications"] = ghs_classifications
             tables["ECHA_GHS_Errors"] = ghs_errors
             record("ECHA GHS/C&L 危害", "完成", len(ghs_summary))
+        emit_checkpoint("ECHA GHS/C&L 危害")
 
     if config.run_source_origin:
         source_value = run_step(
@@ -629,6 +767,7 @@ def run_auto_query_workflow(
                 source_summary,
                 compound_universe,
             )
+        emit_checkpoint("来源属性评估")
 
     if config.run_pov_lrtp_toxpi:
         toxpi_value = run_step(
@@ -650,18 +789,10 @@ def run_auto_query_workflow(
                 "完成",
                 len(toxpi_value.tables.get("ToxPi_Results", pd.DataFrame())),
             )
+        emit_checkpoint("Pov-LRTP / PBM / ToxPi")
 
-    warnings = pd.DataFrame(warning_rows, columns=["stage", "message"])
-    tables["Warnings"] = warnings
-    step_status = pd.DataFrame(status_rows, columns=["step", "status", "rows", "message"])
-    return AutoWorkflowResult(
-        mapping=mapping,
-        representative_table=representative,
-        tables=tables,
-        step_status=step_status,
-        warnings=warnings,
-        charts=charts,
-    )
+    emit_checkpoint(None, status="completed")
+    return current_result()
 
 
 def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
@@ -669,6 +800,8 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         result.step_status.to_excel(writer, sheet_name="Run_Log", index=False)
         result.representative_table.to_excel(writer, sheet_name="Representative_Input", index=False)
+        if not isinstance(result.tables.get("Warnings"), pd.DataFrame):
+            result.warnings.to_excel(writer, sheet_name="Warnings", index=False)
         for name, table in result.tables.items():
             if name not in PUBLIC_TABLE_NAMES:
                 continue
@@ -687,6 +820,45 @@ def _build_module_workbook(result: AutoWorkflowResult, table_names: tuple[str, .
             table = result.tables.get(name)
             if isinstance(table, pd.DataFrame):
                 table.to_excel(writer, sheet_name=_safe_sheet_name(name), index=False)
+    buffer.seek(0)
+    return buffer
+
+
+def build_auto_workflow_module_workbook(
+    result: AutoWorkflowResult,
+    step: str,
+) -> AutoWorkflowModuleWorkbook | None:
+    export = AUTO_WORKFLOW_CHECKPOINT_EXPORTS.get(step)
+    if export is None:
+        return None
+    slug, file_name, candidates = export
+    table_names = tuple(
+        name
+        for name in candidates
+        if name in PUBLIC_TABLE_NAMES and isinstance(result.tables.get(name), pd.DataFrame)
+    )
+    if not table_names:
+        return None
+    return AutoWorkflowModuleWorkbook(
+        step=step,
+        slug=slug,
+        file_name=file_name,
+        data=_build_module_workbook(result, table_names).getvalue(),
+    )
+
+
+def build_auto_workflow_partial_zip(
+    result: AutoWorkflowResult,
+    module_workbooks: Mapping[str, AutoWorkflowModuleWorkbook],
+) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "Partial_Auto_Query_Workflow_Results.xlsx",
+            build_auto_workflow_workbook(result).getvalue(),
+        )
+        for module in module_workbooks.values():
+            archive.writestr(f"modules/{module.file_name}", module.data)
     buffer.seek(0)
     return buffer
 

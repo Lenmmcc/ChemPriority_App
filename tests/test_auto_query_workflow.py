@@ -1,8 +1,11 @@
 from collections import OrderedDict
 import ast
+from contextlib import contextmanager, ExitStack
+from datetime import datetime, timezone
 import importlib
 import io
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import zipfile
@@ -11,8 +14,19 @@ from unittest.mock import patch
 
 import pandas as pd
 import src.auto_query_workflow as auto_query_workflow
+from streamlit.runtime.memory_media_file_storage import MemoryMediaFileStorage
+from streamlit.testing.v1 import AppTest
 
+from src.auto_query_checkpoint import (
+    cleanup_expired_checkpoints,
+    delete_checkpoint,
+    generate_run_token,
+    load_checkpoint,
+    save_checkpoint,
+)
 from src.auto_query_workflow import (
+    AutoWorkflowCheckpoint,
+    AutoWorkflowCheckpointContext,
     AutoWorkflowConfig,
     AutoWorkflowChart,
     AutoWorkflowMapping,
@@ -21,6 +35,8 @@ from src.auto_query_workflow import (
     R_DF_STEP_LABEL,
     _load_local_screening_charts,
     build_auto_workflow_charts,
+    build_auto_workflow_module_workbook,
+    build_auto_workflow_partial_zip,
     build_auto_workflow_workbook,
     build_auto_workflow_zip,
     detect_default_mapping,
@@ -28,6 +44,7 @@ from src.auto_query_workflow import (
 )
 from src.cp_screening_workflow import PBMToxPiConfig
 from src.mol_structure_parser import prepare_structure_dataframe
+from src.upload_state import upload_signature
 from src.use_rose_plot import (
     build_compound_universe,
     extract_top_product_use_category_data,
@@ -50,7 +67,137 @@ M  END
 """
 
 
+def _app_test_workbook_bytes():
+    buffer = io.BytesIO()
+    pd.DataFrame(
+        {
+            "Name": ["Compound A", "Compound B"],
+            "NIST Lib Hit Formula": ["C2H6O", "C3H8O"],
+            "Avg TIC": [10.0, 20.0],
+            "Group Area 1": [1.0, 2.0],
+        }
+    ).to_excel(buffer, index=False)
+    return buffer.getvalue()
+
+
+def _app_test_with_cached_workbook():
+    upload = {"name": "smoke.xlsx", "bytes": _app_test_workbook_bytes()}
+    app = AppTest.from_file("pages/6_一键批量查询.py", default_timeout=20)
+    app.session_state["auto_query_input_files"] = [upload]
+    app.session_state["auto_query_input_signature"] = upload_signature([upload])
+    return app.run(timeout=20)
+
+
+def _app_test_download_payload(download_button, storage):
+    return storage.get_file(Path(download_button.proto.url).name).content
+
+
+def _capture_app_test_media_storage(storages):
+    def create_storage(endpoint):
+        storage = MemoryMediaFileStorage(endpoint)
+        storages.append(storage)
+        return storage
+
+    return patch(
+        "streamlit.testing.v1.app_test.MemoryMediaFileStorage",
+        side_effect=create_storage,
+    )
+
+
+@contextmanager
+def _isolated_page_checkpoint_storage(root):
+    root = Path(root)
+
+    def isolated_save(*args, **kwargs):
+        kwargs["root"] = root
+        return save_checkpoint(*args, **kwargs)
+
+    def isolated_load(*args, **kwargs):
+        kwargs["root"] = root
+        return load_checkpoint(*args, **kwargs)
+
+    def isolated_delete(*args, **kwargs):
+        kwargs["root"] = root
+        return delete_checkpoint(*args, **kwargs)
+
+    def isolated_cleanup(*args, **kwargs):
+        kwargs["root"] = root
+        return cleanup_expired_checkpoints(*args, **kwargs)
+
+    with (
+        patch(
+            "src.auto_query_checkpoint.save_checkpoint",
+            side_effect=isolated_save,
+        ),
+        patch(
+            "src.auto_query_checkpoint.load_checkpoint",
+            side_effect=isolated_load,
+        ),
+        patch(
+            "src.auto_query_checkpoint.delete_checkpoint",
+            side_effect=isolated_delete,
+        ),
+        patch(
+            "src.auto_query_checkpoint.cleanup_expired_checkpoints",
+            side_effect=isolated_cleanup,
+        ) as cleanup_mock,
+    ):
+        yield SimpleNamespace(cleanup=cleanup_mock)
+
+
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_checkpoint_callback_contract_keeps_shared_result_frames_read_only(self):
+        self.assertIn("read-only", AutoWorkflowCheckpoint.__doc__ or "")
+        self.assertIn("must not mutate", AutoWorkflowCheckpoint.__doc__ or "")
+
+        page_tree = ast.parse(
+            Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        )
+        handler = next(
+            node
+            for node in ast.walk(page_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "handle_checkpoint"
+        )
+
+        def checkpoint_result_expression(node):
+            return ast.unparse(node).startswith("checkpoint.result")
+
+        mutations = []
+        for node in ast.walk(handler):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                mutations.extend(
+                    ast.unparse(target)
+                    for target in targets
+                    if checkpoint_result_expression(target)
+                )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and checkpoint_result_expression(node.func.value)
+                and node.func.attr
+                in {
+                    "drop",
+                    "drop_duplicates",
+                    "fillna",
+                    "insert",
+                    "pop",
+                    "rename",
+                    "replace",
+                    "set_axis",
+                    "sort_index",
+                    "sort_values",
+                    "update",
+                }
+            ):
+                mutations.append(ast.unparse(node))
+
+        self.assertEqual(mutations, [])
+
     def test_page_6_auto_query_imports_resolve_to_real_exports(self):
         page_path = Path("pages/6_一键批量查询.py")
         page_tree = ast.parse(page_path.read_text(encoding="utf-8"))
@@ -592,6 +739,86 @@ class AutoQueryWorkflowTests(unittest.TestCase):
 
     @patch("src.auto_query_workflow.run_comptox_use_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_workflow_emits_one_checkpoint_per_terminal_step_and_one_final_checkpoint(
+        self,
+        run_identifier,
+        run_comptox,
+    ):
+        run_identifier.return_value = (
+            pd.DataFrame(
+                {
+                    "compound": ["Compound A"],
+                    "smiles": [""],
+                    "cas": [""],
+                    "ec": [""],
+                    "dtxsid": [""],
+                    "echa_id": [""],
+                }
+            ),
+            pd.DataFrame(),
+        )
+        run_comptox.side_effect = RuntimeError("EPA unavailable")
+        checkpoints = []
+        context = AutoWorkflowCheckpointContext(
+            run_id="run-1",
+            input_signature="input-sha",
+            settings_signature="settings-sha",
+            selected_steps=("标识符补全", "EPI Suite 环境归趋", "EPA CompTox 用途"),
+        )
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                run_comptox=True,
+                identifier_delay_seconds=0,
+                use_delay_seconds=0,
+            ),
+            checkpoint_context=context,
+            checkpoint_callback=checkpoints.append,
+        )
+
+        self.assertEqual(
+            [checkpoint.current_step for checkpoint in checkpoints],
+            ["标识符补全", "EPI Suite 环境归趋", "EPA CompTox 用途", None],
+        )
+        self.assertEqual(checkpoints[-1].status, "completed")
+        self.assertEqual(checkpoints[-1].finished_steps, context.selected_steps)
+        status_by_step = result.step_status.set_index("step")["status"].to_dict()
+        self.assertEqual(status_by_step["EPI Suite 环境归趋"], "跳过")
+        self.assertEqual(status_by_step["EPA CompTox 用途"], "失败")
+
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_checkpoint_callback_failure_adds_warning_without_stopping_workflow(
+        self,
+        run_identifier,
+    ):
+        run_identifier.return_value = (_completed_identifier_rows(["Compound A"]), pd.DataFrame())
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                identifier_delay_seconds=0,
+            ),
+            checkpoint_context=AutoWorkflowCheckpointContext(
+                run_id="run-2",
+                input_signature="input-sha",
+                settings_signature="settings-sha",
+                selected_steps=("标识符补全",),
+            ),
+            checkpoint_callback=lambda checkpoint: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        self.assertEqual(result.step_status.iloc[0]["status"], "完成")
+        self.assertTrue(result.warnings["stage"].eq("Checkpoint").any())
+        self.assertTrue(result.warnings["message"].str.contains("disk full").any())
+
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
     def test_partial_identifier_completion_enriches_without_dropping_original_rows(
         self,
         run_identifier,
@@ -843,6 +1070,59 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertTrue(puc_chart.png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(puc_chart.pdf.startswith(b"%PDF"))
         self.assertNotIn("EPA_Product_Use_Category_Rose_Plot", charts)
+
+    def test_checkpoint_module_workbooks_split_echa_use_and_ghs(self):
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [
+                    ("ECHA_Use_Summary", pd.DataFrame({"compound": ["Compound A"]})),
+                    ("ECHA_GHS_Summary", pd.DataFrame({"compound": ["Compound A"]})),
+                ]
+            ),
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        use_book = build_auto_workflow_module_workbook(result, "ECHA REACH 用途")
+        ghs_book = build_auto_workflow_module_workbook(result, "ECHA GHS/C&L 危害")
+
+        self.assertEqual(use_book.file_name, "ECHA_REACH_Use_Results.xlsx")
+        self.assertEqual(ghs_book.file_name, "ECHA_GHS_CL_Results.xlsx")
+        self.assertEqual(
+            pd.ExcelFile(io.BytesIO(use_book.data)).sheet_names,
+            ["ECHA_Use_Summary"],
+        )
+        self.assertEqual(
+            pd.ExcelFile(io.BytesIO(ghs_book.data)).sheet_names,
+            ["ECHA_GHS_Summary"],
+        )
+
+    def test_partial_zip_contains_only_named_partial_log_and_completed_module_books(self):
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [("Identifier_Completion", pd.DataFrame({"compound": ["Compound A"]}))]
+            ),
+            step_status=pd.DataFrame(
+                {"step": ["标识符补全"], "status": ["完成"], "rows": [1], "message": [""]}
+            ),
+            warnings=pd.DataFrame(columns=["stage", "message"]),
+        )
+        module = build_auto_workflow_module_workbook(result, "标识符补全")
+
+        package = build_auto_workflow_partial_zip(result, {module.slug: module})
+
+        with zipfile.ZipFile(package) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {
+                    "Partial_Auto_Query_Workflow_Results.xlsx",
+                    "modules/Identifier_Completion_Results.xlsx",
+                },
+            )
 
     def test_auto_workflow_zip_groups_results_by_module(self):
         local_chart = AutoWorkflowChart(
@@ -1178,6 +1458,384 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn("st.image", page_text)
         self.assertIn("Auto_Query_Workflow_Results.zip", page_text)
         self.assertIn("application/zip", page_text)
+
+    def test_page_6_wires_checkpoint_restore_and_non_rerunning_downloads(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+
+        for token in (
+            "cleanup_expired_checkpoints(",
+            'st.query_params.get("run")',
+            'st.query_params["run"] = run_token',
+            "load_checkpoint(",
+            "save_checkpoint(",
+            "delete_checkpoint(",
+            "checkpoint_callback=handle_checkpoint",
+            'on_click="ignore"',
+            "Auto_Query_Workflow_Partial_Results.zip",
+            "已恢复上次运行的部分结果",
+            "上次运行未正常结束",
+        ):
+            self.assertIn(token, page_text)
+
+    def test_page_6_keeps_partial_artifacts_when_full_zip_build_fails(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
+        app = _app_test_with_cached_workbook()
+        run_token = None
+        identifier_result = _completed_identifier_rows(
+            ["Compound A", "Compound B"]
+        )
+        generated_chart = AutoWorkflowChart(
+            "Post-query chart",
+            b"\x89PNG\r\n\x1a\nPOST-QUERY",
+            b"%PDF-1.4 POST-QUERY",
+        )
+        generated_charts = OrderedDict(
+            [("Post_Query_Chart", generated_chart)]
+        )
+        media_storages = []
+        try:
+            app.checkbox[0].uncheck()
+            with (
+                _capture_app_test_media_storage(media_storages),
+                patch(
+                    "src.auto_query_workflow.run_identifier_completion_batch",
+                    return_value=(identifier_result, pd.DataFrame()),
+                ),
+                patch(
+                    "src.auto_query_workflow.build_auto_workflow_charts",
+                    return_value=generated_charts,
+                ),
+                patch(
+                    "src.auto_query_workflow.build_auto_workflow_zip",
+                    side_effect=RuntimeError("simulated final ZIP failure"),
+                ) as build_zip,
+            ):
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "开始一键运行"
+                ).click().run(timeout=20)
+
+            self.assertEqual(len(app.exception), 0)
+            build_zip.assert_called_once()
+            run_token = app.session_state["auto_query_run_token"]
+            self.assertIn(run_token, app.query_params["run"])
+            self.assertEqual(
+                app.session_state["auto_query_checkpoint_warning"],
+                "simulated final ZIP failure",
+            )
+            self.assertIn(
+                "identifier_completion",
+                app.session_state["auto_query_module_workbooks"],
+            )
+            self.assertEqual(
+                app.session_state["auto_query_workflow_charts"],
+                generated_charts,
+            )
+            self.assertEqual(
+                app.session_state["auto_query_workflow_result"].charts,
+                generated_charts,
+            )
+            downloads = {
+                button.label: button for button in app.get("download_button")
+            }
+            self.assertIn("下载 标识符补全", downloads)
+            self.assertIn("下载部分结果 ZIP", downloads)
+
+            stored = load_checkpoint(run_token, root=checkpoint_root)
+            self.assertEqual(stored.checkpoint.status, "failed")
+            self.assertEqual(
+                stored.checkpoint.error_message, "simulated final ZIP failure"
+            )
+            self.assertIn("identifier_completion", stored.module_workbooks)
+            self.assertEqual(
+                stored.checkpoint.result.charts["Post_Query_Chart"].png,
+                generated_chart.png,
+            )
+
+            module_payload = _app_test_download_payload(
+                downloads["下载 标识符补全"], media_storages[-1]
+            )
+            partial_payload = _app_test_download_payload(
+                downloads["下载部分结果 ZIP"], media_storages[-1]
+            )
+            self.assertTrue(module_payload.startswith(b"PK"))
+            self.assertTrue(partial_payload.startswith(b"PK"))
+            with zipfile.ZipFile(io.BytesIO(partial_payload)) as partial_zip:
+                self.assertEqual(
+                    set(partial_zip.namelist()),
+                    {
+                        "Partial_Auto_Query_Workflow_Results.xlsx",
+                        "modules/Identifier_Completion_Results.xlsx",
+                    },
+                )
+
+            recovered = AppTest.from_file(
+                "pages/6_一键批量查询.py", default_timeout=20
+            )
+            recovered.query_params["run"] = run_token
+            recovered.run(timeout=20)
+
+            self.assertEqual(len(recovered.exception), 0)
+            self.assertTrue(
+                any(
+                    message.value == "已恢复上次运行的部分结果。"
+                    for message in recovered.success
+                )
+            )
+            self.assertTrue(
+                any(
+                    message.value.startswith("上次运行未正常结束")
+                    for message in recovered.warning
+                )
+            )
+            recovered_downloads = {
+                button.label for button in recovered.get("download_button")
+            }
+            self.assertIn("下载 标识符补全", recovered_downloads)
+            self.assertIn("下载部分结果 ZIP", recovered_downloads)
+            self.assertEqual(
+                recovered.session_state["auto_query_workflow_charts"][
+                    "Post_Query_Chart"
+                ].pdf,
+                generated_chart.pdf,
+            )
+            self.assertEqual(
+                recovered.session_state["auto_query_workflow_result"].charts[
+                    "Post_Query_Chart"
+                ].png,
+                generated_chart.png,
+            )
+        finally:
+            if run_token:
+                delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
+
+    def test_page_6_offers_partial_zip_when_workflow_fails_before_first_module_export(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
+        app = _app_test_with_cached_workbook()
+        run_token = None
+        media_storages = []
+        try:
+            with (
+                _capture_app_test_media_storage(media_storages),
+                patch(
+                    "src.auto_query_workflow.run_auto_query_workflow",
+                    side_effect=RuntimeError("failed before first module"),
+                ),
+            ):
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "开始一键运行"
+                ).click().run(timeout=20)
+
+            self.assertEqual(len(app.exception), 0)
+            run_token = app.session_state["auto_query_run_token"]
+            self.assertEqual(
+                app.session_state["auto_query_module_workbooks"],
+                OrderedDict(),
+            )
+            downloads = {
+                button.label: button for button in app.get("download_button")
+            }
+            self.assertIn("下载部分结果 ZIP", downloads)
+            partial_payload = _app_test_download_payload(
+                downloads["下载部分结果 ZIP"], media_storages[-1]
+            )
+            with zipfile.ZipFile(io.BytesIO(partial_payload)) as partial_zip:
+                self.assertEqual(
+                    partial_zip.namelist(),
+                    ["Partial_Auto_Query_Workflow_Results.xlsx"],
+                )
+                workbook = pd.ExcelFile(
+                    io.BytesIO(
+                        partial_zip.read(
+                            "Partial_Auto_Query_Workflow_Results.xlsx"
+                        )
+                    )
+                )
+                self.assertTrue(
+                    {
+                        "Run_Log",
+                        "Representative_Input",
+                        "Structure_Preparation",
+                        "Warnings",
+                    }.issubset(workbook.sheet_names)
+                )
+
+            stored = load_checkpoint(run_token, root=checkpoint_root)
+            self.assertEqual(stored.checkpoint.status, "failed")
+            self.assertEqual(stored.module_workbooks, OrderedDict())
+        finally:
+            if run_token:
+                delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
+
+    def test_page_6_download_endpoint_returns_xlsx_without_rerunning(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_mocks = storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
+        run_token = generate_run_token()
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [
+                    (
+                        "Identifier_Completion",
+                        pd.DataFrame(
+                            {"compound": ["Compound A"], "cas": ["64-17-5"]}
+                        ),
+                    )
+                ]
+            ),
+            step_status=pd.DataFrame(
+                {
+                    "step": ["标识符补全"],
+                    "status": ["完成"],
+                    "rows": [1],
+                    "message": [""],
+                }
+            ),
+            warnings=pd.DataFrame(columns=["stage", "message"]),
+        )
+        module = build_auto_workflow_module_workbook(result, "标识符补全")
+        checkpoint = AutoWorkflowCheckpoint(
+            run_id=generate_run_token(),
+            input_signature="download-smoke-input",
+            settings_signature="download-smoke-settings",
+            selected_steps=("标识符补全", "EPI Suite 环境归趋"),
+            finished_steps=("标识符补全",),
+            current_step="EPI Suite 环境归趋",
+            status="running",
+            result=result,
+            error_message="",
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        media_storages = []
+        try:
+            save_checkpoint(
+                run_token,
+                checkpoint,
+                "download-smoke.xlsx",
+                {module.slug: module},
+                root=checkpoint_root,
+            )
+            with _capture_app_test_media_storage(media_storages):
+                app = AppTest.from_file(
+                    "pages/6_一键批量查询.py", default_timeout=20
+                )
+                app.query_params["run"] = run_token
+                app.run(timeout=20)
+
+                self.assertEqual(len(app.exception), 0)
+                downloads = {
+                    button.label: button for button in app.get("download_button")
+                }
+                download = downloads["下载 标识符补全"]
+                self.assertTrue(download.proto.ignore_rerun)
+                token_before = app.session_state["auto_query_run_token"]
+                result_before = app.session_state["auto_query_workflow_result"]
+                status_before = result_before.step_status.to_json(
+                    orient="split", force_ascii=False
+                )
+                execution_count_before = storage_mocks.cleanup.call_count
+
+                payload = _app_test_download_payload(
+                    download, media_storages[-1]
+                )
+
+                self.assertTrue(payload.startswith(b"PK"))
+                self.assertIn(
+                    "Identifier_Completion",
+                    pd.ExcelFile(io.BytesIO(payload)).sheet_names,
+                )
+                self.assertEqual(
+                    app.session_state["auto_query_run_token"], token_before
+                )
+                self.assertIs(
+                    app.session_state["auto_query_workflow_result"], result_before
+                )
+                self.assertEqual(
+                    app.session_state["auto_query_workflow_result"].step_status.to_json(
+                        orient="split", force_ascii=False
+                    ),
+                    status_before,
+                )
+                self.assertEqual(
+                    storage_mocks.cleanup.call_count, execution_count_before
+                )
+        finally:
+            delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
+
+    def test_requirements_support_non_rerunning_download_buttons(self):
+        requirements = Path("requirements.txt").read_text(encoding="utf-8")
+        active_requirements = [
+            line.strip()
+            for line in requirements.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        streamlit_requirements = [
+            line
+            for line in active_requirements
+            if re.match(r"^streamlit(?=[<>=!~\s]|$)", line, flags=re.IGNORECASE)
+        ]
+
+        self.assertEqual(streamlit_requirements, ["streamlit>=1.43,<2"])
+
+    def test_page_6_renders_recovered_results_before_stopping_for_missing_upload(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        no_upload_block = page_text.split("if not active_uploads:", 1)[1].split(
+            "st.success", 1
+        )[0]
+
+        self.assertIn("auto_query_partial_result", no_upload_block)
+        self.assertIn("_render_saved_results", no_upload_block)
+        self.assertIn("st.stop()", no_upload_block)
+
+    def test_page_6_uses_unique_keys_for_repeated_live_checkpoint_renders(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        self.assertIn("def handle_checkpoint", page_text)
+        callback_block = page_text.split("def handle_checkpoint", 1)[1].split(
+            "initial_result", 1
+        )[0]
+
+        self.assertIn("live_render_generation", callback_block)
+        self.assertIn("key_prefix=", callback_block)
+        module_renderer = page_text.split("def _render_module_downloads", 1)[1].split(
+            "def ", 1
+        )[0]
+        self.assertIn("key_prefix", module_renderer)
+        self.assertIn("slug", module_renderer)
+        self.assertIn('on_click="ignore"', module_renderer)
+
+    def test_page_6_discards_old_full_zip_before_installing_a_recovery(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        self.assertIn("loaded = load_checkpoint(recovery_token)", page_text)
+        restore_success = page_text.split(
+            "loaded = load_checkpoint(recovery_token)", 1
+        )[1].split("uploaded_file = st.file_uploader", 1)[0]
+
+        self.assertIn("RESULT_CACHE_KEYS", restore_success)
+        self.assertIn("clear_uploads", restore_success)
 
     def test_page_6_groups_results_into_module_dashboard_tabs(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
