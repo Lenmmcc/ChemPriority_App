@@ -66,6 +66,28 @@ def settings_signature(settings):
     return hashlib.sha256(payload).hexdigest()
 
 
+def invalidate_recovered_results_on_settings_mismatch(
+    state,
+    current_settings_signature,
+    result_keys,
+    checkpoint_keys,
+    manifest_key="auto_query_checkpoint_manifest",
+):
+    """Drop restored session artifacts when their settings no longer match."""
+    manifest = state.get(manifest_key)
+    recovered_signature = (
+        manifest.get("settings_signature") if isinstance(manifest, Mapping) else None
+    )
+    mismatch = bool(
+        recovered_signature
+        and current_settings_signature
+        and recovered_signature != current_settings_signature
+    )
+    if mismatch:
+        clear_uploads(state, (*result_keys, *checkpoint_keys))
+    return mismatch
+
+
 def invalidate_results_on_settings_change(state, signature_key, settings, result_keys):
     """Clear dependent results when an existing settings signature changes."""
     signature = settings_signature(settings)

@@ -46,6 +46,7 @@ from src.auto_query_progress import (
 from src.upload_state import (
     cached_uploads,
     clear_uploads,
+    invalidate_recovered_results_on_settings_mismatch,
     invalidate_results_on_settings_change,
     settings_signature,
     store_uploads,
@@ -691,6 +692,19 @@ result_settings = {
         "robustness_seed": int(robustness_seed),
     },
 }
+current_settings_signature = settings_signature(result_settings)
+recovered_settings_mismatch = invalidate_recovered_results_on_settings_mismatch(
+    st.session_state,
+    current_settings_signature,
+    RESULT_CACHE_KEYS,
+    CHECKPOINT_STATE_KEYS,
+)
+if recovered_settings_mismatch:
+    st.query_params.pop("run", None)
+    st.info(
+        "恢复结果的运行设置与当前页面设置不同，已从当前会话移除。"
+        "原检查点仍保留 24 小时，可通过原恢复链接重新查看。"
+    )
 settings_changed = invalidate_results_on_settings_change(
     st.session_state,
     SETTINGS_SIGNATURE_KEY,
