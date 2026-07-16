@@ -1315,6 +1315,60 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn("Auto_Query_Workflow_Results.zip", page_text)
         self.assertIn("application/zip", page_text)
 
+    def test_page_6_wires_checkpoint_restore_and_non_rerunning_downloads(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+
+        for token in (
+            "cleanup_expired_checkpoints(",
+            'st.query_params.get("run")',
+            'st.query_params["run"] = run_token',
+            "load_checkpoint(",
+            "save_checkpoint(",
+            "delete_checkpoint(",
+            "checkpoint_callback=handle_checkpoint",
+            'on_click="ignore"',
+            "Auto_Query_Workflow_Partial_Results.zip",
+            "已恢复上次运行的部分结果",
+            "上次运行未正常结束",
+        ):
+            self.assertIn(token, page_text)
+
+    def test_page_6_renders_recovered_results_before_stopping_for_missing_upload(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        no_upload_block = page_text.split("if not active_uploads:", 1)[1].split(
+            "st.success", 1
+        )[0]
+
+        self.assertIn("auto_query_partial_result", no_upload_block)
+        self.assertIn("_render_saved_results", no_upload_block)
+        self.assertIn("st.stop()", no_upload_block)
+
+    def test_page_6_uses_unique_keys_for_repeated_live_checkpoint_renders(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        self.assertIn("def handle_checkpoint", page_text)
+        callback_block = page_text.split("def handle_checkpoint", 1)[1].split(
+            "initial_result", 1
+        )[0]
+
+        self.assertIn("live_render_generation", callback_block)
+        self.assertIn("key_prefix=", callback_block)
+        module_renderer = page_text.split("def _render_module_downloads", 1)[1].split(
+            "def ", 1
+        )[0]
+        self.assertIn("key_prefix", module_renderer)
+        self.assertIn("slug", module_renderer)
+        self.assertIn('on_click="ignore"', module_renderer)
+
+    def test_page_6_discards_old_full_zip_before_installing_a_recovery(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        self.assertIn("loaded = load_checkpoint(recovery_token)", page_text)
+        restore_success = page_text.split(
+            "loaded = load_checkpoint(recovery_token)", 1
+        )[1].split("uploaded_file = st.file_uploader", 1)[0]
+
+        self.assertIn("RESULT_CACHE_KEYS", restore_success)
+        self.assertIn("clear_uploads", restore_success)
+
     def test_page_6_groups_results_into_module_dashboard_tabs(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
             page_text = page_file.read()

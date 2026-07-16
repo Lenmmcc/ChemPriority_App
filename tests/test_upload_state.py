@@ -142,6 +142,22 @@ class UploadStateTests(unittest.TestCase):
             for token in tokens:
                 self.assertIn(token, page_text, f"{page_path.name} is missing {token}")
 
+    def test_page_6_declares_all_checkpoint_session_keys_and_clears_the_current_token(self):
+        page_text = next(Path("pages").glob("6_*.py")).read_text(encoding="utf-8")
+        for key in (
+            "auto_query_run_token",
+            "auto_query_checkpoint_manifest",
+            "auto_query_partial_result",
+            "auto_query_module_workbooks",
+            "auto_query_checkpoint_warning",
+        ):
+            self.assertIn(key, page_text)
+        clear_block = page_text.split("def clear_auto_query_state", 1)[1].split(
+            "st.set_page_config", 1
+        )[0]
+        self.assertIn("delete_checkpoint", clear_block)
+        self.assertIn('st.query_params.pop("run", None)', clear_block)
+
 
 if __name__ == "__main__":
     unittest.main()

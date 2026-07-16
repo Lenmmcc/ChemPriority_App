@@ -1,17 +1,36 @@
 import io
+from collections import OrderedDict
+from dataclasses import replace
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
 from src.auto_query_workflow import (
+    AUTO_WORKFLOW_CHECKPOINT_EXPORTS,
+    AutoWorkflowCheckpoint,
+    AutoWorkflowCheckpointContext,
     AutoWorkflowConfig,
     AutoWorkflowMapping,
+    AutoWorkflowResult,
     PUBLIC_TABLE_NAMES,
     build_auto_workflow_charts,
+    build_auto_workflow_module_workbook,
+    build_auto_workflow_partial_zip,
     build_auto_workflow_zip,
+    build_representative_table,
     detect_default_mapping,
     read_input_workbook,
     run_auto_query_workflow,
+)
+from src.auto_query_checkpoint import (
+    CheckpointStorageError,
+    ExpiredCheckpoint,
+    cleanup_expired_checkpoints,
+    delete_checkpoint,
+    generate_run_token,
+    load_checkpoint,
+    save_checkpoint,
 )
 from src.cp_screening_workflow import PBMToxPiConfig
 from src.query_cache import clear_query_cache, current_cache_path
@@ -28,6 +47,7 @@ from src.upload_state import (
     cached_uploads,
     clear_uploads,
     invalidate_results_on_settings_change,
+    settings_signature,
     store_uploads,
     upload_bytes,
 )
@@ -42,13 +62,30 @@ RESULT_CACHE_KEYS = (
     "auto_query_workflow_charts",
     "auto_query_workflow_zip",
 )
+CHECKPOINT_STATE_KEYS = (
+    "auto_query_run_token",
+    "auto_query_checkpoint_manifest",
+    "auto_query_partial_result",
+    "auto_query_module_workbooks",
+    "auto_query_checkpoint_warning",
+)
 SETTINGS_SIGNATURE_KEY = "auto_query_settings_signature"
 
 
 def clear_auto_query_state():
-    clear_uploads(st.session_state, (*INPUT_CACHE_KEYS, *RESULT_CACHE_KEYS))
+    token = st.session_state.get("auto_query_run_token") or st.query_params.get("run")
+    if token:
+        try:
+            delete_checkpoint(token)
+        except (CheckpointStorageError, OSError):
+            pass
+    clear_uploads(
+        st.session_state,
+        (*INPUT_CACHE_KEYS, *RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+    )
     st.session_state.pop(SETTINGS_SIGNATURE_KEY, None)
     st.session_state.pop("auto_query_upload", None)
+    st.query_params.pop("run", None)
 
 
 st.set_page_config(
@@ -235,6 +272,148 @@ def _render_result_dashboard(result, charts):
                 st.image(chart.png, caption=chart.title)
 
 
+def _render_module_downloads(
+    result,
+    module_workbooks,
+    *,
+    key_prefix="auto_query_module",
+):
+    if result.step_status.empty:
+        return
+    st.subheader("已完成模块，可立即下载")
+    modules_by_step = {
+        module.step: (slug, module) for slug, module in module_workbooks.items()
+    }
+    for row in result.step_status.to_dict("records"):
+        step = str(row["step"])
+        warning_count = 0
+        if not result.warnings.empty and "stage" in result.warnings.columns:
+            warning_count = int(result.warnings["stage"].eq(step).sum())
+        rows_value = row.get("rows")
+        row_count = 0 if pd.isna(rows_value) else int(rows_value)
+        st.caption(
+            f"{step}：{row['status']} · {row_count} 行 · {warning_count} 条警告"
+        )
+        if row.get("message"):
+            st.warning(str(row["message"]))
+        export_definition = AUTO_WORKFLOW_CHECKPOINT_EXPORTS.get(step)
+        preview = None
+        if export_definition is not None:
+            preview = next(
+                (
+                    result.tables[name]
+                    for name in export_definition[2]
+                    if isinstance(result.tables.get(name), pd.DataFrame)
+                    and not result.tables[name].empty
+                ),
+                None,
+            )
+        if preview is not None:
+            with st.expander(f"预览 {step} 关键结果", expanded=False):
+                _show_dataframe(preview.head(20))
+        export = modules_by_step.get(step)
+        if export is None:
+            st.caption("该模块当前没有可导出的结果表。")
+            continue
+        slug, module = export
+        st.download_button(
+            f"下载 {module.step}",
+            data=module.data,
+            file_name=module.file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{key_prefix}_download_{slug}",
+            on_click="ignore",
+        )
+
+
+def _render_saved_results(
+    result,
+    charts,
+    full_package=None,
+    module_workbooks=None,
+    partial=False,
+):
+    module_workbooks = module_workbooks or OrderedDict()
+    st.subheader("运行日志")
+    _show_dataframe(result.step_status)
+    if not result.warnings.empty:
+        with st.expander("Warnings", expanded=False):
+            _show_dataframe(result.warnings)
+    table_names = [name for name in result.tables if name in PUBLIC_TABLE_NAMES]
+    if table_names:
+        selected_table = st.selectbox("查看结果表", table_names, key="auto_query_result_table")
+        _show_dataframe(result.tables[selected_table])
+    structure_preparation = result.tables.get("Structure_Preparation")
+    if isinstance(structure_preparation, pd.DataFrame):
+        _render_structure_preparation_summary(structure_preparation)
+    _render_result_dashboard(result, charts)
+    _render_module_downloads(result, module_workbooks)
+    if partial:
+        try:
+            partial_zip = build_auto_workflow_partial_zip(result, module_workbooks)
+        except Exception as exc:
+            st.warning(f"部分结果 ZIP 生成失败：{exc}")
+        else:
+            st.download_button(
+                "下载部分结果 ZIP",
+                data=partial_zip.getvalue(),
+                file_name="Auto_Query_Workflow_Partial_Results.zip",
+                mime="application/zip",
+                key="auto_query_partial_zip_download",
+                on_click="ignore",
+            )
+    if full_package is not None:
+        st.download_button(
+            "下载一键批量查询结果 ZIP",
+            data=full_package.getvalue(),
+            file_name="Auto_Query_Workflow_Results.zip",
+            mime="application/zip",
+            key="auto_query_full_zip_download",
+            on_click="ignore",
+        )
+
+
+try:
+    cleanup_expired_checkpoints()
+except (CheckpointStorageError, OSError) as exc:
+    st.session_state["auto_query_checkpoint_warning"] = str(exc)
+
+recovery_token = st.query_params.get("run")
+if recovery_token and st.session_state.get("auto_query_run_token") != recovery_token:
+    try:
+        loaded = load_checkpoint(recovery_token)
+    except ExpiredCheckpoint:
+        st.warning("上次结果已超过 24 小时，不能恢复。")
+        st.query_params.pop("run", None)
+    except CheckpointStorageError as exc:
+        st.warning(f"无法恢复上次结果：{exc}")
+        st.query_params.pop("run", None)
+    else:
+        checkpoint = loaded.checkpoint
+        clear_uploads(
+            st.session_state,
+            (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+        )
+        st.session_state["auto_query_run_token"] = recovery_token
+        st.session_state["auto_query_checkpoint_manifest"] = loaded.manifest
+        st.session_state["auto_query_partial_result"] = checkpoint.result
+        st.session_state["auto_query_workflow_result"] = checkpoint.result
+        st.session_state["auto_query_module_workbooks"] = loaded.module_workbooks
+        st.session_state["auto_query_workflow_charts"] = checkpoint.result.charts
+        st.success("已恢复上次运行的部分结果。")
+        st.caption(
+            "恢复网址包含短期访问令牌，请勿分享；临时结果 24 小时后过期，"
+            "服务器重新部署后不保证保留。"
+        )
+        if checkpoint.status in {"running", "failed"}:
+            st.warning(
+                "上次运行未正常结束；已完成结果可下载，"
+                "重新运行会复用查询缓存。"
+            )
+            if checkpoint.error_message:
+                st.caption(f"上次错误：{checkpoint.error_message}")
+
+
 uploaded_file = st.file_uploader(
     "上传统一格式 Excel 文件",
     type=["xlsx", "xls"],
@@ -251,18 +430,50 @@ if uploaded_file is not None:
         [uploaded_file],
     )
     if input_changed:
-        clear_uploads(st.session_state, RESULT_CACHE_KEYS)
+        clear_uploads(
+            st.session_state,
+            (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+        )
+        st.query_params.pop("run", None)
 else:
     active_uploads = cached_uploads(st.session_state, "auto_query_input_files")
 
-if not active_uploads:
-    st.info("请先上传 Excel 文件。")
-    st.stop()
+checkpoint_manifest = st.session_state.get("auto_query_checkpoint_manifest") or {}
+current_input_signature = st.session_state.get("auto_query_input_signature")
+checkpoint_input_signature = checkpoint_manifest.get("input_signature")
+if (
+    current_input_signature
+    and checkpoint_input_signature
+    and current_input_signature != checkpoint_input_signature
+):
+    clear_uploads(
+        st.session_state,
+        (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+    )
+    st.query_params.pop("run", None)
 
-st.success("已加载输入文件。")
 if st.button("清空当前数据", key="auto_clear_cached_input"):
     clear_auto_query_state()
     st.rerun()
+
+if not active_uploads:
+    recovered = st.session_state.get("auto_query_partial_result")
+    checkpoint_warning = st.session_state.get("auto_query_checkpoint_warning")
+    if checkpoint_warning:
+        st.warning(checkpoint_warning)
+    if recovered is not None:
+        _render_saved_results(
+            recovered,
+            st.session_state.get("auto_query_workflow_charts") or {},
+            module_workbooks=st.session_state.get("auto_query_module_workbooks")
+            or OrderedDict(),
+            partial=True,
+        )
+    else:
+        st.info("请先上传 Excel 文件。")
+    st.stop()
+
+st.success("已加载输入文件。")
 
 try:
     input_df = read_input_workbook(io.BytesIO(upload_bytes(active_uploads[0])))
@@ -480,12 +691,15 @@ result_settings = {
         "robustness_seed": int(robustness_seed),
     },
 }
-invalidate_results_on_settings_change(
+settings_changed = invalidate_results_on_settings_change(
     st.session_state,
     SETTINGS_SIGNATURE_KEY,
     result_settings,
     RESULT_CACHE_KEYS,
 )
+if settings_changed:
+    clear_uploads(st.session_state, CHECKPOINT_STATE_KEYS)
+    st.query_params.pop("run", None)
 
 start_run = st.button("开始一键运行", type="primary")
 
@@ -531,6 +745,100 @@ if start_run:
         run_echa_ghs=run_echa_ghs,
         run_source_origin=run_source_origin,
         run_pov_lrtp_toxpi=run_pov_toxpi,
+    )
+    clear_uploads(
+        st.session_state,
+        (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+    )
+    st.query_params.pop("run", None)
+    try:
+        cleanup_expired_checkpoints()
+    except (CheckpointStorageError, OSError) as exc:
+        st.session_state["auto_query_checkpoint_warning"] = str(exc)
+    run_token = generate_run_token()
+    run_id = generate_run_token()
+    st.query_params["run"] = run_token
+    st.session_state["auto_query_run_token"] = run_token
+    module_workbooks = OrderedDict()
+    latest_checkpoint = [None]
+    live_render_generation = [0]
+    partial_container = st.empty()
+    checkpoint_context = AutoWorkflowCheckpointContext(
+        run_id=run_id,
+        input_signature=st.session_state["auto_query_input_signature"],
+        settings_signature=settings_signature(result_settings),
+        selected_steps=tuple(selected_steps),
+    )
+
+    def handle_checkpoint(checkpoint):
+        latest_checkpoint[0] = checkpoint
+        st.session_state["auto_query_partial_result"] = checkpoint.result
+        st.session_state["auto_query_workflow_result"] = checkpoint.result
+        if checkpoint.current_step:
+            try:
+                module = build_auto_workflow_module_workbook(
+                    checkpoint.result,
+                    checkpoint.current_step,
+                )
+            except Exception as exc:
+                st.session_state["auto_query_checkpoint_warning"] = (
+                    f"模块导出失败：{exc}"
+                )
+            else:
+                if module is not None:
+                    module_workbooks[module.slug] = module
+        st.session_state["auto_query_module_workbooks"] = OrderedDict(
+            module_workbooks
+        )
+        try:
+            save_checkpoint(
+                run_token,
+                checkpoint,
+                active_uploads[0]["name"],
+                module_workbooks,
+            )
+        except Exception as exc:
+            st.session_state["auto_query_checkpoint_warning"] = (
+                "临时恢复保存失败，本次结果仅保留在当前页面会话："
+                f"{exc}"
+            )
+        live_render_generation[0] += 1
+        render_scope = f"auto_query_live_{live_render_generation[0]}"
+        partial_container.empty()
+        with partial_container.container():
+            _render_module_downloads(
+                checkpoint.result,
+                module_workbooks,
+                key_prefix=render_scope,
+            )
+
+    initial_result = AutoWorkflowResult(
+        mapping=mapping,
+        representative_table=build_representative_table(
+            prepared_input_df,
+            mapping,
+        ),
+        tables=OrderedDict(
+            [("Structure_Preparation", prepared_input_df.copy())]
+        ),
+        step_status=pd.DataFrame(
+            columns=["step", "status", "rows", "message"]
+        ),
+        warnings=pd.DataFrame(columns=["stage", "message"]),
+    )
+    handle_checkpoint(
+        AutoWorkflowCheckpoint(
+            run_id=run_id,
+            input_signature=checkpoint_context.input_signature,
+            settings_signature=checkpoint_context.settings_signature,
+            selected_steps=checkpoint_context.selected_steps,
+            finished_steps=(),
+            current_step=None,
+            status="running",
+            result=initial_result,
+            error_message="",
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
     )
     progress_state = create_progress_state(selected_steps)
     overall_label = st.empty()
@@ -600,48 +908,64 @@ if start_run:
         source_origin_max_workers=int(source_origin_max_workers),
     )
     render_progress()
-    with st.spinner("正在按顺序运行已选项目..."):
-        result = run_auto_query_workflow(
-            prepared_input_df,
-            config=config,
-            progress_callback=update_progress,
-            activity_callback=update_activity,
-        )
-        status_box.info("查询环节已完成，正在汇总结果与生成图表...")
-        charts = build_auto_workflow_charts(result)
-        package = build_auto_workflow_zip(result, charts)
-    st.session_state["auto_query_workflow_result"] = result
-    st.session_state["auto_query_workflow_charts"] = charts
-    st.session_state["auto_query_workflow_zip"] = package
-    overall_progress_bar.progress(1.0)
-    module_progress_bar.progress(1.0)
-    status_box.success("一键批量查询完成。")
+    try:
+        with st.spinner("正在按顺序运行已选项目..."):
+            result = run_auto_query_workflow(
+                prepared_input_df,
+                config=config,
+                progress_callback=update_progress,
+                activity_callback=update_activity,
+                checkpoint_context=checkpoint_context,
+                checkpoint_callback=handle_checkpoint,
+            )
+            status_box.info(
+                "查询环节已完成，正在汇总结果与生成图表..."
+            )
+            charts = build_auto_workflow_charts(result)
+            result.charts = charts
+            package = build_auto_workflow_zip(result, charts)
+    except Exception as exc:
+        status_box.error(f"运行未完整结束：{exc}")
+        if latest_checkpoint[0] is not None:
+            failed_checkpoint = replace(
+                latest_checkpoint[0],
+                status="failed",
+                result=latest_checkpoint[0].result,
+                error_message=str(exc),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            handle_checkpoint(failed_checkpoint)
+        st.session_state["auto_query_checkpoint_warning"] = str(exc)
+    else:
+        st.session_state["auto_query_workflow_result"] = result
+        st.session_state["auto_query_workflow_charts"] = charts
+        st.session_state["auto_query_workflow_zip"] = package
+        if latest_checkpoint[0] is not None:
+            completed_checkpoint = replace(
+                latest_checkpoint[0],
+                status="completed",
+                result=result,
+                error_message="",
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            handle_checkpoint(completed_checkpoint)
+        overall_progress_bar.progress(1.0)
+        module_progress_bar.progress(1.0)
+        status_box.success("一键批量查询完成。")
+    partial_container.empty()
 
 result = st.session_state.get("auto_query_workflow_result")
 if result is not None:
-    st.subheader("运行日志")
-    _show_dataframe(result.step_status)
-
-    if not result.warnings.empty:
-        with st.expander("Warnings", expanded=False):
-            _show_dataframe(result.warnings)
-
-    table_names = [name for name in result.tables if name in PUBLIC_TABLE_NAMES]
-    if table_names:
-        selected_table = st.selectbox("查看结果表", table_names)
-        _show_dataframe(result.tables[selected_table])
-    structure_preparation = result.tables.get("Structure_Preparation")
-    if isinstance(structure_preparation, pd.DataFrame):
-        _render_structure_preparation_summary(structure_preparation)
-
     charts = st.session_state.get("auto_query_workflow_charts") or {}
-    _render_result_dashboard(result, charts)
-
     package = st.session_state.get("auto_query_workflow_zip")
-    if package is not None:
-        st.download_button(
-            "下载一键批量查询结果 ZIP",
-            data=package.getvalue(),
-            file_name="Auto_Query_Workflow_Results.zip",
-            mime="application/zip",
-        )
+    module_workbooks = st.session_state.get("auto_query_module_workbooks") or OrderedDict()
+    checkpoint_warning = st.session_state.get("auto_query_checkpoint_warning")
+    if checkpoint_warning:
+        st.warning(checkpoint_warning)
+    _render_saved_results(
+        result,
+        charts,
+        full_package=package,
+        module_workbooks=module_workbooks,
+        partial=package is None and bool(module_workbooks),
+    )
