@@ -136,7 +136,23 @@ def _frame_bytes(frame: pd.DataFrame) -> bytes:
     text = frame.to_json(
         orient="table", date_format="iso", index=False, force_ascii=False
     )
-    return gzip.compress(text.encode("utf-8"))
+    return gzip.compress(text.encode("utf-8"), mtime=0)
+
+
+def _content_artifact_path(folder: str, payload: bytes, suffix: str) -> Path:
+    digest = hashlib.sha256(payload).hexdigest()
+    return Path(folder) / f"{digest}{suffix}"
+
+
+def _write_immutable_artifact(
+    run_dir: Path,
+    relative: Path,
+    payload: bytes,
+) -> None:
+    path = _validated_run_path(run_dir, run_dir / relative)
+    if path.is_file():
+        return
+    _atomic_checkpoint_write(run_dir, path, payload)
 
 
 def _read_frame(path: Path) -> pd.DataFrame:
@@ -162,7 +178,6 @@ def save_checkpoint(
     run_dir = _run_directory(token, root)
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = _validated_run_path(run_dir, run_dir / "manifest.json")
-    revision = uuid4().hex
     frames = OrderedDict(
         [
             ("representative_table", checkpoint.result.representative_table),
@@ -173,18 +188,19 @@ def save_checkpoint(
     )
     table_files = {}
     for name, frame in frames.items():
-        safe_name = _safe_name(name)
-        relative = Path("tables") / f"{revision}__{safe_name}.json.gz"
-        _atomic_checkpoint_write(run_dir, run_dir / relative, _frame_bytes(frame))
+        _safe_name(name)
+        payload = _frame_bytes(frame)
+        relative = _content_artifact_path("tables", payload, ".json.gz")
+        _write_immutable_artifact(run_dir, relative, payload)
         table_files[name] = relative.as_posix()
 
     chart_files = {}
     for key, chart in checkpoint.result.charts.items():
-        safe_key = _safe_name(key)
-        png = Path("charts") / f"{revision}__{safe_key}.png"
-        pdf = Path("charts") / f"{revision}__{safe_key}.pdf"
-        _atomic_checkpoint_write(run_dir, run_dir / png, chart.png)
-        _atomic_checkpoint_write(run_dir, run_dir / pdf, chart.pdf)
+        _safe_name(key)
+        png = _content_artifact_path("charts", chart.png, ".png")
+        pdf = _content_artifact_path("charts", chart.pdf, ".pdf")
+        _write_immutable_artifact(run_dir, png, chart.png)
+        _write_immutable_artifact(run_dir, pdf, chart.pdf)
         chart_files[key] = {
             "title": chart.title,
             "png": png.as_posix(),
@@ -193,10 +209,10 @@ def save_checkpoint(
 
     module_files = {}
     for slug, module in module_workbooks.items():
-        safe_slug = _safe_name(slug)
+        _safe_name(slug)
         safe_file_name = _safe_file_name(module.file_name)
-        relative = Path("modules") / f"{revision}__{safe_slug}.xlsx"
-        _atomic_checkpoint_write(run_dir, run_dir / relative, module.data)
+        relative = _content_artifact_path("modules", module.data, ".xlsx")
+        _write_immutable_artifact(run_dir, relative, module.data)
         module_files[slug] = {
             "step": module.step,
             "file_name": safe_file_name,

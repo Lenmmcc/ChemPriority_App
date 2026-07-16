@@ -309,6 +309,13 @@ class AutoWorkflowCheckpointContext:
 
 @dataclass(frozen=True)
 class AutoWorkflowCheckpoint:
+    """Cumulative read-only view delivered to a checkpoint callback.
+
+    The outer object is frozen, while DataFrames inside ``result`` are shared
+    to avoid copying large cumulative tables. Callbacks must not mutate the
+    result, its tables, or any other contained artifact.
+    """
+
     run_id: str
     input_signature: str
     settings_signature: str
@@ -793,6 +800,8 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         result.step_status.to_excel(writer, sheet_name="Run_Log", index=False)
         result.representative_table.to_excel(writer, sheet_name="Representative_Input", index=False)
+        if not isinstance(result.tables.get("Warnings"), pd.DataFrame):
+            result.warnings.to_excel(writer, sheet_name="Warnings", index=False)
         for name, table in result.tables.items():
             if name not in PUBLIC_TABLE_NAMES:
                 continue

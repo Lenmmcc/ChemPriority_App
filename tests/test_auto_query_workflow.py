@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import ast
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import importlib
 import io
@@ -103,7 +104,100 @@ def _capture_app_test_media_storage(storages):
     )
 
 
+@contextmanager
+def _isolated_page_checkpoint_storage(root):
+    root = Path(root)
+
+    def isolated_save(*args, **kwargs):
+        kwargs["root"] = root
+        return save_checkpoint(*args, **kwargs)
+
+    def isolated_load(*args, **kwargs):
+        kwargs["root"] = root
+        return load_checkpoint(*args, **kwargs)
+
+    def isolated_delete(*args, **kwargs):
+        kwargs["root"] = root
+        return delete_checkpoint(*args, **kwargs)
+
+    def isolated_cleanup(*args, **kwargs):
+        kwargs["root"] = root
+        return cleanup_expired_checkpoints(*args, **kwargs)
+
+    with (
+        patch(
+            "src.auto_query_checkpoint.save_checkpoint",
+            side_effect=isolated_save,
+        ),
+        patch(
+            "src.auto_query_checkpoint.load_checkpoint",
+            side_effect=isolated_load,
+        ),
+        patch(
+            "src.auto_query_checkpoint.delete_checkpoint",
+            side_effect=isolated_delete,
+        ),
+        patch(
+            "src.auto_query_checkpoint.cleanup_expired_checkpoints",
+            side_effect=isolated_cleanup,
+        ) as cleanup_mock,
+    ):
+        yield SimpleNamespace(cleanup=cleanup_mock)
+
+
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_checkpoint_callback_contract_keeps_shared_result_frames_read_only(self):
+        self.assertIn("read-only", AutoWorkflowCheckpoint.__doc__ or "")
+        self.assertIn("must not mutate", AutoWorkflowCheckpoint.__doc__ or "")
+
+        page_tree = ast.parse(
+            Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        )
+        handler = next(
+            node
+            for node in ast.walk(page_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "handle_checkpoint"
+        )
+
+        def checkpoint_result_expression(node):
+            return ast.unparse(node).startswith("checkpoint.result")
+
+        mutations = []
+        for node in ast.walk(handler):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                mutations.extend(
+                    ast.unparse(target)
+                    for target in targets
+                    if checkpoint_result_expression(target)
+                )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and checkpoint_result_expression(node.func.value)
+                and node.func.attr
+                in {
+                    "drop",
+                    "drop_duplicates",
+                    "fillna",
+                    "insert",
+                    "pop",
+                    "rename",
+                    "replace",
+                    "set_axis",
+                    "sort_index",
+                    "sort_values",
+                    "update",
+                }
+            ):
+                mutations.append(ast.unparse(node))
+
+        self.assertEqual(mutations, [])
+
     def test_page_6_auto_query_imports_resolve_to_real_exports(self):
         page_path = Path("pages/6_一键批量查询.py")
         page_tree = ast.parse(page_path.read_text(encoding="utf-8"))
@@ -1384,10 +1478,25 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             self.assertIn(token, page_text)
 
     def test_page_6_keeps_partial_artifacts_when_full_zip_build_fails(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
         app = _app_test_with_cached_workbook()
         run_token = None
         identifier_result = _completed_identifier_rows(
             ["Compound A", "Compound B"]
+        )
+        generated_chart = AutoWorkflowChart(
+            "Post-query chart",
+            b"\x89PNG\r\n\x1a\nPOST-QUERY",
+            b"%PDF-1.4 POST-QUERY",
+        )
+        generated_charts = OrderedDict(
+            [("Post_Query_Chart", generated_chart)]
         )
         media_storages = []
         try:
@@ -1400,7 +1509,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "src.auto_query_workflow.build_auto_workflow_charts",
-                    return_value=OrderedDict(),
+                    return_value=generated_charts,
                 ),
                 patch(
                     "src.auto_query_workflow.build_auto_workflow_zip",
@@ -1425,18 +1534,30 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 "identifier_completion",
                 app.session_state["auto_query_module_workbooks"],
             )
+            self.assertEqual(
+                app.session_state["auto_query_workflow_charts"],
+                generated_charts,
+            )
+            self.assertEqual(
+                app.session_state["auto_query_workflow_result"].charts,
+                generated_charts,
+            )
             downloads = {
                 button.label: button for button in app.get("download_button")
             }
             self.assertIn("下载 标识符补全", downloads)
             self.assertIn("下载部分结果 ZIP", downloads)
 
-            stored = load_checkpoint(run_token)
+            stored = load_checkpoint(run_token, root=checkpoint_root)
             self.assertEqual(stored.checkpoint.status, "failed")
             self.assertEqual(
                 stored.checkpoint.error_message, "simulated final ZIP failure"
             )
             self.assertIn("identifier_completion", stored.module_workbooks)
+            self.assertEqual(
+                stored.checkpoint.result.charts["Post_Query_Chart"].png,
+                generated_chart.png,
+            )
 
             module_payload = _app_test_download_payload(
                 downloads["下载 标识符补全"], media_storages[-1]
@@ -1479,11 +1600,98 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             }
             self.assertIn("下载 标识符补全", recovered_downloads)
             self.assertIn("下载部分结果 ZIP", recovered_downloads)
+            self.assertEqual(
+                recovered.session_state["auto_query_workflow_charts"][
+                    "Post_Query_Chart"
+                ].pdf,
+                generated_chart.pdf,
+            )
+            self.assertEqual(
+                recovered.session_state["auto_query_workflow_result"].charts[
+                    "Post_Query_Chart"
+                ].png,
+                generated_chart.png,
+            )
         finally:
             if run_token:
-                delete_checkpoint(run_token)
+                delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
+
+    def test_page_6_offers_partial_zip_when_workflow_fails_before_first_module_export(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
+        app = _app_test_with_cached_workbook()
+        run_token = None
+        media_storages = []
+        try:
+            with (
+                _capture_app_test_media_storage(media_storages),
+                patch(
+                    "src.auto_query_workflow.run_auto_query_workflow",
+                    side_effect=RuntimeError("failed before first module"),
+                ),
+            ):
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "开始一键运行"
+                ).click().run(timeout=20)
+
+            self.assertEqual(len(app.exception), 0)
+            run_token = app.session_state["auto_query_run_token"]
+            self.assertEqual(
+                app.session_state["auto_query_module_workbooks"],
+                OrderedDict(),
+            )
+            downloads = {
+                button.label: button for button in app.get("download_button")
+            }
+            self.assertIn("下载部分结果 ZIP", downloads)
+            partial_payload = _app_test_download_payload(
+                downloads["下载部分结果 ZIP"], media_storages[-1]
+            )
+            with zipfile.ZipFile(io.BytesIO(partial_payload)) as partial_zip:
+                self.assertEqual(
+                    partial_zip.namelist(),
+                    ["Partial_Auto_Query_Workflow_Results.xlsx"],
+                )
+                workbook = pd.ExcelFile(
+                    io.BytesIO(
+                        partial_zip.read(
+                            "Partial_Auto_Query_Workflow_Results.xlsx"
+                        )
+                    )
+                )
+                self.assertTrue(
+                    {
+                        "Run_Log",
+                        "Representative_Input",
+                        "Structure_Preparation",
+                        "Warnings",
+                    }.issubset(workbook.sheet_names)
+                )
+
+            stored = load_checkpoint(run_token, root=checkpoint_root)
+            self.assertEqual(stored.checkpoint.status, "failed")
+            self.assertEqual(stored.module_workbooks, OrderedDict())
+        finally:
+            if run_token:
+                delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
 
     def test_page_6_download_endpoint_returns_xlsx_without_rerunning(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_mocks = storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
         run_token = generate_run_token()
         result = AutoWorkflowResult(
             mapping=AutoWorkflowMapping(),
@@ -1528,13 +1736,9 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 checkpoint,
                 "download-smoke.xlsx",
                 {module.slug: module},
+                root=checkpoint_root,
             )
-            with patch(
-                "src.auto_query_checkpoint.cleanup_expired_checkpoints",
-                wraps=cleanup_expired_checkpoints,
-            ) as page_execution_sentinel, _capture_app_test_media_storage(
-                media_storages
-            ):
+            with _capture_app_test_media_storage(media_storages):
                 app = AppTest.from_file(
                     "pages/6_一键批量查询.py", default_timeout=20
                 )
@@ -1552,7 +1756,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 status_before = result_before.step_status.to_json(
                     orient="split", force_ascii=False
                 )
-                execution_count_before = page_execution_sentinel.call_count
+                execution_count_before = storage_mocks.cleanup.call_count
 
                 payload = _app_test_download_payload(
                     download, media_storages[-1]
@@ -1576,10 +1780,11 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                     status_before,
                 )
                 self.assertEqual(
-                    page_execution_sentinel.call_count, execution_count_before
+                    storage_mocks.cleanup.call_count, execution_count_before
                 )
         finally:
-            delete_checkpoint(run_token)
+            delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
 
     def test_requirements_support_non_rerunning_download_buttons(self):
         requirements = Path("requirements.txt").read_text(encoding="utf-8")

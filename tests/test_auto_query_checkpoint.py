@@ -127,6 +127,103 @@ def redirect_path_resolution(source, destination):
 
 
 class AutoQueryCheckpointTests(unittest.TestCase):
+    def test_repeated_saves_reuse_unchanged_content_addressed_artifacts(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            token = generate_run_token()
+            now = datetime(2026, 7, 16, 4, 0, tzinfo=timezone.utc)
+            module = AutoWorkflowModuleWorkbook(
+                step="标识符补全",
+                slug="identifier_completion",
+                file_name="Identifier_Completion_Results.xlsx",
+                data=b"LARGE-UNCHANGED-XLSX",
+            )
+            checkpoint = example_checkpoint(now)
+            large_table = pd.DataFrame(
+                {
+                    "compound": [f"Compound {index}" for index in range(10_000)],
+                    "score": range(10_000),
+                }
+            )
+            checkpoint.result.tables["Identifier_Completion"] = large_table
+
+            for offset in range(4):
+                run_dir = save_checkpoint(
+                    token,
+                    checkpoint,
+                    "input.xlsx",
+                    {module.slug: module},
+                    root=root,
+                    now=now + timedelta(minutes=offset),
+                )
+
+            unchanged_counts = {
+                folder: len(list((run_dir / folder).iterdir()))
+                for folder in ("tables", "charts", "modules")
+            }
+            self.assertEqual(
+                unchanged_counts,
+                {"tables": 4, "charts": 2, "modules": 1},
+            )
+            old_manifest = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+
+            changed = example_checkpoint(now + timedelta(minutes=5))
+            changed.result.tables["Identifier_Completion"] = large_table.copy()
+            changed.result.tables["Additional_Table"] = pd.DataFrame(
+                {"compound": ["C"], "value": [3]}
+            )
+            changed.result.step_status = pd.concat(
+                [
+                    changed.result.step_status,
+                    pd.DataFrame(
+                        {
+                            "step": ["EPA CompTox 用途"],
+                            "status": ["失败"],
+                            "rows": [0],
+                            "message": ["service unavailable"],
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+            changed.result.warnings = pd.concat(
+                [
+                    changed.result.warnings,
+                    pd.DataFrame(
+                        {
+                            "stage": ["EPA CompTox 用途"],
+                            "message": ["service unavailable"],
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+            save_checkpoint(
+                token,
+                changed,
+                "input.xlsx",
+                {module.slug: module},
+                root=root,
+                now=now + timedelta(minutes=5),
+            )
+
+            changed_counts = {
+                folder: len(list((run_dir / folder).iterdir()))
+                for folder in ("tables", "charts", "modules")
+            }
+            self.assertEqual(changed_counts["tables"], unchanged_counts["tables"] + 3)
+            self.assertEqual(changed_counts["charts"], unchanged_counts["charts"])
+            self.assertEqual(changed_counts["modules"], unchanged_counts["modules"])
+            for relative in old_manifest["table_files"].values():
+                self.assertTrue((run_dir / relative).is_file())
+            for entry in old_manifest["chart_files"].values():
+                self.assertTrue((run_dir / entry["png"]).is_file())
+                self.assertTrue((run_dir / entry["pdf"]).is_file())
+            for entry in old_manifest["module_files"].values():
+                self.assertTrue((run_dir / entry["path"]).is_file())
+
     def test_checkpoint_round_trip_preserves_frames_charts_and_module_workbooks(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

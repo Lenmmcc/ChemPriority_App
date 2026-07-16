@@ -937,6 +937,16 @@ if start_run:
             )
             charts = build_auto_workflow_charts(result)
             result.charts = charts
+            st.session_state["auto_query_workflow_result"] = result
+            st.session_state["auto_query_workflow_charts"] = charts
+            if latest_checkpoint[0] is not None:
+                handle_checkpoint(
+                    replace(
+                        latest_checkpoint[0],
+                        result=result,
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
             package = build_auto_workflow_zip(result, charts)
     except Exception as exc:
         status_box.error(f"运行未完整结束：{exc}")
@@ -944,7 +954,7 @@ if start_run:
             failed_checkpoint = replace(
                 latest_checkpoint[0],
                 status="failed",
-                result=latest_checkpoint[0].result,
+                result=st.session_state["auto_query_workflow_result"],
                 error_message=str(exc),
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
@@ -981,5 +991,5 @@ if result is not None:
         charts,
         full_package=package,
         module_workbooks=module_workbooks,
-        partial=package is None and bool(module_workbooks),
+        partial=package is None,
     )
