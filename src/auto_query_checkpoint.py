@@ -8,7 +8,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import secrets
 import shutil
@@ -95,6 +95,25 @@ def _safe_file_name(value) -> str:
     return value
 
 
+def _input_basename(value) -> str:
+    value = str(value)
+    basename = PureWindowsPath(PurePosixPath(value).name).name
+    if basename in {"", ".", ".."}:
+        raise CheckpointStorageError("输入文件名无效")
+    return basename
+
+
+def _validated_run_path(run_dir: Path, path: Path) -> Path:
+    run_dir = run_dir.resolve()
+    try:
+        resolved = Path(path).resolve()
+    except Exception as exc:
+        raise CheckpointStorageError(f"无法解析检查点路径：{exc}") from exc
+    if run_dir not in resolved.parents:
+        raise CheckpointStorageError("检查点路径越界")
+    return resolved
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -106,6 +125,11 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _atomic_checkpoint_write(run_dir: Path, path: Path, payload: bytes) -> None:
+    path = _validated_run_path(run_dir, path)
+    _atomic_write(path, payload)
 
 
 def _frame_bytes(frame: pd.DataFrame) -> bytes:
@@ -137,6 +161,7 @@ def save_checkpoint(
     now = now or _utc_now()
     run_dir = _run_directory(token, root)
     run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = _validated_run_path(run_dir, run_dir / "manifest.json")
     revision = uuid4().hex
     frames = OrderedDict(
         [
@@ -150,7 +175,7 @@ def save_checkpoint(
     for name, frame in frames.items():
         safe_name = _safe_name(name)
         relative = Path("tables") / f"{revision}__{safe_name}.json.gz"
-        _atomic_write(run_dir / relative, _frame_bytes(frame))
+        _atomic_checkpoint_write(run_dir, run_dir / relative, _frame_bytes(frame))
         table_files[name] = relative.as_posix()
 
     chart_files = {}
@@ -158,8 +183,8 @@ def save_checkpoint(
         safe_key = _safe_name(key)
         png = Path("charts") / f"{revision}__{safe_key}.png"
         pdf = Path("charts") / f"{revision}__{safe_key}.pdf"
-        _atomic_write(run_dir / png, chart.png)
-        _atomic_write(run_dir / pdf, chart.pdf)
+        _atomic_checkpoint_write(run_dir, run_dir / png, chart.png)
+        _atomic_checkpoint_write(run_dir, run_dir / pdf, chart.pdf)
         chart_files[key] = {
             "title": chart.title,
             "png": png.as_posix(),
@@ -171,14 +196,13 @@ def save_checkpoint(
         safe_slug = _safe_name(slug)
         safe_file_name = _safe_file_name(module.file_name)
         relative = Path("modules") / f"{revision}__{safe_slug}.xlsx"
-        _atomic_write(run_dir / relative, module.data)
+        _atomic_checkpoint_write(run_dir, run_dir / relative, module.data)
         module_files[slug] = {
             "step": module.step,
             "file_name": safe_file_name,
             "path": relative.as_posix(),
         }
 
-    manifest_path = run_dir / "manifest.json"
     created_at = now.isoformat()
     if manifest_path.exists():
         try:
@@ -191,7 +215,7 @@ def save_checkpoint(
         "schema_version": SCHEMA_VERSION,
         "token_hash": run_dir.name,
         "run_id": checkpoint.run_id,
-        "input_filename": str(input_filename),
+        "input_filename": _input_basename(input_filename),
         "input_signature": checkpoint.input_signature,
         "settings_signature": checkpoint.settings_signature,
         "selected_steps": list(checkpoint.selected_steps),
@@ -209,19 +233,18 @@ def save_checkpoint(
         "updated_at": now.isoformat(),
         "expires_at": (now + TTL).isoformat(),
     }
-    _atomic_write(
+    _atomic_checkpoint_write(
+        run_dir,
         manifest_path,
         json.dumps(
-            manifest, ensure_ascii=False, sort_keys=True, indent=2
+            manifest, ensure_ascii=False, indent=2
         ).encode("utf-8"),
     )
     return run_dir
 
 
 def _checked_relative_file(run_dir: Path, relative) -> Path:
-    path = (run_dir / str(relative)).resolve()
-    if run_dir.resolve() not in path.parents:
-        raise CheckpointStorageError("检查点清单包含越界路径")
+    path = _validated_run_path(run_dir, run_dir / str(relative))
     if not path.is_file():
         raise CheckpointStorageError(f"检查点文件缺失：{relative}")
     return path
@@ -250,7 +273,7 @@ def _manifest_expiry(manifest: Mapping[str, Any]) -> datetime:
 def load_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT, now=None):
     now = now or _utc_now()
     run_dir = _run_directory(token, root)
-    manifest_path = run_dir / "manifest.json"
+    manifest_path = _validated_run_path(run_dir, run_dir / "manifest.json")
     if not manifest_path.is_file():
         raise CheckpointStorageError("找不到可恢复的检查点")
     manifest = _read_manifest(manifest_path)
@@ -331,6 +354,36 @@ def delete_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT) -> bool:
     return True
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
+
+
+def _latest_trusted_mtime(run_dir: Path) -> datetime:
+    latest = run_dir.stat().st_mtime
+    pending = [run_dir]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if _is_link_or_junction(child):
+                continue
+            try:
+                resolved = _validated_run_path(run_dir, child)
+                stat_result = resolved.stat()
+            except (CheckpointStorageError, OSError):
+                continue
+            latest = max(latest, stat_result.st_mtime)
+            if resolved.is_dir():
+                pending.append(resolved)
+    return datetime.fromtimestamp(latest, tz=timezone.utc)
+
+
 def cleanup_expired_checkpoints(*, root=DEFAULT_CHECKPOINT_ROOT, now=None):
     now = now or _utc_now()
     root = Path(root).resolve()
@@ -346,17 +399,20 @@ def cleanup_expired_checkpoints(*, root=DEFAULT_CHECKPOINT_ROOT, now=None):
             or child.parent != root
         ):
             continue
-        manifest_path = child / "manifest.json"
         try:
+            manifest_path = _validated_run_path(child, child / "manifest.json")
             manifest = _read_manifest(manifest_path)
             if (
                 manifest.get("schema_version") != SCHEMA_VERSION
                 or manifest.get("token_hash") != child.name
             ):
-                continue
+                raise CheckpointStorageError("检查点版本或令牌摘要不匹配")
             expired = now > _manifest_expiry(manifest)
         except CheckpointStorageError:
-            expired = False
+            try:
+                expired = now > _latest_trusted_mtime(child) + TTL
+            except OSError:
+                expired = False
         if expired:
             shutil.rmtree(child)
             removed.append(child)
