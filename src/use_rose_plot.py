@@ -78,7 +78,8 @@ REPORTED_FUNCTIONAL_PRESENCE_COLUMNS = [
 ]
 
 HIGH_CONFIDENCE_PROBABILITY_THRESHOLD = 0.8
-TOP_PREDICTED_PIE_MAX_CATEGORIES = 12
+CLASSIFICATION_PIE_MAX_CATEGORIES = 12
+TOP_PREDICTED_PIE_MAX_CATEGORIES = CLASSIFICATION_PIE_MAX_CATEGORIES
 REPORTED_OTHERS_NOTE = (
     "Others includes compounds with no reported result or with a tie for the "
     "most frequently reported category."
@@ -1045,7 +1046,7 @@ def generate_compound_classification_pie_plot(
     plot_df,
     title,
     footnote=None,
-    max_categories=None,
+    max_categories=CLASSIFICATION_PIE_MAX_CATEGORIES,
     fixed_categories=None,
 ):
     """Render a total-preserving compound classification donut."""
@@ -1103,8 +1104,8 @@ def generate_compound_classification_pie_plot(
     color_map = _build_use_color_map(summary["display_label"].tolist())
     colors = [color_map[label] for label in summary["display_label"]]
 
-    fig, ax = plt.subplots(figsize=(8.8, 6.4), facecolor="white")
-    fig.subplots_adjust(left=0.06, right=0.72, top=0.86, bottom=0.12)
+    fig, ax = plt.subplots(figsize=(12.0, 6.8), facecolor="white")
+    fig.subplots_adjust(left=0.05, right=0.52, top=0.86, bottom=0.13)
     wedges, _ = ax.pie(
         summary["compound_count"],
         colors=colors,
@@ -1177,10 +1178,12 @@ def generate_compound_classification_pie_plot(
     ]
     fig.legend(
         handles=handles,
-        loc="center right",
-        bbox_to_anchor=(0.99, 0.52),
+        loc="center left",
+        bbox_to_anchor=(0.55, 0.52),
         frameon=False,
         title="Category",
+        fontsize=8.5,
+        title_fontsize=9.5,
     )
     if footnote:
         fig.text(
@@ -1200,7 +1203,7 @@ def generate_reported_functional_use_pie_plot(plot_df, title):
         plot_df,
         title,
         footnote=REPORTED_OTHERS_NOTE,
-        max_categories=None,
+        max_categories=CLASSIFICATION_PIE_MAX_CATEGORIES,
     )
 
 

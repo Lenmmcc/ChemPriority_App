@@ -426,6 +426,42 @@ class UseRosePlotTests(unittest.TestCase):
         finally:
             plt.close(figure)
 
+    def test_high_cardinality_classification_pie_groups_rare_categories_and_separates_legend(self):
+        plot_df = pd.DataFrame(
+            [
+                {
+                    "compound_key": f"compound-{index:02d}",
+                    "compound": f"Compound {index:02d}",
+                    "display_label": f"Category {index:02d}",
+                }
+                for index in range(20)
+            ]
+        )
+
+        figure = generate_compound_classification_pie_plot(
+            plot_df,
+            "High-cardinality classification",
+        )
+        try:
+            figure.canvas.draw()
+            renderer = figure.canvas.get_renderer()
+            legend = figure.legends[0]
+            legend_labels = [text.get_text() for text in legend.get_texts()]
+
+            self.assertEqual(len(legend_labels), 12)
+            self.assertIn("Others (9, 45.0%)", legend_labels)
+            self.assertIn(
+                "Total compounds\n20",
+                {text.get_text() for text in figure.axes[0].texts},
+            )
+            self.assertFalse(
+                legend.get_window_extent(renderer).overlaps(
+                    figure.axes[0].get_window_extent(renderer)
+                )
+            )
+        finally:
+            plt.close(figure)
+
     def test_compound_classification_pie_assigns_duplicate_compound_to_first_category(self):
         plot_df = pd.DataFrame(
             [
