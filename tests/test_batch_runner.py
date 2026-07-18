@@ -92,6 +92,75 @@ class BatchRunnerTests(unittest.TestCase):
                 active -= 1
         self.assertLessEqual(max_active, 2)
 
+    def test_failed_items_retry_after_round_and_keep_original_order(self):
+        calls = []
+        attempts = {"b": 0, "c": 0}
+
+        def worker(item):
+            calls.append(item)
+            attempts[item] = attempts.get(item, 0) + 1
+            if item == "b" and attempts[item] < 3:
+                return "retry"
+            if item == "c":
+                return "final"
+            return item.upper()
+
+        results = run_ordered_batch(
+            ["a", "b", "c"],
+            worker,
+            delay_seconds=0,
+            max_attempts=3,
+            should_retry=lambda result: result.value == "retry",
+            retry_delay_seconds=0,
+        )
+
+        self.assertEqual([result.value for result in results], ["A", "B", "final"])
+        self.assertEqual(calls, ["a", "b", "c", "b", "b"])
+
+    def test_non_retryable_exception_is_not_repeated(self):
+        calls = []
+
+        def worker(item):
+            calls.append(item)
+            raise ValueError("bad input")
+
+        results = run_ordered_batch(
+            ["a"],
+            worker,
+            max_attempts=3,
+            should_retry=lambda result: False,
+        )
+
+        self.assertEqual(calls, ["a"])
+        self.assertIsInstance(results[0].error, ValueError)
+
+    def test_retry_lifecycle_events_include_attempt_without_overcounting_progress(self):
+        events = []
+        progress = []
+        attempts = 0
+
+        def worker(item):
+            nonlocal attempts
+            attempts += 1
+            return "retry" if attempts == 1 else "done"
+
+        results = run_ordered_batch(
+            ["a"],
+            worker,
+            max_attempts=3,
+            should_retry=lambda result: result.value == "retry",
+            retry_delay_seconds=0,
+            event_callback=events.append,
+            progress_callback=lambda done, total, label: progress.append(
+                (done, total, label)
+            ),
+        )
+
+        self.assertEqual(results[0].value, "done")
+        self.assertEqual([event["attempt"] for event in events if event["event"] == "started"], [1, 2])
+        self.assertTrue(all(event["max_attempts"] == 3 for event in events))
+        self.assertEqual(progress, [(1, 1, "a")])
+
 
 if __name__ == "__main__":
     unittest.main()
