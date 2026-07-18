@@ -713,6 +713,12 @@ class CpScreeningWorkflowTests(unittest.TestCase):
 
         self.assertTrue(expected.issubset(EXPECTED_WORKBOOK_SHEETS))
 
+    def test_screening_workbook_and_page_expose_toxpi_exclusions(self):
+        self.assertIn("ToxPi_Excluded", EXPECTED_WORKBOOK_SHEETS)
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+        self.assertIn('"toxpi_excluded": toxpi_result.excluded_rows', page_text)
+        self.assertIn('st.subheader("ToxPi_Excluded")', page_text)
+
     def test_comprehensive_page_exposes_shared_axis_toxpi_and_robustness_controls(self):
         page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
         for token in (

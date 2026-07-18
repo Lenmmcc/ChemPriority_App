@@ -714,6 +714,7 @@ def workflow_tables(front_state, downstream_state=None):
         "ToxPi_Normalized": downstream_state.get("toxpi_normalized", pd.DataFrame()),
         "ToxPi_Results": downstream_state.get("toxpi_results", pd.DataFrame()),
         "ToxPi_Display": downstream_state.get("toxpi_display", pd.DataFrame()),
+        "ToxPi_Excluded": downstream_state.get("toxpi_excluded", pd.DataFrame()),
         "ToxPi_Settings": downstream_state.get("toxpi_settings", pd.DataFrame()),
         "ToxPi_Robustness": downstream_state.get("toxpi_robustness", pd.DataFrame()),
         "ToxPi_Robust_Stats": downstream_state.get("toxpi_robust_stats", pd.DataFrame()),
@@ -1099,6 +1100,7 @@ with tab_downstream:
                 "toxpi_normalized": toxpi_result.candidate_normalized,
                 "toxpi_results": toxpi_result.final_ranking,
                 "toxpi_display": toxpi_result.display_rows,
+                "toxpi_excluded": toxpi_result.excluded_rows,
                 "toxpi_settings": toxpi_result.settings_table(),
                 "toxpi_robustness": toxpi_result.robustness_summary,
                 "toxpi_robust_stats": toxpi_result.robustness_stats,
@@ -1140,6 +1142,8 @@ with tab_downstream:
         show_dataframe(downstream_state["toxpi_results"])
         st.subheader("ToxPi_Display")
         show_dataframe(downstream_state["toxpi_display"])
+        st.subheader("ToxPi_Excluded")
+        show_dataframe(downstream_state["toxpi_excluded"])
         st.subheader("ToxPi_Settings")
         show_dataframe(downstream_state["toxpi_settings"])
         if not downstream_state["toxpi_robustness"].empty:

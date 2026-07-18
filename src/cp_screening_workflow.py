@@ -33,6 +33,7 @@ EXPECTED_WORKBOOK_SHEETS = [
     "ToxPi_Normalized",
     "ToxPi_Results",
     "ToxPi_Display",
+    "ToxPi_Excluded",
     "ToxPi_Settings",
     "ToxPi_Robustness",
     "ToxPi_Robust_Stats",
