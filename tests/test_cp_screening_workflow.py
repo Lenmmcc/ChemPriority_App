@@ -491,6 +491,41 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             "PBM score missing",
         )
 
+    def test_calculate_pbm_toxpi_excludes_compound_with_any_missing_duplicate_pbm(self):
+        data = pd.DataFrame({
+            "compound": ["Duplicate PBM", "Duplicate PBM", "Complete"],
+            "Peak_Area": [100.0, 100.0, 10.0],
+            "Scores": [float("nan"), 1.0, 1.0],
+            "DF": [0.5, 0.5, 0.5],
+        })
+
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=2, display_top_n=2, robustness_enabled=False)
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        self.assertEqual(
+            result.excluded_rows.set_index("compound").loc["Duplicate PBM", "exclusion_reason"],
+            "PBM score missing",
+        )
+
+    def test_calculate_pbm_toxpi_excludes_compound_with_any_invalid_duplicate_pa_or_df(self):
+        data = pd.DataFrame({
+            "compound": ["Duplicate PA", "Duplicate PA", "Duplicate DF", "Duplicate DF", "Complete"],
+            "Peak_Area": [float("nan"), 100.0, 100.0, 100.0, 10.0],
+            "Scores": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "DF": [0.5, 0.5, 1.2, 0.5, 0.5],
+        })
+
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=3, display_top_n=3, robustness_enabled=False)
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        reasons = result.excluded_rows.set_index("compound")["exclusion_reason"]
+        self.assertEqual(reasons.loc["Duplicate PA"], "Peak area missing or non-positive")
+        self.assertEqual(reasons.loc["Duplicate DF"], "DF missing or outside [0, 1]")
+
     def test_calculate_pbm_toxpi_audits_missing_compound_name(self):
         data = pd.DataFrame({
             "compound": ["", "Complete"],

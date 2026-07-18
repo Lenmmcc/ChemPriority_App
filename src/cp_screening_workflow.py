@@ -481,6 +481,20 @@ def _compound_toxpi_source(toxpi_input: pd.DataFrame) -> pd.DataFrame:
     data["compound"] = data["compound"].map(_clean_text)
     for column in ("Peak_Area", "Scores", "DF"):
         data[column] = pd.to_numeric(data[column], errors="coerce")
+    data["_input_exclusion_reason"] = ""
+    data.loc[
+        ~np.isfinite(data["Peak_Area"]) | data["Peak_Area"].le(0),
+        "_input_exclusion_reason",
+    ] = "Peak area missing or non-positive"
+    data.loc[
+        data["_input_exclusion_reason"].eq("") & ~np.isfinite(data["Scores"]),
+        "_input_exclusion_reason",
+    ] = "PBM score missing"
+    data.loc[
+        data["_input_exclusion_reason"].eq("")
+        & (~np.isfinite(data["DF"]) | ~data["DF"].between(0, 1)),
+        "_input_exclusion_reason",
+    ] = "DF missing or outside [0, 1]"
     aggregations = {"Peak_Area": "mean", "Scores": "mean", "DF": "mean"}
     if "Pov_LRTP_Status" in data.columns:
         aggregations["Pov_LRTP_Status"] = lambda values: (
@@ -490,6 +504,18 @@ def _compound_toxpi_source(toxpi_input: pd.DataFrame) -> pd.DataFrame:
         aggregations["Pov_LRTP_model_input_complete"] = lambda values: values.eq(True).all()
     if "Pov_LRTP_Error" in data.columns:
         aggregations["Pov_LRTP_Error"] = "first"
+    aggregations["_input_exclusion_reason"] = lambda values: next(
+        (
+            reason
+            for reason in (
+                "Peak area missing or non-positive",
+                "PBM score missing",
+                "DF missing or outside [0, 1]",
+            )
+            if values.eq(reason).any()
+        ),
+        "",
+    )
     source = data.groupby("compound", as_index=False).agg(aggregations)
     source["ir_value"] = np.nan
     mask = source["Peak_Area"] > 0
@@ -503,6 +529,11 @@ def _split_toxpi_eligibility(source: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
         data[column] = pd.to_numeric(data[column], errors="coerce")
     reasons = pd.Series("", index=data.index, dtype=object)
     reasons = reasons.mask(data["compound"].map(_clean_text).eq(""), "Compound name missing")
+    if "_input_exclusion_reason" in data:
+        reasons = reasons.mask(
+            reasons.eq("") & data["_input_exclusion_reason"].ne(""),
+            data["_input_exclusion_reason"],
+        )
     reasons = reasons.mask(
         reasons.eq("") & (~np.isfinite(data["Peak_Area"]) | data["Peak_Area"].le(0)),
         "Peak area missing or non-positive",
