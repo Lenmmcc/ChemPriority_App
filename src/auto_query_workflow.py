@@ -947,8 +947,13 @@ def build_representative_table(input_df: pd.DataFrame, mapping: AutoWorkflowMapp
 
 def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
     chart_sources = []
+    evidence_selection = _toxpi_evidence_chart_selection(result)
     comptox_candidates = result.tables.get("CompTox_Candidates")
-    if isinstance(comptox_candidates, pd.DataFrame) and not comptox_candidates.empty:
+    if (
+        evidence_selection is not None
+        and isinstance(comptox_candidates, pd.DataFrame)
+        and not comptox_candidates.empty
+    ):
         chart_sources.append(
             {
                 "chart_type": "reported_presence",
@@ -956,6 +961,7 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
                 "candidates_df": comptox_candidates,
                 "title": "EPA CompTox Reported Functional Use Evidence",
                 "file_prefix": "EPA_Reported_Functional_Use_Evidence",
+                **evidence_selection,
             }
         )
 
@@ -995,7 +1001,11 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
         )
 
     echa_candidates = result.tables.get("ECHA_Use_Candidates")
-    if isinstance(echa_candidates, pd.DataFrame) and not echa_candidates.empty:
+    if (
+        evidence_selection is not None
+        and isinstance(echa_candidates, pd.DataFrame)
+        and not echa_candidates.empty
+    ):
         chart_sources.append(
             {
                 "chart_type": "reported_presence",
@@ -1006,6 +1016,7 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
                 "require_reported_flag": False,
                 "title": "ECHA REACH Reported Use Evidence",
                 "file_prefix": "ECHA_Reported_Use_Evidence",
+                **evidence_selection,
             }
         )
 
@@ -1035,6 +1046,62 @@ def _auto_workflow_chart_sources(result: AutoWorkflowResult) -> list[dict]:
     return chart_sources
 
 
+def _toxpi_evidence_chart_selection(result: AutoWorkflowResult) -> dict | None:
+    toxpi_results = result.tables.get("ToxPi_Results")
+    if (
+        not isinstance(toxpi_results, pd.DataFrame)
+        or toxpi_results.empty
+        or "compound" not in toxpi_results.columns
+        or "final_rank" not in toxpi_results.columns
+    ):
+        return None
+
+    ranking = toxpi_results.copy()
+    ranking["_final_rank"] = pd.to_numeric(ranking["final_rank"], errors="coerce")
+    ranking = ranking.loc[ranking["_final_rank"].gt(0)].sort_values(
+        "_final_rank",
+        ascending=True,
+        kind="mergesort",
+    )
+    if ranking.empty:
+        return None
+    compound_order = [
+        compound
+        for compound in ranking["compound"].map(_clean_text).tolist()
+        if compound
+    ]
+    if not compound_order:
+        return None
+
+    defaults = PBMToxPiConfig()
+    settings = result.tables.get("ToxPi_Settings")
+    setting_values = {}
+    if (
+        isinstance(settings, pd.DataFrame)
+        and not settings.empty
+        and {"setting", "value"}.issubset(settings.columns)
+    ):
+        setting_values = dict(zip(settings["setting"], settings["value"]))
+
+    def positive_int(name, default):
+        value = pd.to_numeric(setting_values.get(name, default), errors="coerce")
+        if pd.isna(value) or int(value) < 1:
+            return int(default)
+        return int(value)
+
+    return {
+        "compound_order": compound_order,
+        "per_compound_top_n": positive_int(
+            "evidence_per_compound_top_n",
+            defaults.evidence_per_compound_top_n,
+        ),
+        "global_use_top_n": positive_int(
+            "evidence_global_use_top_n",
+            defaults.evidence_global_use_top_n,
+        ),
+    }
+
+
 def _build_chart_data(source_config: dict) -> pd.DataFrame:
     if source_config["chart_type"] == "classification_pie":
         return source_config["table_df"]
@@ -1047,6 +1114,9 @@ def _build_chart_data(source_config: dict) -> pd.DataFrame:
             source_type=source_config.get("source_type", "functional_use"),
             use_key=source_config.get("use_key", "raw"),
             require_reported_flag=source_config.get("require_reported_flag", True),
+            compound_order=source_config.get("compound_order"),
+            per_compound_top_n=source_config.get("per_compound_top_n"),
+            global_use_top_n=source_config.get("global_use_top_n"),
         )
     return extract_candidate_use_plot_data(
         source_config["candidates_df"],
@@ -1070,7 +1140,11 @@ def _build_chart_figure(chart_df: pd.DataFrame, source_config: dict):
             fixed_categories=source_config.get("fixed_categories"),
         )
     if source_config["chart_type"] == "reported_presence":
-        return generate_reported_functional_use_presence_plot(chart_df, source_config["title"])
+        return generate_reported_functional_use_presence_plot(
+            chart_df,
+            source_config["title"],
+            selection_note=chart_df.attrs.get("selection_note"),
+        )
     return generate_use_rose_plot(chart_df, source_config["title"])
 
 

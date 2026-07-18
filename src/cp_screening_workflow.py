@@ -59,6 +59,8 @@ class SampleTable:
 class PBMToxPiConfig:
     candidate_top_n: int = 100
     display_top_n: int = 20
+    evidence_per_compound_top_n: int = 10
+    evidence_global_use_top_n: int = 30
     weights: dict[str, float] = field(default_factory=lambda: dict(PBM_TOXPI_WEIGHTS))
     robustness_enabled: bool = True
     perturbation_fraction: float = 0.20
@@ -72,6 +74,10 @@ class PBMToxPiConfig:
             raise ValueError("Display Top N must be at least 1")
         if int(self.display_top_n) > int(self.candidate_top_n):
             raise ValueError("Display Top N cannot exceed Candidate Top N")
+        if int(self.evidence_per_compound_top_n) < 1:
+            raise ValueError("Evidence per-compound Top N must be at least 1")
+        if int(self.evidence_global_use_top_n) < 1:
+            raise ValueError("Evidence global-use Top N must be at least 1")
         perturbation_fraction = float(self.perturbation_fraction)
         if not math.isfinite(perturbation_fraction):
             raise ValueError("Weight perturbation must be finite")
@@ -104,6 +110,14 @@ class PBMToxPiResult:
                 {"setting": "candidate_top_n", "value": self.effective_candidate_top_n},
                 {"setting": "requested_display_top_n", "value": self.config.display_top_n},
                 {"setting": "display_top_n", "value": self.effective_display_top_n},
+                {
+                    "setting": "evidence_per_compound_top_n",
+                    "value": self.config.evidence_per_compound_top_n,
+                },
+                {
+                    "setting": "evidence_global_use_top_n",
+                    "value": self.config.evidence_global_use_top_n,
+                },
                 {"setting": "robustness_enabled", "value": self.config.robustness_enabled},
                 {"setting": "perturbation_fraction", "value": self.config.perturbation_fraction},
                 {"setting": "robustness_iterations", "value": self.config.n_iter},

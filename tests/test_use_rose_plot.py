@@ -1,5 +1,6 @@
 import unittest
 import warnings
+import struct
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -851,6 +852,96 @@ class UseRosePlotTests(unittest.TestCase):
         self.assertEqual(len(plot_df), 1)
         self.assertEqual(plot_df.loc[0, "use_label"], "Industrial use")
         self.assertEqual(plot_df.loc[0, "presence"], 1)
+
+    def test_reported_presence_applies_toxpi_order_per_compound_and_global_limits(self):
+        candidates_df = pd.DataFrame(
+            [
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Solvent", "evidence_count": 2, "functional_use_source": "reported"},
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Solvent", "evidence_count": 1, "functional_use_source": "reported"},
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Catalyst", "evidence_count": 2, "functional_use_source": "reported"},
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Adhesive", "evidence_count": 0, "functional_use_source": "reported"},
+                {"compound": "B", "source_type": "functional_use", "raw_use": "Catalyst", "evidence_count": 5, "functional_use_source": "reported"},
+                {"compound": "B", "source_type": "functional_use", "raw_use": "Dye", "evidence_count": 4, "functional_use_source": "reported"},
+                {"compound": "B", "source_type": "functional_use", "raw_use": "Solvent", "evidence_count": -1, "functional_use_source": "reported"},
+                {"compound": "C", "source_type": "functional_use", "raw_use": "Excluded", "evidence_count": 99, "functional_use_source": "reported"},
+            ]
+        )
+
+        plot_df = extract_reported_functional_use_presence_data(
+            candidates_df,
+            compound_order=["B", "No Evidence", "A"],
+            per_compound_top_n=2,
+            global_use_top_n=2,
+        )
+
+        self.assertEqual(plot_df["compound"].tolist(), ["B", "B", "A"])
+        self.assertEqual(plot_df["use_label"].tolist(), ["Catalyst", "Dye", "Catalyst"])
+        self.assertEqual(plot_df["presence"].tolist(), [1, 1, 1])
+        self.assertIn(
+            "ToxPi candidates with evidence shown: 2 of 3 (compounds omitted: 1)",
+            plot_df.attrs["selection_note"],
+        )
+        self.assertIn("per-compound evidence points omitted: 2", plot_df.attrs["selection_note"])
+        self.assertIn("global evidence points omitted: 1", plot_df.attrs["selection_note"])
+
+    def test_reported_presence_plot_uses_global_rank_when_top_use_is_absent_from_first_compound(self):
+        candidates_df = pd.DataFrame(
+            [
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Solvent", "evidence_count": 6, "functional_use_source": "reported"},
+                {"compound": "A", "source_type": "functional_use", "raw_use": "Catalyst", "evidence_count": 2, "functional_use_source": "reported"},
+                {"compound": "B", "source_type": "functional_use", "raw_use": "Dye", "evidence_count": 4, "functional_use_source": "reported"},
+                {"compound": "B", "source_type": "functional_use", "raw_use": "Adhesive", "evidence_count": 1, "functional_use_source": "reported"},
+            ]
+        )
+        plot_df = extract_reported_functional_use_presence_data(
+            candidates_df,
+            compound_order=["B", "A"],
+            per_compound_top_n=1,
+            global_use_top_n=2,
+        )
+
+        figure = generate_reported_functional_use_presence_plot(plot_df, "Evidence")
+        try:
+            x_labels = [label.get_text() for label in figure.axes[0].get_xticklabels()]
+            y_labels = [label.get_text() for label in figure.axes[0].get_yticklabels()]
+            self.assertEqual(x_labels, ["Solvent", "Dye"])
+            self.assertEqual(y_labels, ["B", "A"])
+        finally:
+            plt.close(figure)
+
+    def test_reported_presence_plot_png_stays_below_safe_pixel_limit(self):
+        plot_df = pd.DataFrame(
+            [
+                {
+                    "source": "ECHA",
+                    "compound": f"Compound {compound_index:03d}",
+                    "compound_label": f"Compound {compound_index:03d}",
+                    "use_cn": f"Use {use_index:02d}",
+                    "use_label": f"Use {use_index:02d}",
+                    "presence": 1,
+                }
+                for compound_index in range(100)
+                for use_index in range(30)
+            ]
+        )
+        plot_df.attrs["selection_note"] = (
+            "ToxPi candidates with evidence shown: 100 of 100 (compounds omitted: 0); "
+            "per-compound evidence Top 10; per-compound evidence points omitted: 2000; "
+            "global use categories shown: 30 of 30 (Top 30; categories omitted: 0); "
+            "global evidence points omitted: 0."
+        )
+        figure = generate_reported_functional_use_presence_plot(
+            plot_df,
+            "ECHA REACH Reported Use Evidence",
+            selection_note=plot_df.attrs["selection_note"],
+        )
+        try:
+            png = figure_to_png_bytes(figure).getvalue()
+        finally:
+            plt.close(figure)
+
+        width, height = struct.unpack(">II", png[16:24])
+        self.assertLessEqual(width * height, 50_000_000)
 
     def test_top_predicted_pie_plot_exports_with_ascii_only_text(self):
         plot_df = pd.DataFrame(

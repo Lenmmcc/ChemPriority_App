@@ -3,9 +3,11 @@ import ast
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import importlib
+import importlib.util
 import io
 from pathlib import Path
 import re
+import struct
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import zipfile
@@ -1041,6 +1043,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 [
                     ("CompTox_Candidates", _example_comptox_candidates()),
                     ("ECHA_Use_Candidates", _example_echa_candidates()),
+                    *_example_toxpi_tables().items(),
                     *pie_tables.items(),
                 ]
             ),
@@ -1070,6 +1073,91 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertTrue(puc_chart.png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(puc_chart.pdf.startswith(b"%PDF"))
         self.assertNotIn("EPA_Product_Use_Category_Rose_Plot", charts)
+
+    def test_auto_workflow_presence_charts_use_toxpi_candidates_and_limits(self):
+        candidates = pd.DataFrame(
+            [
+                {"compound": compound, "source_type": "functional_use", "raw_use": use, "evidence_count": evidence, "functional_use_source": "reported"}
+                for compound, use, evidence in (
+                    ("Compound A", "Solvent", 2),
+                    ("Compound A", "Catalyst", 1),
+                    ("Compound B", "Catalyst", 3),
+                    ("Compound B", "Dye", 2),
+                    ("Compound C", "Excluded", 99),
+                )
+            ]
+        )
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A", "Compound B", "Compound C"]}),
+            tables=OrderedDict(
+                [
+                    ("CompTox_Candidates", candidates),
+                    *_example_toxpi_tables(
+                        compounds=("Compound B", "Compound A"),
+                        per_compound_top_n=1,
+                        global_use_top_n=2,
+                    ).items(),
+                    ("ToxPi_Display", pd.DataFrame({"compound": ["Compound B"]})),
+                ]
+            ),
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        source = next(
+            item
+            for item in auto_query_workflow._auto_workflow_chart_sources(result)
+            if item["file_prefix"] == "EPA_Reported_Functional_Use_Evidence"
+        )
+        plot_df = auto_query_workflow._build_chart_data(source)
+
+        self.assertEqual(plot_df["compound"].tolist(), ["Compound B", "Compound A"])
+        self.assertEqual(plot_df["use_label"].tolist(), ["Catalyst", "Solvent"])
+
+    def test_auto_workflow_skips_presence_charts_without_toxpi_results(self):
+        pie_tables = _example_pie_tables()
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A", "Compound B"]}),
+            tables=OrderedDict(
+                [
+                    ("CompTox_Candidates", _example_comptox_candidates()),
+                    ("ECHA_Use_Candidates", _example_echa_candidates()),
+                    *pie_tables.items(),
+                ]
+            ),
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        charts = build_auto_workflow_charts(result)
+
+        self.assertNotIn("EPA_Reported_Functional_Use_Evidence", charts)
+        self.assertNotIn("ECHA_Reported_Use_Evidence", charts)
+        self.assertIn("EPA_Reported_Functional_Use_Distribution", charts)
+        self.assertIn("ECHA_Reported_Use_Distribution", charts)
+
+    def test_auto_workflow_skips_presence_charts_without_valid_final_ranks(self):
+        tables = OrderedDict(
+            [
+                ("CompTox_Candidates", _example_comptox_candidates()),
+                ("ToxPi_Results", pd.DataFrame({"compound": ["Compound A"], "final_rank": [pd.NA]})),
+                *_example_pie_tables().items(),
+            ]
+        )
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=tables,
+            step_status=pd.DataFrame(),
+            warnings=pd.DataFrame(),
+        )
+
+        charts = build_auto_workflow_charts(result)
+
+        self.assertNotIn("EPA_Reported_Functional_Use_Evidence", charts)
+        self.assertIn("EPA_Reported_Functional_Use_Distribution", charts)
 
     def test_checkpoint_module_workbooks_split_echa_use_and_ghs(self):
         result = AutoWorkflowResult(
@@ -1140,6 +1228,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                     ("Identifier_Completion", pd.DataFrame({"compound": ["Compound A"]})),
                     ("CompTox_Candidates", _example_comptox_candidates()),
                     ("ECHA_Use_Candidates", _example_echa_candidates()),
+                    *_example_toxpi_tables().items(),
                     ("Product_Use_Categories", _example_comptox_candidates().iloc[[0]].copy()),
                     ("Functional_Uses_Predicted", _example_comptox_candidates().iloc[[1, 3]].copy()),
                     ("Functional_Uses_Reported", _example_comptox_candidates().iloc[[2]].copy()),
@@ -1880,6 +1969,8 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "PBMToxPiConfig(",
             "candidate_top_n",
             "display_top_n",
+            "evidence_per_compound_top_n",
+            "evidence_global_use_top_n",
             "peak_area_weight",
             "pbm_weight",
             "df_weight",
@@ -1951,6 +2042,8 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "vk_y_max",
             "candidate_top_n",
             "display_top_n",
+            "evidence_per_compound_top_n",
+            "evidence_global_use_top_n",
             "peak_area_weight",
             "pbm_weight",
             "df_weight",
@@ -1961,6 +2054,55 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(setting, settings_block)
         self.assertIn("RESULT_CACHE_KEYS", page_text[invalidate_index:start_index])
+
+    def test_page_6_skips_oversized_pngs_and_explains_missing_toxpi_evidence_charts(self):
+        module_spec = importlib.util.find_spec("src.image_safety")
+        self.assertIsNotNone(module_spec)
+        if module_spec is None:
+            return
+        image_safety = importlib.import_module("src.image_safety")
+        oversized_png = (
+            b"\x89PNG\r\n\x1a\n"
+            + struct.pack(">I", 13)
+            + b"IHDR"
+            + struct.pack(">II", 33_700, 6_159)
+        )
+        self.assertEqual(image_safety.png_dimensions(oversized_png), (33_700, 6_159))
+        self.assertTrue(image_safety.is_png_over_pixel_limit(oversized_png, 50_000_000))
+
+        page_path = Path("pages/6_一键批量查询.py")
+        page_text = page_path.read_text(encoding="utf-8")
+        self.assertIn("is_png_over_pixel_limit", page_text)
+        self.assertIn("_render_chart_image", page_text)
+        self.assertIn("_render_missing_evidence_chart_notice", page_text)
+        self.assertIn(
+            "if is_png_over_pixel_limit(chart.png, MAX_CHART_PIXELS)",
+            page_text,
+        )
+
+        function_node = next(
+            node
+            for node in ast.parse(page_text).body
+            if isinstance(node, ast.FunctionDef) and node.name == "_render_chart_image"
+        )
+        isolated_module = ast.fix_missing_locations(ast.Module(body=[function_node], type_ignores=[]))
+        fake_streamlit = SimpleNamespace(warnings=[], images=[])
+        fake_streamlit.warning = fake_streamlit.warnings.append
+        fake_streamlit.image = lambda *args, **kwargs: fake_streamlit.images.append((args, kwargs))
+        namespace = {
+            "MAX_CHART_PIXELS": 50_000_000,
+            "is_png_over_pixel_limit": image_safety.is_png_over_pixel_limit,
+            "png_dimensions": image_safety.png_dimensions,
+            "st": fake_streamlit,
+        }
+        exec(compile(isolated_module, str(page_path), "exec"), namespace)
+
+        namespace["_render_chart_image"](
+            SimpleNamespace(title="Oversized", png=oversized_png)
+        )
+
+        self.assertEqual(len(fake_streamlit.warnings), 1)
+        self.assertEqual(fake_streamlit.images, [])
 
     def test_page_6_renders_module_dashboard_without_removing_exports(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
@@ -2079,6 +2221,7 @@ def _example_pie_tables():
             "天然源证据数": [0, 1],
         }
     )
+
     return OrderedDict(
         [
             (
@@ -2116,6 +2259,38 @@ def _example_pie_tables():
             (
                 "Source_Origin_Pie_Data",
                 extract_source_origin_pie_data(source_summary, universe),
+            ),
+        ]
+    )
+
+
+def _example_toxpi_tables(
+    compounds=("Compound A", "Compound B"),
+    per_compound_top_n=10,
+    global_use_top_n=30,
+):
+    return OrderedDict(
+        [
+            (
+                "ToxPi_Results",
+                pd.DataFrame(
+                    {
+                        "compound": list(compounds),
+                        "final_rank": list(range(1, len(compounds) + 1)),
+                    }
+                ),
+            ),
+            (
+                "ToxPi_Settings",
+                pd.DataFrame(
+                    {
+                        "setting": [
+                            "evidence_per_compound_top_n",
+                            "evidence_global_use_top_n",
+                        ],
+                        "value": [per_compound_top_n, global_use_top_n],
+                    }
+                ),
             ),
         ]
     )

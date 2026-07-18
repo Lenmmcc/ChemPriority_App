@@ -560,6 +560,9 @@ def extract_reported_functional_use_presence_data(
     source_type="functional_use",
     use_key="raw",
     require_reported_flag=True,
+    compound_order=None,
+    per_compound_top_n=None,
+    global_use_top_n=None,
 ):
     """Return binary reported functional-use evidence dots by compound and use."""
     if candidates_df is None or not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
@@ -579,6 +582,16 @@ def extract_reported_functional_use_presence_data(
         ]
     if reported_df.empty:
         return _empty_reported_functional_presence_data()
+
+    if compound_order is not None or per_compound_top_n is not None or global_use_top_n is not None:
+        return _extract_limited_reported_functional_use_presence_data(
+            reported_df,
+            source_label=source_label,
+            use_key=use_key,
+            compound_order=compound_order,
+            per_compound_top_n=per_compound_top_n,
+            global_use_top_n=global_use_top_n,
+        )
 
     rows = []
     for compound_index, (compound, compound_df) in enumerate(reported_df.groupby("compound", sort=False), start=1):
@@ -604,6 +617,157 @@ def extract_reported_functional_use_presence_data(
             )
 
     return pd.DataFrame(rows, columns=REPORTED_FUNCTIONAL_PRESENCE_COLUMNS)
+
+
+def _extract_limited_reported_functional_use_presence_data(
+    reported_df,
+    *,
+    source_label,
+    use_key,
+    compound_order,
+    per_compound_top_n,
+    global_use_top_n,
+):
+    if per_compound_top_n is not None and int(per_compound_top_n) < 1:
+        raise ValueError("Per-compound evidence Top N must be at least 1")
+    if global_use_top_n is not None and int(global_use_top_n) < 1:
+        raise ValueError("Global-use evidence Top N must be at least 1")
+
+    candidates_by_compound = {}
+    appearance_order = []
+    for _, candidate in reported_df.iterrows():
+        compound = _clean_text(candidate.get("compound"))
+        compound_key = _normalize_compound_key(compound)
+        if not compound_key:
+            continue
+        if compound_key not in candidates_by_compound:
+            candidates_by_compound[compound_key] = []
+            appearance_order.append((compound_key, compound))
+        candidates_by_compound[compound_key].append(candidate)
+
+    if compound_order is None:
+        ordered_compounds = appearance_order
+    else:
+        ordered_compounds = []
+        seen_compounds = set()
+        for value in compound_order:
+            compound = _clean_text(value)
+            compound_key = _normalize_compound_key(compound)
+            if (
+                compound_key
+                and compound_key not in seen_compounds
+            ):
+                seen_compounds.add(compound_key)
+                ordered_compounds.append((compound_key, compound))
+
+    selected_by_compound = []
+    total_points_before_per_compound = 0
+    for compound_key, compound in ordered_compounds:
+        uses = {}
+        for candidate in candidates_by_compound.get(compound_key, []):
+            use_value, english_value = _candidate_use_values(candidate, use_key)
+            if not use_value:
+                continue
+            category_value = use_value if use_key == "category" else english_value or use_value
+            category_key = _normalize_label_key(category_value)
+            if not category_key:
+                continue
+            weight = _to_number(candidate.get("evidence_count"))
+            if pd.isna(weight) or float(weight) <= 0:
+                weight = 1.0
+            if category_key not in uses:
+                uses[category_key] = {
+                    "use_key": category_key,
+                    "use_cn": _first_clean(candidate.get("use_cn"), use_value),
+                    "use_label": (
+                        _echa_category_display_label(category_value)
+                        if use_key == "category"
+                        else _ascii_label(category_value, "Reported use")
+                    ),
+                    "evidence_count": 0.0,
+                }
+            uses[category_key]["evidence_count"] += float(weight)
+
+        entries = sorted(
+            uses.values(),
+            key=lambda item: (-item["evidence_count"], item["use_label"]),
+        )
+        total_points_before_per_compound += len(entries)
+        if per_compound_top_n is not None:
+            entries = entries[: int(per_compound_top_n)]
+        if entries:
+            selected_by_compound.append((compound_key, compound, entries))
+
+    global_summary = {}
+    total_points_before_global = 0
+    for _, _, entries in selected_by_compound:
+        total_points_before_global += len(entries)
+        for entry in entries:
+            summary = global_summary.setdefault(
+                entry["use_key"],
+                {
+                    "compound_count": 0,
+                    "evidence_count": 0.0,
+                    "use_label": entry["use_label"],
+                },
+            )
+            summary["compound_count"] += 1
+            summary["evidence_count"] += entry["evidence_count"]
+
+    ranked_uses = sorted(
+        global_summary.items(),
+        key=lambda item: (
+            -item[1]["compound_count"],
+            -item[1]["evidence_count"],
+            item[1]["use_label"],
+        ),
+    )
+    total_global_uses = len(ranked_uses)
+    if global_use_top_n is not None:
+        ranked_uses = ranked_uses[: int(global_use_top_n)]
+    global_rank = {use_key: rank for rank, (use_key, _) in enumerate(ranked_uses)}
+
+    rows = []
+    displayed_compounds = 0
+    for _, compound, entries in selected_by_compound:
+        retained = [entry for entry in entries if entry["use_key"] in global_rank]
+        retained.sort(key=lambda entry: global_rank[entry["use_key"]])
+        if not retained:
+            continue
+        displayed_compounds += 1
+        compound_label = _ascii_label(compound, f"Compound {displayed_compounds}")
+        for entry in retained:
+            rows.append(
+                {
+                    "source": source_label,
+                    "compound": compound,
+                    "compound_label": compound_label,
+                    "use_cn": entry["use_cn"],
+                    "use_label": entry["use_label"],
+                    "presence": 1,
+                }
+            )
+
+    output = pd.DataFrame(rows, columns=REPORTED_FUNCTIONAL_PRESENCE_COLUMNS)
+    output.attrs["compound_order"] = list(
+        dict.fromkeys(output["compound_label"].tolist())
+    )
+    output.attrs["use_order"] = [
+        summary["use_label"] for _, summary in ranked_uses
+    ]
+    output.attrs["selection_note"] = (
+        f"ToxPi candidates with evidence shown: {displayed_compounds} of "
+        f"{len(ordered_compounds)} (compounds omitted: "
+        f"{len(ordered_compounds) - displayed_compounds}); per-compound evidence Top "
+        f"{per_compound_top_n if per_compound_top_n is not None else 'all'}; "
+        f"per-compound evidence points omitted: "
+        f"{total_points_before_per_compound - total_points_before_global}; "
+        f"global use categories shown: {len(ranked_uses)} of {total_global_uses} "
+        f"(Top {global_use_top_n if global_use_top_n is not None else 'all'}; "
+        f"categories omitted: {total_global_uses - len(ranked_uses)}); "
+        f"global evidence points omitted: {total_points_before_global - len(output)}."
+    )
+    return output
 
 
 def build_epa_echa_combined_rose_data(comptox_candidates_df=None, echa_candidates_df=None):
@@ -1049,7 +1213,7 @@ def generate_top_predicted_functional_use_pie_plot(plot_df, title):
     )
 
 
-def generate_reported_functional_use_presence_plot(plot_df, title):
+def generate_reported_functional_use_presence_plot(plot_df, title, selection_note=None):
     if plot_df is None or plot_df.empty:
         raise ValueError("No reported functional-use evidence is available.")
 
@@ -1062,8 +1226,20 @@ def generate_reported_functional_use_presence_plot(plot_df, title):
         _ascii_label(value, f"Use category {index + 1}")
         for index, value in enumerate(data["use_label"])
     ]
-    compounds = list(dict.fromkeys(data["compound_label"].tolist()))
-    uses = sorted(dict.fromkeys(data["use_label"].tolist()))
+    observed_compounds = list(dict.fromkeys(data["compound_label"].tolist()))
+    observed_uses = list(dict.fromkeys(data["use_label"].tolist()))
+    compounds = [
+        value
+        for value in plot_df.attrs.get("compound_order", observed_compounds)
+        if value in observed_compounds
+    ]
+    compounds.extend(value for value in observed_compounds if value not in compounds)
+    uses = [
+        value
+        for value in plot_df.attrs.get("use_order", observed_uses)
+        if value in observed_uses
+    ]
+    uses.extend(value for value in observed_uses if value not in uses)
     compound_positions = {compound: index for index, compound in enumerate(compounds)}
     use_positions = {use: index for index, use in enumerate(uses)}
     x_values = [use_positions[value] for value in data["use_label"]]
@@ -1071,10 +1247,10 @@ def generate_reported_functional_use_presence_plot(plot_df, title):
     color_map = _build_use_color_map(uses)
     colors = [color_map[value] for value in data["use_label"]]
 
-    fig_width = max(7.2, 0.55 * len(uses) + 3.0)
-    fig_height = max(4.2, 0.38 * len(compounds) + 2.4)
+    fig_width = min(16.0, max(7.2, 0.55 * len(uses) + 3.0))
+    fig_height = min(18.0, max(4.2, 0.16 * len(compounds) + 2.4))
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    fig.subplots_adjust(left=0.24, right=0.96, top=0.84, bottom=0.42)
+    fig.subplots_adjust(left=0.20, right=0.98, top=0.90, bottom=0.22)
     ax.scatter(x_values, y_values, s=82, color=colors, edgecolor="white", linewidth=0.9)
     ax.set_xticks(range(len(uses)))
     ax.set_xticklabels(uses, rotation=35, ha="right", fontsize=9)
@@ -1089,6 +1265,17 @@ def generate_reported_functional_use_presence_plot(plot_df, title):
     ax.grid(color="#e5e5e5", linewidth=0.7)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    if selection_note:
+        fig.text(
+            0.5,
+            0.02,
+            selection_note,
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            color="#333333",
+            wrap=True,
+        )
     return fig
 
 

@@ -578,6 +578,30 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot exceed"):
             PBMToxPiConfig(candidate_top_n=10, display_top_n=20)
 
+    def test_toxpi_evidence_plot_limits_are_validated_and_exported(self):
+        config = PBMToxPiConfig(
+            evidence_per_compound_top_n=7,
+            evidence_global_use_top_n=23,
+        )
+        result = calculate_pbm_toxpi(
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "Peak_Area": [100.0],
+                    "Scores": [2.0],
+                    "DF": [1.0],
+                }
+            ),
+            config=config,
+        )
+        settings = result.settings_table().set_index("setting")["value"]
+
+        self.assertEqual(settings["evidence_per_compound_top_n"], 7)
+        self.assertEqual(settings["evidence_global_use_top_n"], 23)
+        for field in ("evidence_per_compound_top_n", "evidence_global_use_top_n"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "at least 1"):
+                PBMToxPiConfig(**{field: 0})
+
     def test_two_stage_toxpi_rejects_empty_weights(self):
         with self.assertRaisesRegex(ValueError, "positive"):
             PBMToxPiConfig(weights={})

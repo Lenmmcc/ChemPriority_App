@@ -33,6 +33,7 @@ from src.auto_query_checkpoint import (
     save_checkpoint,
 )
 from src.cp_screening_workflow import PBMToxPiConfig
+from src.image_safety import is_png_over_pixel_limit, png_dimensions
 from src.query_cache import clear_query_cache, current_cache_path
 from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
 from src.r_screening_replica.schema import ScreeningAxisRanges
@@ -52,6 +53,9 @@ from src.upload_state import (
     store_uploads,
     upload_bytes,
 )
+
+
+MAX_CHART_PIXELS = 50_000_000
 
 
 INPUT_CACHE_KEYS = (
@@ -268,9 +272,48 @@ def _render_result_dashboard(result, charts):
                 else:
                     st.caption(table_name)
                     _show_dataframe(table)
+            _render_missing_evidence_chart_notice(group["key"], result, charts)
             for chart_key in group["chart_keys"]:
                 chart = charts[chart_key]
-                st.image(chart.png, caption=chart.title)
+                _render_chart_image(chart)
+
+
+def _render_chart_image(chart):
+    if is_png_over_pixel_limit(chart.png, MAX_CHART_PIXELS):
+        width, height = png_dimensions(chart.png)
+        st.warning(
+            f"{chart.title} 未在页面显示：PNG 尺寸为 {width:,} × {height:,}，"
+            f"超过 {MAX_CHART_PIXELS:,} 像素安全上限。请重新运行以生成受限图表。"
+        )
+        return
+    st.image(chart.png, caption=chart.title)
+
+
+def _render_missing_evidence_chart_notice(group_key, result, charts):
+    definitions = {
+        "comptox": ("EPA_Reported_Pie_Data", "EPA_Reported_Functional_Use_Evidence"),
+        "echa": ("ECHA_Reported_Pie_Data", "ECHA_Reported_Use_Evidence"),
+    }
+    definition = definitions.get(group_key)
+    if definition is None:
+        return
+    source_table, chart_key = definition
+    if not isinstance(result.tables.get(source_table), pd.DataFrame) or chart_key in charts:
+        return
+    toxpi_results = result.tables.get("ToxPi_Results")
+    has_valid_ranking = (
+        isinstance(toxpi_results, pd.DataFrame)
+        and not toxpi_results.empty
+        and {"compound", "final_rank"}.issubset(toxpi_results.columns)
+        and pd.to_numeric(toxpi_results["final_rank"], errors="coerce").gt(0).any()
+    )
+    if not has_valid_ranking:
+        st.info(
+            "逐化合物证据图未生成：请启用并成功完成 Pov-LRTP / PBM / ToxPi，"
+            "以使用同一套 ToxPi Candidate Top N 排名筛选化合物。"
+        )
+    else:
+        st.info("ToxPi Candidate Top N 化合物中没有可绘制的已报告用途证据。")
 
 
 def _render_module_downloads(
@@ -625,6 +668,18 @@ with st.expander("运行设置", expanded=False):
     with toxpi_top_n:
         candidate_top_n = st.number_input("Candidate Top N", min_value=1, value=100, step=1)
         display_top_n = st.number_input("Display Top N", min_value=1, value=20, step=1)
+        evidence_per_compound_top_n = st.number_input(
+            "每个化合物证据 Top N",
+            min_value=1,
+            value=10,
+            step=1,
+        )
+        evidence_global_use_top_n = st.number_input(
+            "证据图全局用途 Top N",
+            min_value=1,
+            value=30,
+            step=1,
+        )
     with toxpi_weights:
         peak_area_weight = st.number_input("Peak Area 权重 (%)", min_value=0.0, value=40.0)
         pbm_weight = st.number_input("PBM 权重 (%)", min_value=0.0, value=40.0)
@@ -683,6 +738,8 @@ result_settings = {
     "toxpi": {
         "candidate_top_n": int(candidate_top_n),
         "display_top_n": int(display_top_n),
+        "evidence_per_compound_top_n": int(evidence_per_compound_top_n),
+        "evidence_global_use_top_n": int(evidence_global_use_top_n),
         "peak_area_weight": float(peak_area_weight),
         "pbm_weight": float(pbm_weight),
         "df_weight": float(df_weight),
@@ -736,6 +793,8 @@ if start_run:
         toxpi_config = PBMToxPiConfig(
             candidate_top_n=int(candidate_top_n),
             display_top_n=int(display_top_n),
+            evidence_per_compound_top_n=int(evidence_per_compound_top_n),
+            evidence_global_use_top_n=int(evidence_global_use_top_n),
             weights={
                 "peak_area": float(peak_area_weight) / 100.0,
                 "pbm": float(pbm_weight) / 100.0,
