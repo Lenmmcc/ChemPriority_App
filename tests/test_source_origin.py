@@ -9,6 +9,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from src import source_origin
+from src.batch_runner import BatchResult
 from src.query_cache import use_cache_path
 from src.source_origin import build_result_workbook, fetch_coconut_evidence, run_source_origin_batch
 
@@ -63,6 +64,32 @@ def _natural_evidence(source_name="ChEBI", confidence="strong"):
 
 
 class SourceOriginBatchTests(unittest.TestCase):
+    @patch("src.source_origin.run_ordered_batch", return_value=[])
+    def test_source_origin_batch_enables_three_transient_failure_rounds(self, runner):
+        run_source_origin_batch(pd.DataFrame([_input_row()]), delay_seconds=0)
+
+        options = runner.call_args.kwargs
+        self.assertEqual(options["max_attempts"], 3)
+        should_retry = options["should_retry"]
+        self.assertTrue(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 408: timeout")))
+        )
+        self.assertTrue(
+            should_retry(
+                BatchResult(
+                    index=0,
+                    value=(
+                        pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame({"message": ["remote end closed connection"]}),
+                    ),
+                )
+            )
+        )
+        self.assertFalse(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 400: invalid")))
+        )
+
     @patch("src.source_origin.urllib.request.urlopen")
     def test_get_json_uses_query_cache(self, urlopen):
         response = unittest.mock.MagicMock()

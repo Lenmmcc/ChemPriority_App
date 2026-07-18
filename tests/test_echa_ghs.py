@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from src.batch_runner import BatchResult
 from src.echa_ghs import run_echa_ghs_batch
 
 
@@ -18,6 +19,35 @@ def _resolution(echa_id="100.001.133"):
 
 
 class EchaGhsBatchTests(unittest.TestCase):
+    @patch("src.echa_ghs.run_ordered_batch", return_value=[])
+    def test_echa_ghs_batch_enables_three_transient_failure_rounds(self, runner):
+        run_echa_ghs_batch(
+            pd.DataFrame({"compound": ["A"], "smiles": ["CCO"]}),
+            delay_seconds=0,
+        )
+
+        options = runner.call_args.kwargs
+        self.assertEqual(options["max_attempts"], 3)
+        should_retry = options["should_retry"]
+        self.assertTrue(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 500: broken")))
+        )
+        self.assertTrue(
+            should_retry(
+                BatchResult(
+                    index=0,
+                    value=(
+                        pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame({"message": ["name resolution failed"]}),
+                    ),
+                )
+            )
+        )
+        self.assertFalse(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 404: missing")))
+        )
+
     @patch("src.echa_ghs.resolve_substance", return_value=_resolution())
     @patch("src.echa_ghs._get_json")
     def test_harmonised_classification_extracts_danger_h_statements_and_pictograms(
@@ -183,8 +213,8 @@ class EchaGhsBatchTests(unittest.TestCase):
         self.assertEqual(summary.loc[0, "GHS危害分层"], "无GHS数据或未分类")
         self.assertEqual(errors.loc[0, "stage"], "cnl_inventory")
         self.assertIn("HTTP 503", errors.loc[0, "message"])
-        self.assertEqual(get_json.call_count, 3)
-        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(get_json.call_count, 9)
+        self.assertEqual(sleep.call_count, 8)
 
     @patch("src.echa_ghs.resolve_substance", return_value=_resolution("100.001.409"))
     @patch("src.echa_ghs._get_json")
@@ -250,8 +280,8 @@ class EchaGhsBatchTests(unittest.TestCase):
         self.assertEqual(summary.loc[0, "GHS危害分层"], "无GHS数据或未分类")
         self.assertEqual(errors.loc[0, "stage"], "cnl_inventory")
         self.assertIn("HTTP 500", errors.loc[0, "message"])
-        self.assertEqual(get_json.call_count, 3)
-        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(get_json.call_count, 9)
+        self.assertEqual(sleep.call_count, 8)
 
 
 if __name__ == "__main__":

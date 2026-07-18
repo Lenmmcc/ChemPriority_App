@@ -10,6 +10,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from src import comptox_use
+from src.batch_runner import BatchResult
 from src.query_cache import cache_control, use_cache_path
 
 
@@ -50,6 +51,35 @@ def _candidate(source_type, raw_use="cleaning agent", use_cn="清洁用品", **e
 
 
 class CompToxDashboardModeTests(unittest.TestCase):
+    @patch("src.comptox_use.run_ordered_batch", return_value=[])
+    def test_comptox_batch_enables_three_transient_failure_rounds(self, runner):
+        comptox_use.run_comptox_use_batch(
+            pd.DataFrame({"compound": ["A"], "smiles": ["CCO"]}),
+            delay_seconds=0,
+        )
+
+        options = runner.call_args.kwargs
+        self.assertEqual(options["max_attempts"], 3)
+        should_retry = options["should_retry"]
+        self.assertTrue(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 502: bad gateway")))
+        )
+        self.assertTrue(
+            should_retry(
+                BatchResult(
+                    index=0,
+                    value=(
+                        pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame({"message": ["service unavailable"]}),
+                    ),
+                )
+            )
+        )
+        self.assertFalse(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 404: not found")))
+        )
+
     @patch("src.comptox_use.fetch_use_candidates")
     @patch("src.comptox_use.resolve_dtxsid")
     def test_batch_queries_name_and_smiles_variants_with_provenance(

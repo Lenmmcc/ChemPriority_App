@@ -8,6 +8,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from src import echa_use
+from src.batch_runner import BatchResult
 from src.query_cache import use_cache_path
 
 
@@ -56,6 +57,36 @@ def _candidate(raw_use="Industrial use", use_cn="工业用途"):
 
 
 class EchaUseSummaryTests(unittest.TestCase):
+    @patch("src.echa_use.run_ordered_batch", return_value=[])
+    def test_echa_use_batch_enables_three_transient_failure_rounds(self, runner):
+        echa_use.run_echa_use_batch(
+            pd.DataFrame({"compound": ["A"], "smiles": ["CCO"]}),
+            delay_seconds=0,
+        )
+
+        options = runner.call_args.kwargs
+        self.assertEqual(options["max_attempts"], 3)
+        should_retry = options["should_retry"]
+        self.assertTrue(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 504: timeout")))
+        )
+        self.assertTrue(
+            should_retry(
+                BatchResult(
+                    index=0,
+                    value=(
+                        pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame({"message": ["connection refused"]}),
+                    ),
+                )
+            )
+        )
+        self.assertFalse(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 400: bad query")))
+        )
+
     @patch("src.echa_use.extract_dossier_use_candidates")
     @patch("src.echa_use.fetch_dossier_html", return_value="<html></html>")
     @patch("src.echa_use.fetch_reach_dossiers", return_value=([_dossier()], []))

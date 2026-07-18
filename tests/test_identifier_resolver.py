@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from src.batch_runner import BatchResult
 from src.echa_use import resolve_substance
 from src.identifier_resolver import (
     _best_echa_query,
@@ -21,6 +22,33 @@ from src.identifier_resolver import (
     resolve_chemspider,
 )
 from src.query_cache import use_cache_path
+
+
+class IdentifierNetworkRetryContractTests(unittest.TestCase):
+    @patch("src.identifier_resolver.run_ordered_batch", return_value=[])
+    def test_identifier_batch_enables_three_transient_failure_rounds(self, runner):
+        run_identifier_completion_batch(
+            pd.DataFrame({"compound": ["A"], "smiles": ["CCO"]}),
+            delay_seconds=0,
+        )
+
+        options = runner.call_args.kwargs
+        self.assertEqual(options["max_attempts"], 3)
+        should_retry = options["should_retry"]
+        self.assertTrue(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 503: unavailable")))
+        )
+        self.assertTrue(
+            should_retry(
+                BatchResult(
+                    index=0,
+                    value=(pd.DataFrame(), pd.DataFrame({"message": ["timed out"]})),
+                )
+            )
+        )
+        self.assertFalse(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 400: bad input")))
+        )
 
 
 class EchaSearchOrderTests(unittest.TestCase):

@@ -8,6 +8,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from src import episuite_io
+from src.batch_runner import BatchResult
 from src.query_cache import cache_control, use_cache_path
 
 
@@ -118,6 +119,35 @@ ETHANOL_CAS_AND_SMILES_RESPONSE = {
 
 
 class EPISuiteCasValueTests(unittest.TestCase):
+    @patch("src.episuite_io.run_ordered_batch", return_value=[])
+    def test_epi_batch_enables_three_transient_failure_rounds(self, runner):
+        episuite_io.run_epi_web_batch(
+            pd.DataFrame({"compound": ["A"], "smiles": ["CCO"]}),
+            delay_seconds=0,
+        )
+
+        options = runner.call_args.kwargs
+        self.assertEqual(options["max_attempts"], 3)
+        should_retry = options["should_retry"]
+        self.assertTrue(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 429: busy")))
+        )
+        self.assertTrue(
+            should_retry(
+                BatchResult(
+                    index=0,
+                    value=(
+                        pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame({"error": ["connection reset by peer"]}),
+                    ),
+                )
+            )
+        )
+        self.assertFalse(
+            should_retry(BatchResult(index=0, error=RuntimeError("HTTP 400: bad input")))
+        )
+
     def test_normalize_input_columns_keeps_optional_cas(self):
         df = episuite_io.normalize_input_columns(
             pd.DataFrame(

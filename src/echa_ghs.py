@@ -5,6 +5,7 @@ import time
 import pandas as pd
 
 from src.batch_runner import run_ordered_batch
+from src.query_retry import is_transient_query_error, warning_frame_has_transient_error
 from src.echa_use import (
     DEFAULT_ECHA_BASE,
     REQUIRED_IDENTIFIER_COLUMNS,
@@ -201,6 +202,13 @@ def run_echa_ghs_batch(
             progress_callback=progress_callback,
             label_func=lambda item: _display_compound(item[1]),
             event_callback=activity_callback,
+            max_attempts=3,
+            retry_delay_seconds=max(1.0, float(delay_seconds or 0)),
+            should_retry=lambda result: (
+                is_transient_query_error(result.error)
+                if result.error is not None
+                else warning_frame_has_transient_error(result.value[-1])
+            ),
         )
 
     summary_frames = []
