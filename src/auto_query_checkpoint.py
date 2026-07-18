@@ -28,7 +28,9 @@ from src.auto_query_workflow import (
 
 SCHEMA_VERSION = 1
 TTL = timedelta(hours=24)
-DEFAULT_CHECKPOINT_ROOT = Path(".cache/auto_query_runs")
+DEFAULT_CHECKPOINT_ROOT = Path(
+    os.environ.get("CHEMPRIORITY_CHECKPOINT_ROOT", ".cache/auto_query_runs")
+)
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
