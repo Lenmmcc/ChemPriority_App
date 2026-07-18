@@ -102,6 +102,7 @@ class PBMToxPiResult:
     robustness_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     robustness_stats: pd.DataFrame = field(default_factory=pd.DataFrame)
     robustness_correlations: pd.DataFrame = field(default_factory=pd.DataFrame)
+    excluded_rows: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def settings_table(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -422,12 +423,18 @@ def build_pbm_toxpi_input(
         pov["compound_key"] = pov[pov_name_col].map(_compound_key)
         pov = pov.loc[pov["compound_key"].ne("")].drop_duplicates("compound_key", keep="first")
         score_col = "Scores" if "Scores" in pov.columns else "P_B_LRTP_score"
+        pov_metadata = {
+            "Status": "Pov_LRTP_Status",
+            "model_input_complete": "Pov_LRTP_model_input_complete",
+            "Error": "Pov_LRTP_Error",
+        }
+        available_metadata = [column for column in pov_metadata if column in pov.columns]
         merged = base.merge(
-            pov[["compound_key", score_col]],
+            pov[["compound_key", score_col, *available_metadata]],
             on="compound_key",
             how="left",
         )
-        merged = merged.rename(columns={score_col: "Scores"})
+        merged = merged.rename(columns={score_col: "Scores", **pov_metadata})
 
     output = pd.DataFrame(
         {
@@ -440,6 +447,15 @@ def build_pbm_toxpi_input(
             "Peak_Area": pd.to_numeric(merged.get("Peak_Area"), errors="coerce"),
             "Scores": pd.to_numeric(merged.get("Scores"), errors="coerce"),
             "DF": pd.to_numeric(merged.get("DF"), errors="coerce"),
+            **{
+                column: merged[column]
+                for column in [
+                    "Pov_LRTP_Status",
+                    "Pov_LRTP_model_input_complete",
+                    "Pov_LRTP_Error",
+                ]
+                if column in merged.columns
+            },
         }
     )
     return output
@@ -464,15 +480,48 @@ def _compound_toxpi_source(toxpi_input: pd.DataFrame) -> pd.DataFrame:
     data["compound"] = data["compound"].map(_clean_text)
     for column in ("Peak_Area", "Scores", "DF"):
         data[column] = pd.to_numeric(data[column], errors="coerce")
-    source = (
-        data.loc[data["compound"].ne("")]
-        .groupby("compound", as_index=False)
-        .agg(Peak_Area=("Peak_Area", "mean"), Scores=("Scores", "mean"), DF=("DF", "mean"))
-    )
+    aggregations = {"Peak_Area": "mean", "Scores": "mean", "DF": "mean"}
+    if "Pov_LRTP_Status" in data.columns:
+        aggregations["Pov_LRTP_Status"] = lambda values: (
+            "ok" if values.eq("ok").all() else values.loc[values.ne("ok")].iloc[0]
+        )
+    if "Pov_LRTP_model_input_complete" in data.columns:
+        aggregations["Pov_LRTP_model_input_complete"] = lambda values: values.eq(True).all()
+    if "Pov_LRTP_Error" in data.columns:
+        aggregations["Pov_LRTP_Error"] = "first"
+    source = data.loc[data["compound"].ne("")].groupby("compound", as_index=False).agg(aggregations)
     source["ir_value"] = np.nan
     mask = source["Peak_Area"] > 0
     source.loc[mask, "ir_value"] = np.log10(source.loc[mask, "Peak_Area"])
     return source
+
+
+def _split_toxpi_eligibility(source: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    data = source.copy()
+    for column in ("Peak_Area", "Scores", "DF"):
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    reasons = pd.Series("", index=data.index, dtype=object)
+    reasons = reasons.mask(
+        ~np.isfinite(data["Peak_Area"]) | data["Peak_Area"].le(0),
+        "Peak area missing or non-positive",
+    )
+    reasons = reasons.mask(reasons.eq("") & ~np.isfinite(data["Scores"]), "PBM score missing")
+    reasons = reasons.mask(
+        reasons.eq("") & (~np.isfinite(data["DF"]) | ~data["DF"].between(0, 1)),
+        "DF missing or outside [0, 1]",
+    )
+    if "Pov_LRTP_Status" in data:
+        reasons = reasons.mask(
+            reasons.eq("") & data["Pov_LRTP_Status"].ne("ok"),
+            "Pov-LRTP status is not ok",
+        )
+    if "Pov_LRTP_model_input_complete" in data:
+        reasons = reasons.mask(
+            reasons.eq("") & data["Pov_LRTP_model_input_complete"].ne(True),
+            "Pov-LRTP model input incomplete",
+        )
+    excluded = data.loc[reasons.ne("")].assign(exclusion_reason=reasons.loc[reasons.ne("")])
+    return data.loc[reasons.eq("")].reset_index(drop=True), excluded.reset_index(drop=True)
 
 
 def _score_pbm_toxpi_stage(source: pd.DataFrame, weights: dict[str, float], score_name: str) -> pd.DataFrame:
@@ -579,7 +628,7 @@ def calculate_pbm_toxpi(
     if missing:
         raise ValueError(f"Missing required ToxPi input columns: {', '.join(missing)}")
     weights = normalize_pbm_toxpi_weights(config.weights)
-    source = _compound_toxpi_source(toxpi_input)
+    source, excluded_rows = _split_toxpi_eligibility(_compound_toxpi_source(toxpi_input))
     global_screen = _sort_toxpi_stage(
         _score_pbm_toxpi_stage(source, weights, "initial_toxpi"),
         "initial_toxpi",
@@ -603,6 +652,7 @@ def calculate_pbm_toxpi(
         normalized_weights=weights,
         effective_candidate_top_n=candidate_n,
         effective_display_top_n=display_n,
+        excluded_rows=excluded_rows,
     )
     if config.robustness_enabled and len(result.final_ranking) >= 2:
         run_pbm_toxpi_robustness(result, config)
