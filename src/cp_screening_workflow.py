@@ -489,7 +489,7 @@ def _compound_toxpi_source(toxpi_input: pd.DataFrame) -> pd.DataFrame:
         aggregations["Pov_LRTP_model_input_complete"] = lambda values: values.eq(True).all()
     if "Pov_LRTP_Error" in data.columns:
         aggregations["Pov_LRTP_Error"] = "first"
-    source = data.loc[data["compound"].ne("")].groupby("compound", as_index=False).agg(aggregations)
+    source = data.groupby("compound", as_index=False).agg(aggregations)
     source["ir_value"] = np.nan
     mask = source["Peak_Area"] > 0
     source.loc[mask, "ir_value"] = np.log10(source.loc[mask, "Peak_Area"])
@@ -501,8 +501,9 @@ def _split_toxpi_eligibility(source: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
     for column in ("Peak_Area", "Scores", "DF"):
         data[column] = pd.to_numeric(data[column], errors="coerce")
     reasons = pd.Series("", index=data.index, dtype=object)
+    reasons = reasons.mask(data["compound"].map(_clean_text).eq(""), "Compound name missing")
     reasons = reasons.mask(
-        ~np.isfinite(data["Peak_Area"]) | data["Peak_Area"].le(0),
+        reasons.eq("") & (~np.isfinite(data["Peak_Area"]) | data["Peak_Area"].le(0)),
         "Peak area missing or non-positive",
     )
     reasons = reasons.mask(reasons.eq("") & ~np.isfinite(data["Scores"]), "PBM score missing")

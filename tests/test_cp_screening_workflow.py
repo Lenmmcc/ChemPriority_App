@@ -491,6 +491,22 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             "PBM score missing",
         )
 
+    def test_calculate_pbm_toxpi_audits_missing_compound_name(self):
+        data = pd.DataFrame({
+            "compound": ["", "Complete"],
+            "Peak_Area": [100.0, 10.0],
+            "Scores": [1.0, 1.0],
+            "DF": [0.5, 0.5],
+        })
+
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=2, display_top_n=2, robustness_enabled=False)
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        self.assertEqual(len(result.excluded_rows), 1)
+        self.assertEqual(result.excluded_rows.loc[0, "exclusion_reason"], "Compound name missing")
+
     def test_calculate_pbm_toxpi_excludes_invalid_metrics_and_pov_state(self):
         data = pd.DataFrame({
             "compound": ["No PA", "Bad DF", "Pov failed", "Incomplete", "Complete"],
