@@ -475,6 +475,106 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             normalized.loc[normalized["compound"].eq("Compound A"), "toxpi"].mean(),
         )
 
+    def test_calculate_pbm_toxpi_excludes_missing_pbm_from_final_ranking(self):
+        data = pd.DataFrame({
+            "compound": ["PBM missing", "Complete"],
+            "Peak_Area": [1e9, 1e3],
+            "Scores": [float("nan"), 1.0],
+            "DF": [1.0, 0.1],
+        })
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=2, display_top_n=2, robustness_enabled=False)
+        )
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        self.assertEqual(
+            result.excluded_rows.set_index("compound").loc["PBM missing", "exclusion_reason"],
+            "PBM score missing",
+        )
+
+    def test_calculate_pbm_toxpi_excludes_compound_with_any_missing_duplicate_pbm(self):
+        data = pd.DataFrame({
+            "compound": ["Duplicate PBM", "Duplicate PBM", "Complete"],
+            "Peak_Area": [100.0, 100.0, 10.0],
+            "Scores": [float("nan"), 1.0, 1.0],
+            "DF": [0.5, 0.5, 0.5],
+        })
+
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=2, display_top_n=2, robustness_enabled=False)
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        self.assertEqual(
+            result.excluded_rows.set_index("compound").loc["Duplicate PBM", "exclusion_reason"],
+            "PBM score missing",
+        )
+
+    def test_calculate_pbm_toxpi_excludes_compound_with_any_invalid_duplicate_pa_or_df(self):
+        data = pd.DataFrame({
+            "compound": ["Duplicate PA", "Duplicate PA", "Duplicate DF", "Duplicate DF", "Complete"],
+            "Peak_Area": [float("nan"), 100.0, 100.0, 100.0, 10.0],
+            "Scores": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "DF": [0.5, 0.5, 1.2, 0.5, 0.5],
+        })
+
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=3, display_top_n=3, robustness_enabled=False)
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        reasons = result.excluded_rows.set_index("compound")["exclusion_reason"]
+        self.assertEqual(reasons.loc["Duplicate PA"], "Peak area missing or non-positive")
+        self.assertEqual(reasons.loc["Duplicate DF"], "DF missing or outside [0, 1]")
+
+    def test_calculate_pbm_toxpi_audits_missing_compound_name(self):
+        data = pd.DataFrame({
+            "compound": ["", "Complete"],
+            "Peak_Area": [100.0, 10.0],
+            "Scores": [1.0, 1.0],
+            "DF": [0.5, 0.5],
+        })
+
+        result = calculate_pbm_toxpi(
+            data, PBMToxPiConfig(candidate_top_n=2, display_top_n=2, robustness_enabled=False)
+        )
+
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        self.assertEqual(len(result.excluded_rows), 1)
+        self.assertEqual(result.excluded_rows.loc[0, "exclusion_reason"], "Compound name missing")
+
+    def test_calculate_pbm_toxpi_excludes_invalid_metrics_and_pov_state(self):
+        data = pd.DataFrame({
+            "compound": ["No PA", "Bad DF", "Pov failed", "Incomplete", "Complete"],
+            "Peak_Area": [float("nan"), 10.0, 10.0, 10.0, 10.0],
+            "Scores": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "DF": [0.5, 1.2, 0.5, 0.5, 0.5],
+            "Pov_LRTP_Status": ["ok", "ok", "error", "ok", "ok"],
+            "Pov_LRTP_model_input_complete": [True, True, True, False, True],
+        })
+        result = calculate_pbm_toxpi(data, PBMToxPiConfig(candidate_top_n=5, display_top_n=5))
+        self.assertEqual(result.final_ranking["compound"].tolist(), ["Complete"])
+        self.assertEqual(len(result.excluded_rows), 4)
+
+    def test_pbm_toxpi_input_retains_pov_lrtp_eligibility_metadata(self):
+        df_table = pd.DataFrame(
+            {"compound": ["Compound A"], "Peak_Area": [10.0], "DF": [0.5]}
+        )
+        pov_lrtp = pd.DataFrame(
+            {
+                "Name": ["Compound A"],
+                "Scores": [1.0],
+                "Status": ["error"],
+                "model_input_complete": [False],
+                "Error": ["Model inputs unavailable"],
+            }
+        )
+
+        toxpi_input = build_pbm_toxpi_input(df_table, pov_lrtp)
+
+        self.assertEqual(toxpi_input.loc[0, "Pov_LRTP_Status"], "error")
+        self.assertFalse(toxpi_input.loc[0, "Pov_LRTP_model_input_complete"])
+        self.assertEqual(toxpi_input.loc[0, "Pov_LRTP_Error"], "Model inputs unavailable")
+
     def test_two_stage_toxpi_selects_global_candidates_then_renormalizes_source_metrics(self):
         toxpi_input = pd.DataFrame(
             {
@@ -647,6 +747,19 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         }
 
         self.assertTrue(expected.issubset(EXPECTED_WORKBOOK_SHEETS))
+
+    def test_screening_workbook_and_page_expose_toxpi_exclusions(self):
+        self.assertIn("ToxPi_Excluded", EXPECTED_WORKBOOK_SHEETS)
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+        self.assertIn('"toxpi_excluded": toxpi_result.excluded_rows', page_text)
+        self.assertIn('st.subheader("ToxPi_Excluded")', page_text)
+
+    def test_comprehensive_page_handles_legacy_downstream_state_without_toxpi_exclusions(self):
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'show_dataframe(downstream_state.get("toxpi_excluded", pd.DataFrame()))',
+            page_text,
+        )
 
     def test_comprehensive_page_exposes_shared_axis_toxpi_and_robustness_controls(self):
         page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
