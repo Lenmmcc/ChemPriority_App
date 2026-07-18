@@ -5,15 +5,26 @@ import matplotlib.font_manager as font_manager
 from matplotlib.text import Text
 
 
-PLOT_FONT_FAMILY = "Times New Roman"
-PLOT_FONT_WARNING = (
-    "Times New Roman is not available. Install the font on the runtime host "
-    "or provide a licensed font file before exporting publication figures."
-)
+PREFERRED_PLOT_FONT_FAMILY = "Times New Roman"
+FALLBACK_PLOT_FONT_FAMILY = "Liberation Serif"
 
 
 def font_available(name: str) -> bool:
     return any(font.name == name for font in font_manager.fontManager.ttflist)
+
+
+def select_plot_font() -> str:
+    if font_available(PREFERRED_PLOT_FONT_FAMILY):
+        return PREFERRED_PLOT_FONT_FAMILY
+    return FALLBACK_PLOT_FONT_FAMILY
+
+
+PLOT_FONT_FAMILY = select_plot_font()
+PLOT_FONT_WARNING = (
+    "Neither Times New Roman nor Liberation Serif is available. "
+    "Install the 'fonts-liberation' package on the runtime host before "
+    "exporting publication figures."
+)
 
 
 def configure_plot_style() -> list[str]:
