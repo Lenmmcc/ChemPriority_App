@@ -209,6 +209,20 @@ AUTO_WORKFLOW_CHECKPOINT_EXPORTS = {
     ),
 }
 
+AUTO_WORKFLOW_MODULE_CHARTS_BY_SLUG = {
+    "local_screening": AUTO_WORKFLOW_EXPORT_MODULES[0][3],
+    "identifier_completion": (),
+    "epi_suite": (),
+    "comptox_use": AUTO_WORKFLOW_EXPORT_MODULES[3][3],
+    "echa_reach_use": (
+        "ECHA_Reported_Use_Distribution",
+        "ECHA_Reported_Use_Evidence",
+    ),
+    "echa_ghs_cl": (),
+    "source_origin": AUTO_WORKFLOW_EXPORT_MODULES[5][3],
+    "pov_lrtp_pbm_toxpi": AUTO_WORKFLOW_EXPORT_MODULES[6][3],
+}
+
 PUBLIC_TABLE_NAMES = frozenset(
     name
     for _, _, table_names, _ in AUTO_WORKFLOW_EXPORT_MODULES
@@ -296,6 +310,13 @@ class AutoWorkflowModuleWorkbook:
     step: str
     slug: str
     file_name: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class AutoWorkflowModuleDownload:
+    file_name: str
+    mime: str
     data: bytes
 
 
@@ -847,10 +868,51 @@ def build_auto_workflow_module_workbook(
     )
 
 
+def _module_download_chart_keys(
+    module: AutoWorkflowModuleWorkbook,
+    charts: Mapping[str, AutoWorkflowChart],
+) -> tuple[str, ...]:
+    candidates = AUTO_WORKFLOW_MODULE_CHARTS_BY_SLUG.get(module.slug, ())
+    return tuple(
+        key
+        for key in candidates
+        if key in PUBLIC_CHART_NAMES and key in charts
+    )
+
+
+def build_auto_workflow_module_download(
+    module: AutoWorkflowModuleWorkbook,
+    charts: Mapping[str, AutoWorkflowChart] | None = None,
+) -> AutoWorkflowModuleDownload:
+    available_charts = charts or {}
+    chart_keys = _module_download_chart_keys(module, available_charts)
+    if not chart_keys:
+        return AutoWorkflowModuleDownload(
+            file_name=module.file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            data=module.data,
+        )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(module.file_name, module.data)
+        for key in chart_keys:
+            stem = _module_chart_file_name(key)
+            archive.writestr(f"figures/{stem}.png", available_charts[key].png)
+            archive.writestr(f"figures/{stem}.pdf", available_charts[key].pdf)
+    return AutoWorkflowModuleDownload(
+        file_name=Path(module.file_name).with_suffix(".zip").name,
+        mime="application/zip",
+        data=buffer.getvalue(),
+    )
+
+
 def build_auto_workflow_partial_zip(
     result: AutoWorkflowResult,
     module_workbooks: Mapping[str, AutoWorkflowModuleWorkbook],
+    charts: Mapping[str, AutoWorkflowChart] | None = None,
 ) -> io.BytesIO:
+    available_charts = charts if charts is not None else result.charts
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -859,6 +921,16 @@ def build_auto_workflow_partial_zip(
         )
         for module in module_workbooks.values():
             archive.writestr(f"modules/{module.file_name}", module.data)
+            for key in _module_download_chart_keys(module, available_charts):
+                stem = _module_chart_file_name(key)
+                archive.writestr(
+                    f"modules/{module.slug}/figures/{stem}.png",
+                    available_charts[key].png,
+                )
+                archive.writestr(
+                    f"modules/{module.slug}/figures/{stem}.pdf",
+                    available_charts[key].pdf,
+                )
     buffer.seek(0)
     return buffer
 

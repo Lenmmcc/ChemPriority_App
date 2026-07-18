@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import ast
+import base64
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import importlib
@@ -1187,6 +1188,58 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             ["ECHA_GHS_Summary"],
         )
 
+    def test_chart_module_download_is_zip_with_workbook_png_and_pdf(self):
+        module = auto_query_workflow.AutoWorkflowModuleWorkbook(
+            step=R_DF_STEP_LABEL,
+            slug="local_screening",
+            file_name="Local_Screening_Results.xlsx",
+            data=b"XLSX",
+        )
+        charts = OrderedDict(
+            {
+                "Local_Chemical_Type_Distribution": AutoWorkflowChart(
+                    title="Chemical type",
+                    png=b"PNG",
+                    pdf=b"PDF",
+                )
+            }
+        )
+
+        download = auto_query_workflow.build_auto_workflow_module_download(
+            module, charts
+        )
+
+        self.assertEqual(download.file_name, "Local_Screening_Results.zip")
+        self.assertEqual(download.mime, "application/zip")
+        with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {
+                    "Local_Screening_Results.xlsx",
+                    "figures/Chemical_Type_Distribution.png",
+                    "figures/Chemical_Type_Distribution.pdf",
+                },
+            )
+
+    def test_chartless_module_download_remains_xlsx(self):
+        module = auto_query_workflow.AutoWorkflowModuleWorkbook(
+            step="标识符补全",
+            slug="identifier_completion",
+            file_name="Identifier_Completion_Results.xlsx",
+            data=b"XLSX",
+        )
+
+        download = auto_query_workflow.build_auto_workflow_module_download(
+            module, OrderedDict()
+        )
+
+        self.assertEqual(download.file_name, module.file_name)
+        self.assertEqual(
+            download.mime,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertEqual(download.data, module.data)
+
     def test_partial_zip_contains_only_named_partial_log_and_completed_module_books(self):
         result = AutoWorkflowResult(
             mapping=AutoWorkflowMapping(),
@@ -1209,6 +1262,46 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 {
                     "Partial_Auto_Query_Workflow_Results.xlsx",
                     "modules/Identifier_Completion_Results.xlsx",
+                },
+            )
+
+    def test_partial_zip_includes_available_module_figures(self):
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [("DF_Table", pd.DataFrame({"Name": ["Compound A"], "DF": [1.0]}))]
+            ),
+            step_status=pd.DataFrame(
+                {"step": [R_DF_STEP_LABEL], "status": ["完成"], "rows": [1], "message": [""]}
+            ),
+            warnings=pd.DataFrame(columns=["stage", "message"]),
+        )
+        module = build_auto_workflow_module_workbook(result, R_DF_STEP_LABEL)
+        charts = OrderedDict(
+            {
+                "Local_Chemical_Type_Distribution": AutoWorkflowChart(
+                    title="Chemical type",
+                    png=b"PNG",
+                    pdf=b"PDF",
+                )
+            }
+        )
+
+        package = build_auto_workflow_partial_zip(
+            result,
+            {module.slug: module},
+            charts=charts,
+        )
+
+        with zipfile.ZipFile(package) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {
+                    "Partial_Auto_Query_Workflow_Results.xlsx",
+                    "modules/Local_Screening_Results.xlsx",
+                    "modules/local_screening/figures/Chemical_Type_Distribution.png",
+                    "modules/local_screening/figures/Chemical_Type_Distribution.pdf",
                 },
             )
 
@@ -1871,6 +1964,92 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 self.assertEqual(
                     storage_mocks.cleanup.call_count, execution_count_before
                 )
+        finally:
+            delete_checkpoint(run_token, root=checkpoint_root)
+            storage_stack.close()
+
+    def test_page_6_chart_module_download_contains_workbook_png_and_pdf(self):
+        storage_stack = ExitStack()
+        checkpoint_root = Path(
+            storage_stack.enter_context(TemporaryDirectory())
+        )
+        storage_stack.enter_context(
+            _isolated_page_checkpoint_storage(checkpoint_root)
+        )
+        run_token = generate_run_token()
+        chart = AutoWorkflowChart(
+            title="Chemical Type Distribution",
+            png=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            ),
+            pdf=b"%PDF-1.4\n%%EOF",
+        )
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Compound A"]}),
+            tables=OrderedDict(
+                [("DF_Table", pd.DataFrame({"Name": ["Compound A"], "DF": [1.0]}))]
+            ),
+            step_status=pd.DataFrame(
+                {
+                    "step": [R_DF_STEP_LABEL],
+                    "status": ["完成"],
+                    "rows": [1],
+                    "message": [""],
+                }
+            ),
+            warnings=pd.DataFrame(columns=["stage", "message"]),
+            charts=OrderedDict(
+                [("Local_Chemical_Type_Distribution", chart)]
+            ),
+        )
+        module = build_auto_workflow_module_workbook(result, R_DF_STEP_LABEL)
+        checkpoint = AutoWorkflowCheckpoint(
+            run_id=generate_run_token(),
+            input_signature="chart-download-input",
+            settings_signature="chart-download-settings",
+            selected_steps=(R_DF_STEP_LABEL,),
+            finished_steps=(R_DF_STEP_LABEL,),
+            current_step=None,
+            status="completed",
+            result=result,
+            error_message="",
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        media_storages = []
+        try:
+            save_checkpoint(
+                run_token,
+                checkpoint,
+                "chart-download.xlsx",
+                {module.slug: module},
+                root=checkpoint_root,
+            )
+            with _capture_app_test_media_storage(media_storages):
+                app = AppTest.from_file(
+                    "pages/6_一键批量查询.py", default_timeout=20
+                )
+                app.query_params["run"] = run_token
+                app.run(timeout=20)
+
+                self.assertEqual(len(app.exception), 0)
+                downloads = {
+                    button.label: button for button in app.get("download_button")
+                }
+                download = downloads[f"下载 {R_DF_STEP_LABEL}"]
+                self.assertTrue(download.proto.ignore_rerun)
+                payload = _app_test_download_payload(
+                    download, media_storages[-1]
+                )
+                with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                    self.assertEqual(
+                        set(archive.namelist()),
+                        {
+                            "Local_Screening_Results.xlsx",
+                            "figures/Chemical_Type_Distribution.png",
+                            "figures/Chemical_Type_Distribution.pdf",
+                        },
+                    )
         finally:
             delete_checkpoint(run_token, root=checkpoint_root)
             storage_stack.close()

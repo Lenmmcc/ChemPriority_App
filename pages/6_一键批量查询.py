@@ -15,6 +15,7 @@ from src.auto_query_workflow import (
     AutoWorkflowResult,
     PUBLIC_TABLE_NAMES,
     build_auto_workflow_charts,
+    build_auto_workflow_module_download,
     build_auto_workflow_module_workbook,
     build_auto_workflow_partial_zip,
     build_auto_workflow_zip,
@@ -319,9 +320,11 @@ def _render_missing_evidence_chart_notice(group_key, result, charts):
 def _render_module_downloads(
     result,
     module_workbooks,
+    charts=None,
     *,
     key_prefix="auto_query_module",
 ):
+    charts = charts or {}
     if result.step_status.empty:
         return
     st.subheader("已完成模块，可立即下载")
@@ -360,11 +363,16 @@ def _render_module_downloads(
             st.caption("该模块当前没有可导出的结果表。")
             continue
         slug, module = export
+        try:
+            download = build_auto_workflow_module_download(module, charts)
+        except Exception as exc:
+            st.warning(f"{module.step} 下载包生成失败：{exc}")
+            continue
         st.download_button(
             f"下载 {module.step}",
-            data=module.data,
-            file_name=module.file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            data=download.data,
+            file_name=download.file_name,
+            mime=download.mime,
             key=f"{key_prefix}_download_{slug}",
             on_click="ignore",
         )
@@ -391,10 +399,14 @@ def _render_saved_results(
     if isinstance(structure_preparation, pd.DataFrame):
         _render_structure_preparation_summary(structure_preparation)
     _render_result_dashboard(result, charts)
-    _render_module_downloads(result, module_workbooks)
+    _render_module_downloads(result, module_workbooks, charts)
     if partial:
         try:
-            partial_zip = build_auto_workflow_partial_zip(result, module_workbooks)
+            partial_zip = build_auto_workflow_partial_zip(
+                result,
+                module_workbooks,
+                charts=charts,
+            )
         except Exception as exc:
             st.warning(f"部分结果 ZIP 生成失败：{exc}")
         else:
@@ -882,6 +894,7 @@ if start_run:
             _render_module_downloads(
                 checkpoint.result,
                 module_workbooks,
+                checkpoint.result.charts,
                 key_prefix=render_scope,
             )
 
