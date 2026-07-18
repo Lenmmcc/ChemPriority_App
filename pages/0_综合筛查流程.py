@@ -1143,7 +1143,7 @@ with tab_downstream:
         st.subheader("ToxPi_Display")
         show_dataframe(downstream_state["toxpi_display"])
         st.subheader("ToxPi_Excluded")
-        show_dataframe(downstream_state["toxpi_excluded"])
+        show_dataframe(downstream_state.get("toxpi_excluded", pd.DataFrame()))
         st.subheader("ToxPi_Settings")
         show_dataframe(downstream_state["toxpi_settings"])
         if not downstream_state["toxpi_robustness"].empty:
