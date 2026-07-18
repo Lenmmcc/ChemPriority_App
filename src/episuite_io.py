@@ -269,8 +269,8 @@ def normalize_input_columns(df):
     normalized = normalized.rename(columns=rename_map)
     for col in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
         if col in normalized.columns:
-            normalized[col] = normalized[col].astype(str).str.strip()
-            normalized[col] = normalized[col].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+            normalized[col] = normalized[col].map(_clean_optional_text)
+            normalized[col] = normalized[col].replace({"": pd.NA})
     return normalized
 
 
@@ -404,17 +404,27 @@ def run_epi_web_batch(
     def process_row(item):
         _, row = item
         compound = str(row.get("compound", "")).strip()
-        smiles = str(row.get("smiles", "")).strip()
+        smiles = _clean_optional_text(row.get("smiles"))
         cas = _clean_optional_text(row.get("cas"))
         query_note = ""
         row_rows = []
         row_raw_rows = []
         row_errors = []
+        if not smiles:
+            _append_failed_epi_row(
+                row_rows,
+                row_errors,
+                compound,
+                smiles,
+                cas,
+                "缺少有效 SMILES，未向 EPI Web Suite 发送请求。",
+            )
+            return row_rows, row_raw_rows, row_errors
         try:
             raw = call_epi_web_api(smiles, cas=cas, api_url=api_url, timeout=timeout)
         except Exception as exc:
             error_text = str(exc)
-            if cas and _is_cas_not_located_error(error_text):
+            if cas and _is_cas_fallback_error(error_text):
                 try:
                     raw = call_epi_web_api(smiles, cas=None, api_url=api_url, timeout=timeout)
                     query_note = f"CAS 查询失败，已回退到 SMILES：{error_text}"
@@ -496,9 +506,13 @@ def _append_failed_epi_row(rows, errors, compound, smiles, cas, error_text):
     rows.append(failed)
 
 
-def _is_cas_not_located_error(error_text):
+def _is_cas_fallback_error(error_text):
     normalized = str(error_text).lower()
-    return "http 404" in normalized and "could not locate cas id" in normalized
+    return (
+        "http 404" in normalized and "could not locate cas id" in normalized
+    ) or (
+        "http 400" in normalized and "could not parse 'null'" in normalized
+    )
 
 
 def extract_epi_web_summary(compound, smiles, data, cas=None, query_note=""):
@@ -1097,7 +1111,7 @@ def _clean_optional_text(value):
     except (TypeError, ValueError):
         pass
     text = str(value).strip()
-    return "" if text.lower() in {"", "nan", "none", "<na>"} else text
+    return "" if text.lower() in {"", "nan", "none", "null", "<na>"} else text
 
 
 def _extract_numeric(text, patterns):

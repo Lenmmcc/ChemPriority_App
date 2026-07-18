@@ -163,6 +163,13 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertEqual(df.loc[0, "smiles"], "CCO")
         self.assertEqual(df.loc[0, "cas"], "64-17-5")
 
+    def test_normalize_input_treats_literal_null_smiles_as_missing(self):
+        normalized = episuite_io.normalize_input_columns(
+            pd.DataFrame({"compound": ["Bad"], "smiles": ["null"]})
+        )
+
+        self.assertTrue(pd.isna(normalized.loc[0, "smiles"]))
+
     @patch("src.episuite_io.urllib.request.urlopen")
     def test_call_epi_web_api_sends_cas_and_smiles_when_cas_is_present(self, urlopen):
         response = unittest.mock.MagicMock()
@@ -256,6 +263,59 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertIn("CAS 查询失败，已回退到 SMILES", results.loc[0, "query_note"])
         self.assertIn("CAS 查询失败，已回退到 SMILES", raw_rows.loc[0, "query_note"])
         self.assertTrue(errors.empty)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    def test_parse_null_with_cas_falls_back_to_same_smiles_without_cas(self, call_api):
+        call_api.side_effect = [
+            RuntimeError("EPI Web Suite 返回 HTTP 400: could not parse 'null'"),
+            ETHANOL_CAS_AND_SMILES_RESPONSE,
+        ]
+        input_df = pd.DataFrame(
+            {
+                "compound": ["Example"],
+                "smiles": ["CC(C)c1ccc2c(c1)CCC1C(C)CCCC21C"],
+                "cas": ["5323-56-8"],
+            }
+        )
+
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
+            input_df, delay_seconds=0
+        )
+
+        self.assertEqual(call_api.call_args_list[0].kwargs["cas"], "5323-56-8")
+        self.assertIsNone(call_api.call_args_list[1].kwargs["cas"])
+        self.assertEqual(call_api.call_args_list[1].args[0], input_df.loc[0, "smiles"])
+        self.assertEqual(results.loc[0, "status"], "success")
+        self.assertIn("CAS", results.loc[0, "query_note"])
+        self.assertEqual(raw_rows.loc[0, "smiles"], input_df.loc[0, "smiles"])
+        self.assertTrue(errors.empty)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    def test_other_http_400_does_not_fall_back(self, call_api):
+        call_api.side_effect = RuntimeError(
+            "EPI Web Suite 返回 HTTP 400: invalid structure"
+        )
+        input_df = pd.DataFrame(
+            {"compound": ["Bad"], "smiles": ["bad"], "cas": ["1-11-1"]}
+        )
+
+        results, _, errors = episuite_io.run_epi_web_batch(input_df, delay_seconds=0)
+
+        call_api.assert_called_once()
+        self.assertEqual(results.loc[0, "status"], "failed")
+        self.assertEqual(len(errors), 1)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    def test_missing_smiles_is_rejected_without_api_call(self, call_api):
+        input_df = pd.DataFrame(
+            {"compound": ["Bad"], "smiles": [pd.NA], "cas": ["1-11-1"]}
+        )
+
+        results, _, errors = episuite_io.run_epi_web_batch(input_df, delay_seconds=0)
+
+        call_api.assert_not_called()
+        self.assertEqual(results.loc[0, "status"], "failed")
+        self.assertIn("SMILES", errors.loc[0, "error"])
 
     @patch("src.episuite_io.call_epi_web_api")
     def test_run_epi_web_batch_keeps_order_and_isolates_parallel_row_failure(self, call_api):
