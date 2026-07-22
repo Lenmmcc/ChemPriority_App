@@ -127,6 +127,29 @@ def redirect_path_resolution(source, destination):
 
 
 class AutoQueryCheckpointTests(unittest.TestCase):
+    def test_checkpoint_root_can_be_overridden_before_process_import(self):
+        import os
+        from pathlib import Path
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            expected = Path(folder) / "ChemPriority" / "checkpoints"
+            env = os.environ.copy()
+            env["CHEMPRIORITY_CHECKPOINT_ROOT"] = str(expected)
+            output = subprocess.check_output(
+                [
+                    sys.executable,
+                    "-c",
+                    "from src.auto_query_checkpoint import DEFAULT_CHECKPOINT_ROOT; print(DEFAULT_CHECKPOINT_ROOT.resolve())",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                text=True,
+            ).strip()
+        self.assertEqual(Path(output), expected.resolve())
+
     def test_repeated_saves_reuse_unchanged_content_addressed_artifacts(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
