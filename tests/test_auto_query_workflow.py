@@ -33,20 +33,24 @@ from src.auto_query_workflow import (
     AutoWorkflowConfig,
     AutoWorkflowChart,
     AutoWorkflowMapping,
+    AutoWorkflowPreparedInput,
     AutoWorkflowResult,
     LocalScreeningOutput,
     R_DF_STEP_LABEL,
     _load_local_screening_charts,
+    auto_input_from_multi_file_result,
     build_auto_workflow_charts,
     build_auto_workflow_module_workbook,
     build_auto_workflow_partial_zip,
     build_auto_workflow_workbook,
     build_auto_workflow_zip,
+    build_representative_table,
     detect_default_mapping,
     run_auto_query_workflow,
 )
 from src.cp_screening_workflow import PBMToxPiConfig
 from src.mol_structure_parser import prepare_structure_dataframe
+from src.multi_file_screening import MultiFileScreeningResult
 from src.upload_state import upload_signature
 from src.use_rose_plot import (
     build_compound_universe,
@@ -149,6 +153,286 @@ def _isolated_page_checkpoint_storage(root):
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_complete_epi_seed_skips_network(
+        self,
+        run_identifier,
+        run_epi,
+    ):
+        run_identifier.return_value = (
+            _completed_identifier_rows(["Compound A"]),
+            pd.DataFrame(),
+        )
+        seed = complete_epi_rows(["Compound A"])
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(),
+            prepared_input=_workflow_input_rows(["Compound A"]),
+            representative_table=build_representative_table(
+                _workflow_input_rows(["Compound A"]),
+                AutoWorkflowMapping(
+                    compound_col="Name",
+                    formula_col="NIST Lib Hit Formula",
+                    peak_area_col="Avg TIC",
+                ),
+            ),
+            local_tables=OrderedDict(),
+            local_charts=OrderedDict(),
+            local_warnings=[],
+        )
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(["Compound A"]),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                identifier_delay_seconds=0,
+                epi_delay_seconds=0,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=seed,
+        )
+
+        run_epi.assert_not_called()
+        self.assertEqual(
+            result.tables["EPI_Results"]["compound"].tolist(),
+            ["Compound A"],
+        )
+        self.assertTrue(
+            result.tables["EPI_Completeness"]["needs_query"].eq(False).all()
+        )
+        expected_epi_sheets = {
+            "EPI_Results",
+            "EPI_Raw_Results",
+            "EPI_Errors",
+            "EPI_Completeness",
+            "EPI_Source_Provenance",
+            "EPI_Match_Audit",
+            "EPI_Conflict_Audit",
+            "EPI_Query_Attempts",
+            "EPI_Retry_Input",
+        }
+        root_sheets = set(
+            pd.ExcelFile(build_auto_workflow_workbook(result)).sheet_names
+        )
+        self.assertTrue(expected_epi_sheets.issubset(root_sheets))
+        module = build_auto_workflow_module_workbook(
+            result,
+            "EPI Suite 环境归趋",
+        )
+        self.assertIsNotNone(module)
+        module_sheets = set(
+            pd.ExcelFile(io.BytesIO(module.data)).sheet_names
+        )
+        self.assertEqual(module_sheets, expected_epi_sheets)
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_partial_epi_seed_queries_only_missing_compounds(
+        self,
+        run_identifier,
+        run_epi,
+    ):
+        compounds = ["Compound A", "Compound B"]
+        run_identifier.return_value = (
+            _completed_identifier_rows(compounds),
+            pd.DataFrame(),
+        )
+        run_epi.return_value = (
+            complete_epi_rows(["Compound B"]),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        result = run_auto_query_workflow(
+            _workflow_input_rows(compounds),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                identifier_delay_seconds=0,
+                epi_delay_seconds=0,
+            ),
+            epi_uploaded_results=complete_epi_rows(["Compound A"]),
+        )
+
+        self.assertEqual(
+            run_epi.call_args.args[0]["compound"].tolist(),
+            ["Compound B"],
+        )
+        self.assertTrue(
+            result.tables["EPI_Completeness"]["needs_query"].eq(False).all()
+        )
+
+    def test_multi_file_adapter_preserves_sample_representative_and_audit_exports(self):
+        representative = pd.DataFrame(
+            {
+                "Name": ["Compound A", "Compound B"],
+                "formula": ["C2H6O", "C3H8O"],
+                "Group_Area": [10.0, 20.0],
+                "compound_key": ["compound a", "compound b"],
+            }
+        )
+        mappings = pd.DataFrame(
+            {
+                "source_file": ["sample-1.xlsx", "sample-2.xlsx"],
+                "sample_id": ["Sample 1", "Sample 2"],
+            }
+        )
+        multi_file_result = MultiFileScreeningResult(
+            normalized_samples=[],
+            representative_table=representative,
+            structure_preparation=pd.DataFrame(
+                {
+                    "sample_id": ["Sample 1", "Sample 2"],
+                    "Name": ["Compound A", "Compound A"],
+                }
+            ),
+            input_file_mappings=mappings,
+            df_table=pd.DataFrame({"Name": ["Compound A"], "DF": [2]}),
+            sample_peak_area=pd.DataFrame(
+                {
+                    "sample_id": ["Sample 1", "Sample 2"],
+                    "Name": ["Compound A", "Compound A"],
+                    "peak_area": [10.0, 20.0],
+                }
+            ),
+            group_area_raw_long=pd.DataFrame(
+                {
+                    "sample_id": ["Sample 1", "Sample 2"],
+                    "Name": ["Compound A", "Compound A"],
+                    "Group_Area": [10.0, 20.0],
+                }
+            ),
+            group_area_mean_by_sample=pd.DataFrame(
+                {
+                    "sample_id": ["Sample 1", "Sample 2"],
+                    "Name": ["Compound A", "Compound A"],
+                    "Group_Area": [10.0, 20.0],
+                }
+            ),
+            tables={"Input_Check": pd.DataFrame({"sample_id": ["Sample 1"]})},
+        )
+
+        prepared = auto_input_from_multi_file_result(multi_file_result)
+        result = run_auto_query_workflow(
+            pd.DataFrame({"legacy": ["must not be normalized"]}),
+            AutoWorkflowConfig(
+                run_r_replicate_df=True,
+                run_identifier=False,
+            ),
+            prepared_input=prepared,
+        )
+
+        pd.testing.assert_frame_equal(result.representative_table, representative)
+        pd.testing.assert_frame_equal(
+            result.tables["Input_File_Mappings"],
+            mappings,
+        )
+        pd.testing.assert_frame_equal(
+            result.tables["Sample_Peak_Area"],
+            multi_file_result.sample_peak_area,
+        )
+        root_sheets = set(
+            pd.ExcelFile(build_auto_workflow_workbook(result)).sheet_names
+        )
+        self.assertIn("Input_File_Mappings", root_sheets)
+        module = build_auto_workflow_module_workbook(result, R_DF_STEP_LABEL)
+        self.assertIsNotNone(module)
+        self.assertIn(
+            "Input_File_Mappings",
+            pd.ExcelFile(io.BytesIO(module.data)).sheet_names,
+        )
+
+    @patch("src.auto_query_workflow._run_pov_lrtp_toxpi")
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_prepared_multi_file_tables_feed_pov_with_sample_rows(
+        self,
+        run_identifier,
+        run_epi,
+        run_pov,
+    ):
+        representative = pd.DataFrame(
+            {
+                "Name": ["Compound A", "Compound B"],
+                "formula": ["C2H6O", "C3H8O"],
+                "Group_Area": [10.0, 20.0],
+                "compound_key": ["compound a", "compound b"],
+            }
+        )
+        sample_rows = pd.DataFrame(
+            {
+                "source_sample_id": [
+                    "Sample 1",
+                    "Sample 1",
+                    "Sample 2",
+                    "Sample 2",
+                ],
+                "sample_id": [
+                    "Sample 1",
+                    "Sample 1",
+                    "Sample 2",
+                    "Sample 2",
+                ],
+                "compound": [
+                    "Compound A",
+                    "Compound B",
+                    "Compound A",
+                    "Compound B",
+                ],
+                "peak_area": [10.0, 5.0, 20.0, 15.0],
+            }
+        )
+        run_identifier.return_value = (
+            _completed_identifier_rows(["Compound A", "Compound B"]),
+            pd.DataFrame(),
+        )
+        run_pov.return_value = auto_query_workflow.PbmToxPiOutput(
+            tables=OrderedDict(),
+            charts=OrderedDict(),
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(
+                compound_col="Name",
+                formula_col="formula",
+                peak_area_col="Group_Area",
+                group_area_cols=["Group_Area"],
+            ),
+            prepared_input=representative.copy(),
+            representative_table=representative,
+            local_tables=OrderedDict(
+                [
+                    ("DF_Table", pd.DataFrame({"compound": ["Compound A", "Compound B"]})),
+                    ("Group_Area_Mean_By_Sample", sample_rows),
+                ]
+            ),
+        )
+
+        run_auto_query_workflow(
+            pd.DataFrame({"legacy": ["ignored"]}),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                run_pov_lrtp_toxpi=True,
+                identifier_delay_seconds=0,
+                epi_delay_seconds=0,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=complete_epi_rows(
+                ["Compound A", "Compound B"]
+            ),
+        )
+
+        run_epi.assert_not_called()
+        pd.testing.assert_frame_equal(run_pov.call_args.args[0], representative)
+        pd.testing.assert_frame_equal(
+            run_pov.call_args.args[3]["Group_Area_Mean_By_Sample"],
+            sample_rows,
+        )
+
     def test_checkpoint_callback_contract_keeps_shared_result_frames_read_only(self):
         self.assertIn("read-only", AutoWorkflowCheckpoint.__doc__ or "")
         self.assertIn("must not mutate", AutoWorkflowCheckpoint.__doc__ or "")
@@ -1440,6 +1724,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                     "01_Local_Screening/Local_Screening_Results.xlsx",
                     (
                         "Structure_Preparation",
+                        "Input_File_Mappings",
                         "Input_Check",
                         "Elemental_Ratios_DBE",
                         "Category_Summary",
@@ -1456,7 +1741,17 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                 ),
                 (
                     "03_EPI_Suite/EPI_Suite_Results.xlsx",
-                    ("EPI_Results", "EPI_Raw_Results", "EPI_Errors"),
+                    (
+                        "EPI_Results",
+                        "EPI_Raw_Results",
+                        "EPI_Errors",
+                        "EPI_Completeness",
+                        "EPI_Source_Provenance",
+                        "EPI_Match_Audit",
+                        "EPI_Conflict_Audit",
+                        "EPI_Query_Attempts",
+                        "EPI_Retry_Input",
+                    ),
                 ),
                 (
                     "04_EPA_CompTox/EPA_CompTox_Results.xlsx",
@@ -2383,6 +2678,26 @@ def _completed_identifier_rows(compounds):
             "ec": ["200-578-6"] * len(compounds),
             "dtxsid": ["DTXSID9020584"] * len(compounds),
             "echa_id": ["100.000.526"] * len(compounds),
+        }
+    )
+
+
+def complete_epi_rows(compounds):
+    compounds = list(compounds)
+    count = len(compounds)
+    return pd.DataFrame(
+        {
+            "compound": compounds,
+            "smiles": ["CC"] * count,
+            "cas": [""] * count,
+            "status": ["success"] * count,
+            "molecular_weight": [100.0] * count,
+            "henry_atm_m3_mol": [1.0e-5] * count,
+            "log_kow": [2.0] * count,
+            "level3_air_half_life_hours": [10.0] * count,
+            "level3_water_half_life_hours": [20.0] * count,
+            "level3_soil_half_life_hours": [30.0] * count,
+            "log_baf": [1.0] * count,
         }
     )
 

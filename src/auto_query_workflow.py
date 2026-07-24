@@ -30,8 +30,10 @@ from src.cp_screening_workflow import (
 from src.echa_ghs import run_echa_ghs_batch
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch
+from src.episuite_supplement import merge_network_epi, resolve_epi_sources
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, REQUIRED_IDENTIFIER_COLUMNS, run_identifier_completion_batch
 from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
+from src.multi_file_screening import MultiFileScreeningResult
 from src.pov_lrtp_replica import run_pov_lrtp_batch
 from src.plot_style import configure_plot_style
 from src.r_screening_replica.pipeline import run_screening_pipeline
@@ -65,6 +67,7 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
         "Local_Screening_Results.xlsx",
         (
             "Structure_Preparation",
+            "Input_File_Mappings",
             "Input_Check",
             "Elemental_Ratios_DBE",
             "Category_Summary",
@@ -89,7 +92,17 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
     (
         "03_EPI_Suite",
         "EPI_Suite_Results.xlsx",
-        ("EPI_Results", "EPI_Raw_Results", "EPI_Errors"),
+        (
+            "EPI_Results",
+            "EPI_Raw_Results",
+            "EPI_Errors",
+            "EPI_Completeness",
+            "EPI_Source_Provenance",
+            "EPI_Match_Audit",
+            "EPI_Conflict_Audit",
+            "EPI_Query_Attempts",
+            "EPI_Retry_Input",
+        ),
         (),
     ),
     (
@@ -296,6 +309,16 @@ class AutoWorkflowChart:
 
 
 @dataclass
+class AutoWorkflowPreparedInput:
+    mapping: AutoWorkflowMapping
+    prepared_input: pd.DataFrame
+    representative_table: pd.DataFrame
+    local_tables: OrderedDict[str, pd.DataFrame] = field(default_factory=OrderedDict)
+    local_charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
+    local_warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
 class AutoWorkflowResult:
     mapping: AutoWorkflowMapping
     representative_table: pd.DataFrame
@@ -393,6 +416,58 @@ def detect_default_mapping(columns) -> AutoWorkflowMapping:
     )
 
 
+def prepare_legacy_auto_input(
+    input_df: pd.DataFrame,
+    config: AutoWorkflowConfig,
+) -> AutoWorkflowPreparedInput:
+    mapping = config.mapping or detect_default_mapping(input_df.columns)
+    audit_columns = {"parse_status", "smiles_source", "smiles_decision_warning"}
+    if audit_columns.issubset(input_df.columns):
+        prepared_frame = input_df.copy()
+    else:
+        prepared_frame = prepare_structure_dataframe(
+            input_df,
+            mol_column=mapping.mol_column,
+            smiles_column=mapping.smiles_col,
+        )
+    normalized = _normalize_input(prepared_frame, mapping)
+    return AutoWorkflowPreparedInput(
+        mapping=mapping,
+        prepared_input=prepared_frame,
+        representative_table=build_representative_table(normalized, mapping),
+    )
+
+
+def auto_input_from_multi_file_result(
+    result: MultiFileScreeningResult,
+) -> AutoWorkflowPreparedInput:
+    local_tables = OrderedDict(result.tables)
+    local_tables["Input_File_Mappings"] = result.input_file_mappings
+    local_tables["Structure_Preparation"] = result.structure_preparation
+    local_tables["DF_Table"] = result.df_table
+    local_tables["Sample_Peak_Area"] = result.sample_peak_area
+    local_tables["Group_Area_Raw_Long"] = result.group_area_raw_long
+    local_tables["Group_Area_Mean_By_Sample"] = result.group_area_mean_by_sample
+    return AutoWorkflowPreparedInput(
+        mapping=AutoWorkflowMapping(
+            compound_col="Name",
+            formula_col="formula",
+            peak_area_col="Group_Area",
+            group_area_cols=["Group_Area"],
+            smiles_col="SMILES_input",
+            cas_col="CAS_input",
+        ),
+        prepared_input=result.structure_preparation,
+        representative_table=result.representative_table,
+        local_tables=local_tables,
+        local_charts=OrderedDict(result.charts),
+        local_warnings=result.warnings.get(
+            "message",
+            pd.Series(dtype=str),
+        ).tolist(),
+    )
+
+
 def run_auto_query_workflow(
     input_df: pd.DataFrame,
     config: AutoWorkflowConfig | None = None,
@@ -400,23 +475,19 @@ def run_auto_query_workflow(
     activity_callback: ActivityCallback | None = None,
     checkpoint_context: AutoWorkflowCheckpointContext | None = None,
     checkpoint_callback: CheckpointCallback | None = None,
+    prepared_input: AutoWorkflowPreparedInput | None = None,
+    epi_uploaded_results: pd.DataFrame | None = None,
+    epi_pool_results: pd.DataFrame | None = None,
 ) -> AutoWorkflowResult:
     config = config or AutoWorkflowConfig()
-    mapping = config.mapping or detect_default_mapping(input_df.columns)
-    audit_columns = {"parse_status", "smiles_source", "smiles_decision_warning"}
-    if audit_columns.issubset(input_df.columns):
-        prepared_input = input_df.copy()
-    else:
-        prepared_input = prepare_structure_dataframe(
-            input_df,
-            mol_column=mapping.mol_column,
-            smiles_column=mapping.smiles_col,
-        )
-    normalized = _normalize_input(prepared_input, mapping)
-    representative = build_representative_table(normalized, mapping)
+    if prepared_input is None:
+        prepared_input = prepare_legacy_auto_input(input_df, config)
+    mapping = prepared_input.mapping
+    prepared_frame = prepared_input.prepared_input
+    representative = prepared_input.representative_table
     tables: OrderedDict[str, pd.DataFrame] = OrderedDict()
     charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
-    tables["Structure_Preparation"] = prepared_input
+    tables["Structure_Preparation"] = prepared_frame
     status_rows = []
     warning_rows = []
     plot_warnings = configure_plot_style()
@@ -520,14 +591,27 @@ def run_auto_query_workflow(
 
     run_local_r_df = config.run_r_replicate_df or config.run_pov_lrtp_toxpi
     if run_local_r_df:
-        local_value = run_step(
-            R_DF_STEP_LABEL,
-            lambda: _run_r_replicate_df(
-                normalized,
+        has_prepared_local_output = bool(
+            prepared_input.local_tables
+            or prepared_input.local_charts
+            or prepared_input.local_warnings
+        )
+        if has_prepared_local_output:
+            local_runner = lambda: LocalScreeningOutput(
+                tables=OrderedDict(prepared_input.local_tables),
+                charts=OrderedDict(prepared_input.local_charts),
+                warnings=list(prepared_input.local_warnings),
+            )
+        else:
+            local_runner = lambda: _run_r_replicate_df(
+                _normalize_input(prepared_frame, mapping),
                 mapping,
                 config.detection_threshold,
                 config.axis_ranges,
-            ),
+            )
+        local_value = run_step(
+            R_DF_STEP_LABEL,
+            local_runner,
         )
         if local_value is not None:
             for key, table in local_value.tables.items():
@@ -588,35 +672,90 @@ def run_auto_query_workflow(
 
     run_epi_step = config.run_epi or config.run_pov_lrtp_toxpi
     if run_epi_step:
-        if query_input.empty or query_input["smiles"].eq("").all():
-            record("EPI Suite 环境归趋", "跳过", 0, "缺少可用于 EPI 的 SMILES。")
-        else:
-            epi_input = query_input.loc[query_input["smiles"].ne(""), ["compound", "smiles", "cas"]].reset_index(drop=True)
-            tables["EPI_Input"] = epi_input
+        epi_input = query_input.loc[
+            :,
+            ["compound", "smiles", "cas"],
+        ].reset_index(drop=True)
+        tables["EPI_Input"] = epi_input
+        resolution = resolve_epi_sources(
+            epi_input,
+            pd.DataFrame()
+            if epi_uploaded_results is None
+            else epi_uploaded_results,
+            pd.DataFrame()
+            if epi_pool_results is None
+            else epi_pool_results,
+            completed_identifiers=completed_identifiers,
+            require_core=bool(config.run_pov_lrtp_toxpi),
+        )
+        attempt_events = []
+        epi_value = None
 
-            def epi_progress(done, total, label):
-                if progress_callback:
-                    progress_callback("EPI Suite 环境归趋", done, total, label)
+        def epi_progress(done, total, label):
+            if progress_callback:
+                progress_callback(
+                    "EPI Suite 环境归趋",
+                    done,
+                    total,
+                    label,
+                )
+
+        if (
+            not resolution.query_input.empty
+            and not resolution.query_input["smiles"].eq("").all()
+        ):
+            forward_epi_activity = activity_for(
+                "EPI Suite 环境归趋",
+                config.epi_timeout,
+            )
+
+            def record_epi_activity(event):
+                attempt_events.append(dict(event))
+                forward_epi_activity(event)
 
             epi_value = run_step(
                 "EPI Suite 环境归趋",
                 lambda: run_epi_web_batch(
-                    epi_input,
+                    resolution.query_input,
                     api_url=config.epi_api_url,
                     timeout=int(config.epi_timeout),
                     delay_seconds=float(config.epi_delay_seconds),
                     max_workers=int(config.epi_max_workers),
                     cache_enabled=bool(config.cache_enabled),
                     progress_callback=epi_progress,
-                    activity_callback=activity_for("EPI Suite 环境归趋", config.epi_timeout),
+                    activity_callback=record_epi_activity,
                 ),
             )
             if epi_value is not None:
-                epi_results, epi_raw_results, epi_errors = epi_value
-                tables["EPI_Results"] = epi_results
-                tables["EPI_Raw_Results"] = epi_raw_results
-                tables["EPI_Errors"] = epi_errors
-                record("EPI Suite 环境归趋", "完成", len(epi_results))
+                network_results, network_raw, network_errors = epi_value
+                resolution = merge_network_epi(
+                    resolution,
+                    network_results,
+                    network_raw,
+                    network_errors,
+                    attempt_events,
+                )
+
+        epi_results = resolution.results
+        epi_raw_results = resolution.raw_results
+        epi_errors = resolution.errors
+        tables["EPI_Results"] = resolution.results
+        tables["EPI_Raw_Results"] = resolution.raw_results
+        tables["EPI_Errors"] = resolution.errors
+        tables["EPI_Completeness"] = resolution.completeness
+        tables["EPI_Source_Provenance"] = resolution.provenance
+        tables["EPI_Match_Audit"] = resolution.match_audit
+        tables["EPI_Conflict_Audit"] = resolution.conflict_audit
+        tables["EPI_Query_Attempts"] = resolution.query_attempts
+        tables["EPI_Retry_Input"] = resolution.query_input.reset_index(
+            drop=True
+        )
+        if resolution.query_input.empty:
+            record("EPI Suite 环境归趋", "完成", len(epi_results))
+        elif resolution.query_input["smiles"].eq("").all():
+            record("EPI Suite 环境归趋", "跳过", 0, "缺少可用于 EPI 的 SMILES。")
+        elif epi_value is not None:
+            record("EPI Suite 环境归趋", "完成", len(epi_results))
         emit_checkpoint("EPI Suite 环境归趋")
 
     if config.run_comptox:
