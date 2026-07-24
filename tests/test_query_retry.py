@@ -2,10 +2,39 @@ import unittest
 
 import pandas as pd
 
-from src.query_retry import is_transient_query_error, warning_frame_has_transient_error
+from src.query_retry import (
+    is_transient_query_error,
+    transient_retry_delay,
+    warning_frame_has_transient_error,
+)
 
 
 class QueryRetryTests(unittest.TestCase):
+    def test_reported_winerror_and_ssl_eof_are_retryable(self):
+        messages = (
+            "无法连接 EPI Web Suite: [WinError 10054] 远程主机强迫关闭了一个现有的连接。",
+            "无法连接 EPI Web Suite: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010)",
+            "SSLEOFError: EOF occurred in violation of protocol",
+            "connection forcibly closed by remote host",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertTrue(is_transient_query_error(message))
+
+    def test_transient_retry_delay_is_exponential_with_bounded_jitter(self):
+        self.assertEqual(
+            transient_retry_delay(1, random_value=0.0),
+            1.0,
+        )
+        self.assertEqual(
+            transient_retry_delay(2, random_value=0.0),
+            2.0,
+        )
+        self.assertEqual(
+            transient_retry_delay(2, random_value=1.0),
+            2.4,
+        )
+
     def test_transient_statuses_and_network_failures_are_retryable(self):
         for text in (
             "HTTP 408: request timeout",
