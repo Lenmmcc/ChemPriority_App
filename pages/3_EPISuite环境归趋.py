@@ -30,6 +30,12 @@ from src.episuite_io import (  # noqa: E402
     slim_epi_report_columns,
     validate_input,
 )
+from src.episuite_result_pool import (  # noqa: E402
+    clear_epi_pool,
+    remove_epi_pool_contributor,
+    upsert_epi_pool,
+)
+from src.episuite_supplement import inspect_epi_workbook  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
 from src.mol_structure_parser import (  # noqa: E402
     prepare_structure_dataframe,
@@ -51,6 +57,7 @@ RESULT_CACHE_KEYS = (
     "epi_parsed_results",
     "epi_parse_warnings",
 )
+POOL_CONTRIBUTOR_KEY = "epi_pool_contributor_id"
 
 DETAIL_RESULT_SHEETS = [
     ("Properties", "理化性质"),
@@ -68,9 +75,26 @@ def clear_result_cache():
 
 
 def clear_cached_input():
+    contributor_id = st.session_state.pop(POOL_CONTRIBUTOR_KEY, None)
+    if contributor_id:
+        remove_epi_pool_contributor(st.session_state, contributor_id)
     for key in INPUT_CACHE_KEYS:
         st.session_state.pop(key, None)
     clear_result_cache()
+
+
+def publish_epi_results_to_pool(results, provenance=None):
+    contributor_id = f"epi-page:{st.session_state['epi_input_signature']}"
+    previous = st.session_state.get(POOL_CONTRIBUTOR_KEY)
+    if previous and previous != contributor_id:
+        remove_epi_pool_contributor(st.session_state, previous)
+    upsert_epi_pool(
+        st.session_state,
+        contributor_id,
+        results,
+        pd.DataFrame() if provenance is None else provenance,
+    )
+    st.session_state[POOL_CONTRIBUTOR_KEY] = contributor_id
 
 
 def append_structure_preparation_sheet(workbook_buffer, prepared_df):
@@ -182,6 +206,20 @@ if st.button("清空当前数据", key="epi_clear_cached_input"):
     clear_cached_input()
     st.rerun()
 
+if st.button("清空当前会话 EPI 结果", key="epi_clear_shared_pool_request"):
+    st.session_state["epi_clear_shared_pool_confirm"] = True
+if st.session_state.get("epi_clear_shared_pool_confirm"):
+    st.warning("这将清空当前会话中所有页面贡献的 EPI 结果。")
+    confirm_col, cancel_col = st.columns(2)
+    if confirm_col.button("确认清空会话 EPI 结果", key="epi_clear_shared_pool_confirm_button"):
+        clear_epi_pool(st.session_state)
+        st.session_state.pop(POOL_CONTRIBUTOR_KEY, None)
+        st.session_state.pop("epi_clear_shared_pool_confirm", None)
+        st.rerun()
+    if cancel_col.button("取消", key="epi_clear_shared_pool_cancel"):
+        st.session_state.pop("epi_clear_shared_pool_confirm", None)
+        st.rerun()
+
 try:
     raw_input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
     prepared_input_df = prepare_structure_dataframe(raw_input_df)
@@ -275,6 +313,9 @@ with tab_predict:
         st.session_state["epi_merged_results"] = web_results
         st.session_state["epi_parsed_results"] = web_results
         st.session_state["epi_parse_warnings"] = web_errors.rename(columns={"error": "warning"})
+        successful_web_results = web_results.loc[web_results["status"].eq("success")]
+        if not successful_web_results.empty:
+            publish_epi_results_to_pool(successful_web_results)
 
         if web_errors.empty:
             st.success("EPI Web Suite 预测完成。")
@@ -329,9 +370,23 @@ with tab_parse:
     parsed_frames = []
     warning_frames = []
     if result_files:
-        for result_file in result_files:
+        for file_index, result_file in enumerate(result_files):
             try:
-                parsed_df, warnings_df = parse_uploaded_result(result_file)
+                selected_sheet = None
+                if result_file.name.lower().endswith((".xlsx", ".xls")):
+                    inspection = inspect_epi_workbook(
+                        result_file.getvalue(), result_file.name
+                    )
+                    selected_sheet = inspection.default_result_sheet
+                    if selected_sheet is None:
+                        selected_sheet = st.selectbox(
+                            f"为 {result_file.name} 选择结果工作表",
+                            inspection.sheet_names,
+                            key=f"epi_result_sheet_{file_index}",
+                        )
+                parsed_df, warnings_df = parse_uploaded_result(
+                    result_file, sheet_name=selected_sheet
+                )
                 parsed_frames.append(parsed_df)
                 if not warnings_df.empty:
                     warning_frames.append(warnings_df)
@@ -356,6 +411,8 @@ with tab_parse:
         st.session_state["epi_parse_warnings"] = parse_warnings
         st.session_state.pop("epi_raw_results", None)
         st.session_state.pop("epi_web_tables", None)
+        if not merged_results.empty:
+            publish_epi_results_to_pool(merged_results)
 
         st.success("结果文件解析完成。")
         st.subheader("合并后的环境归趋结果")

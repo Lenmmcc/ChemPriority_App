@@ -49,6 +49,25 @@ class StructurePreparationPageContractTests(unittest.TestCase):
         self.assertLess(summary, normalizer)
         self.assertLess(summary, validator)
 
+    def test_epi_page_publishes_validated_results_to_the_same_session_pool(self):
+        source = _page_source("3")
+
+        self.assertIn("from src.episuite_result_pool import", source)
+        self.assertIn("def publish_epi_results_to_pool(results, provenance=None):", source)
+        self.assertIn("upsert_epi_pool(", source)
+        self.assertIn('successful_web_results = web_results.loc[web_results["status"].eq("success")]', source)
+        self.assertIn("publish_epi_results_to_pool(successful_web_results)", source)
+        self.assertIn("publish_epi_results_to_pool(merged_results", source)
+        self.assertIn("remove_epi_pool_contributor", source)
+        self.assertIn("clear_epi_pool(st.session_state)", source)
+
+    def test_epi_page_parses_recognized_result_workbook_sheets(self):
+        source = _page_source("3")
+
+        self.assertIn("inspect_epi_workbook", source)
+        self.assertIn("inspection.default_result_sheet", source)
+        self.assertIn("sheet_name=selected_sheet", source)
+
     def test_use_summary_renders_before_resolver_and_query_normalizers(self):
         source = _page_source("4")
 
