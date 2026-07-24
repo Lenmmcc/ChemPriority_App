@@ -7,8 +7,31 @@ from src.episuite_io import build_result_workbook
 from src.episuite_supplement import (
     EPISupplementMapping,
     inspect_epi_workbook,
+    merge_network_epi,
+    resolve_epi_sources,
     parse_epi_supplement,
+    suggest_primary_filename,
 )
+
+
+def complete_epi_rows(compounds):
+    compounds = list(compounds)
+    count = len(compounds)
+    return pd.DataFrame(
+        {
+            "compound": compounds,
+            "smiles": ["CC"] * count,
+            "cas": [""] * count,
+            "status": ["success"] * count,
+            "molecular_weight": [100.0] * count,
+            "henry_atm_m3_mol": [1.0e-5] * count,
+            "log_kow": [2.0] * count,
+            "level3_air_half_life_hours": [10.0] * count,
+            "level3_water_half_life_hours": [20.0] * count,
+            "level3_soil_half_life_hours": [30.0] * count,
+            "log_baf": [1.0] * count,
+        }
+    )
 
 
 class EPISupplementWorkbookTests(unittest.TestCase):
@@ -86,6 +109,25 @@ class EPISupplementWorkbookTests(unittest.TestCase):
 
         self.assertEqual(parsed.loc[0, "log_kow"], 2.5)
 
+    def test_core_model_fields_survive_supplement_parsing(self):
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            complete_epi_rows(["A"]).to_excel(
+                writer,
+                sheet_name="Core_Summary",
+                index=False,
+            )
+
+        parsed, _ = parse_epi_supplement(
+            buffer.getvalue(),
+            EPISupplementMapping("complete.xlsx", "Lake-A.xlsx", "Core_Summary"),
+        )
+
+        self.assertEqual(parsed.loc[0, "molecular_weight"], 100.0)
+        self.assertEqual(parsed.loc[0, "level3_air_half_life_hours"], 10.0)
+        self.assertEqual(parsed.loc[0, "log_baf"], 1.0)
+        self.assertEqual(parsed.loc[0, "status"], "success")
+
     def test_epi_results_sheet_is_second_recognized_format(self):
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -97,3 +139,279 @@ class EPISupplementWorkbookTests(unittest.TestCase):
             ).to_excel(writer, sheet_name="EPI_Results", index=False)
         inspection = inspect_epi_workbook(buffer.getvalue(), "EPI_Suite_Results.xlsx")
         self.assertEqual(inspection.default_result_sheet, "EPI_Results")
+
+    def test_filename_suggestion_uses_only_normalized_filename(self):
+        self.assertEqual(
+            suggest_primary_filename(
+                "Lake-A_EPISuite_Fate_Report.xlsx",
+                ["Lake-A.xlsx", "Lake-B.xlsx"],
+            ),
+            "Lake-A.xlsx",
+        )
+        self.assertIsNone(
+            suggest_primary_filename(
+                "unknown.xlsx",
+                ["Lake-A.xlsx", "Lake-B.xlsx"],
+            )
+        )
+
+    def test_cas_match_wins_and_uploaded_values_are_not_overwritten(self):
+        universe = pd.DataFrame(
+            {
+                "compound": ["Ethanol"],
+                "smiles": ["CCO"],
+                "cas": ["64-17-5"],
+            }
+        )
+        uploaded = pd.DataFrame(
+            {
+                "compound": ["Wrong display name"],
+                "smiles": ["different"],
+                "cas": ["64-17-5"],
+                "log_kow": [-0.31],
+                "henry_atm_m3_mol": [pd.NA],
+                "source_file": ["Lake-A_EPI.xlsx"],
+                "source_sheet": ["Core_Summary"],
+                "source_row": [2],
+                "source_priority": [0],
+            }
+        )
+        pool = pd.DataFrame(
+            {
+                "compound": ["Ethanol"],
+                "smiles": ["CCO"],
+                "cas": ["64-17-5"],
+                "log_kow": [99.0],
+                "henry_atm_m3_mol": [5.0e-6],
+            }
+        )
+
+        resolution = resolve_epi_sources(universe, uploaded, pool)
+
+        self.assertEqual(resolution.results.loc[0, "log_kow"], -0.31)
+        self.assertEqual(resolution.results.loc[0, "henry_atm_m3_mol"], 5.0e-6)
+        self.assertEqual(resolution.match_audit.loc[0, "match_method"], "cas")
+        self.assertTrue(
+            resolution.provenance["source_type"]
+            .isin(["uploaded", "session_pool"])
+            .all()
+        )
+
+    def test_complete_upload_skips_query_and_core_missing_is_targeted(self):
+        universe = pd.DataFrame(
+            {"compound": ["A", "B"], "smiles": ["CC", "CCC"], "cas": ["", ""]}
+        )
+        uploaded = complete_epi_rows(["A", "B"])
+        epi_only = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            require_core=False,
+        )
+        self.assertTrue(epi_only.query_input.empty)
+
+        uploaded.loc[uploaded["compound"].eq("B"), "log_baf"] = pd.NA
+        downstream = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            require_core=True,
+        )
+        self.assertEqual(downstream.query_input["compound"].tolist(), ["B"])
+
+    def test_missing_status_is_not_treated_as_an_unknown_failure(self):
+        resolution = resolve_epi_sources(
+            pd.DataFrame(
+                {
+                    "compound": ["A", "B"],
+                    "smiles": ["CC", "CCC"],
+                    "cas": ["", ""],
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "compound": ["A", "B"],
+                    "smiles": ["CC", "CCC"],
+                    "status": ["success", pd.NA],
+                    "log_kow": [1.0, 2.0],
+                }
+            ),
+            pd.DataFrame(),
+        )
+
+        self.assertTrue(bool(resolution.completeness.loc[1, "complete"]))
+        self.assertFalse(bool(resolution.completeness.loc[1, "needs_query"]))
+
+    def test_higher_priority_identifier_wins_when_lower_identifiers_disagree(self):
+        universe = pd.DataFrame(
+            {
+                "compound": ["A", "B"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["1-11-1", "2-22-2"],
+            }
+        )
+        uploaded = pd.DataFrame(
+            {
+                "compound": ["A"],
+                "smiles": ["CCC"],
+                "cas": ["1-11-1"],
+                "log_kow": [3.0],
+            }
+        )
+
+        resolution = resolve_epi_sources(universe, uploaded, pd.DataFrame())
+
+        self.assertEqual(len(resolution.match_audit), 1)
+        self.assertEqual(resolution.match_audit.loc[0, "match_method"], "cas")
+        self.assertEqual(resolution.match_audit.loc[0, "match_status"], "matched")
+        self.assertEqual(resolution.results.loc[0, "log_kow"], 3.0)
+        self.assertEqual(resolution.query_input["compound"].tolist(), ["B"])
+
+    def test_uploaded_priority_records_conflict_and_pool_only_fills_nulls(self):
+        universe = pd.DataFrame(
+            {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+        )
+        uploaded = pd.DataFrame(
+            {
+                "compound": ["A", "A"],
+                "smiles": ["CC", "CC"],
+                "log_kow": [1.0, 2.0],
+                "source_file": ["first.xlsx", "second.xlsx"],
+                "source_priority": [0, 1],
+            }
+        )
+        pool = pd.DataFrame(
+            {
+                "compound": ["A"],
+                "smiles": ["CC"],
+                "log_kow": [3.0],
+                "henry_atm_m3_mol": [4.0e-6],
+            }
+        )
+
+        resolution = resolve_epi_sources(universe, uploaded, pool)
+
+        self.assertEqual(resolution.results.loc[0, "log_kow"], 1.0)
+        self.assertEqual(resolution.results.loc[0, "henry_atm_m3_mol"], 4.0e-6)
+        log_kow_conflicts = resolution.conflict_audit.loc[
+            resolution.conflict_audit["field"].eq("log_kow")
+        ]
+        self.assertEqual(len(log_kow_conflicts), 2)
+        self.assertTrue(log_kow_conflicts["adopted_source_file"].eq("first.xlsx").all())
+
+    def test_identifier_molecular_weight_completes_downstream_core(self):
+        universe = pd.DataFrame(
+            {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+        )
+        uploaded = complete_epi_rows(["A"]).drop(columns=["molecular_weight"])
+        completed = pd.DataFrame(
+            {
+                "compound": ["A"],
+                "smiles": ["CC"],
+                "cas": [""],
+                "pubchem_molecular_weight": [88.0],
+            }
+        )
+
+        resolution = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            completed_identifiers=completed,
+            require_core=True,
+        )
+
+        self.assertEqual(resolution.results.loc[0, "molecular_weight"], 88.0)
+        self.assertTrue(resolution.query_input.empty)
+
+    def test_network_merge_fills_only_missing_values_and_rebuilds_query_targets(self):
+        universe = pd.DataFrame(
+            {"compound": ["A", "B"], "smiles": ["CC", "CCC"], "cas": ["", ""]}
+        )
+        uploaded = complete_epi_rows(["A", "B"])
+        uploaded.loc[uploaded["compound"].eq("B"), "log_baf"] = pd.NA
+        resolution = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            require_core=True,
+        )
+        network = pd.DataFrame(
+            {
+                "compound": ["B"],
+                "smiles": ["CCC"],
+                "status": ["success"],
+                "log_kow": [99.0],
+                "log_baf": [1.5],
+                "source_priority": [1],
+            }
+        )
+        events = (
+            {
+                "event": "started",
+                "index": 0,
+                "label": "B",
+                "attempt": 1,
+                "max_attempts": 3,
+            },
+            {
+                "event": "completed",
+                "index": 0,
+                "label": "B",
+                "attempt": 1,
+                "max_attempts": 3,
+                "elapsed_seconds": 0.25,
+                "error": None,
+            },
+        )
+
+        merged = merge_network_epi(
+            resolution,
+            network,
+            pd.DataFrame({"compound": ["B"], "raw_json": ["{}"]}),
+            pd.DataFrame(),
+            attempt_events=events,
+        )
+
+        b_row = merged.results.loc[merged.results["compound"].eq("B")].iloc[0]
+        self.assertEqual(b_row["log_kow"], 2.0)
+        self.assertEqual(b_row["log_baf"], 1.5)
+        self.assertTrue(merged.query_input.empty)
+        self.assertEqual(len(merged.raw_results), 1)
+        self.assertEqual(len(merged.query_attempts), 1)
+        network_provenance = merged.provenance.loc[
+            merged.provenance["source_type"].eq("network")
+        ]
+        self.assertTrue(network_provenance["source_priority"].eq(20_000).all())
+
+    def test_successful_network_result_clears_failed_status_without_overwriting_values(self):
+        universe = pd.DataFrame(
+            {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+        )
+        uploaded = complete_epi_rows(["A"])
+        uploaded["status"] = "failed"
+        resolution = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            require_core=True,
+        )
+        self.assertEqual(resolution.query_input["compound"].tolist(), ["A"])
+
+        merged = merge_network_epi(
+            resolution,
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "smiles": ["CC"],
+                    "status": ["success"],
+                    "log_kow": [99.0],
+                }
+            ),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        self.assertEqual(merged.results.loc[0, "status"], "success")
+        self.assertEqual(merged.results.loc[0, "log_kow"], 2.0)
+        self.assertTrue(merged.query_input.empty)
