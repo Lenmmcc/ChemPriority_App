@@ -189,6 +189,7 @@ def prepare_universe(
         universe[column] = universe[column].map(clean_text)
     if "molecular_weight" not in universe.columns:
         universe["molecular_weight"] = pd.NA
+    universe["_identifier_mw_source_row"] = pd.NA
     universe["_compound_key"] = [
         f"compound:{position}" for position in range(len(universe))
     ]
@@ -206,7 +207,7 @@ def prepare_universe(
             completed[column] = ""
         completed[column] = completed[column].map(clean_text)
     indexes = _universe_indexes(universe)
-    for _, row in completed.iterrows():
+    for completed_index, row in completed.iterrows():
         _, status, compound_key = _match_row(row, indexes)
         if status != "matched":
             continue
@@ -221,6 +222,7 @@ def prepare_universe(
             molecular_weight
         ):
             universe.at[position, "molecular_weight"] = molecular_weight
+            universe.at[position, "_identifier_mw_source_row"] = completed_index + 1
     return universe
 
 
@@ -280,20 +282,10 @@ def match_sources(
         return pd.DataFrame(), pd.DataFrame(columns=audit_columns)
 
     indexes = _universe_indexes(universe)
-    ambiguous_source_smiles = _ambiguous_source_smiles(sources)
     matched_rows = []
     audit_rows = []
     for _, source_row in sources.iterrows():
-        ignored_smiles = (
-            {normalize_smiles(source_row.get("smiles"))}
-            if _source_smiles_group(source_row) in ambiguous_source_smiles
-            else set()
-        )
-        method, status, compound_key = _match_row(
-            source_row,
-            indexes,
-            ignored_smiles=ignored_smiles,
-        )
+        method, status, compound_key = _match_row(source_row, indexes)
         audit_rows.append(
             {
                 "source_type": source_row.get("source_type", ""),
@@ -325,13 +317,20 @@ def merge_matched_fields(
     universe: pd.DataFrame,
     matched: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    results = _base_results(universe)
+    results = _ensure_result_columns(_base_results(universe))
     provenance_rows = []
     conflict_rows = []
     if matched is None or matched.empty:
+        provenance_rows.extend(
+            _identifier_molecular_weight_provenance(
+                universe,
+                results,
+                provenance_rows,
+            )
+        )
         return (
-            _ensure_result_columns(results),
-            pd.DataFrame(columns=_AUDIT_METADATA_COLUMNS),
+            results,
+            pd.DataFrame(provenance_rows, columns=_AUDIT_METADATA_COLUMNS),
             pd.DataFrame(columns=_conflict_columns()),
         )
 
@@ -355,6 +354,7 @@ def merge_matched_fields(
         position = positions.get(compound_key)
         if position is None:
             continue
+        results.at[position, "_source_matched"] = True
         for field_name in value_fields:
             candidates = [
                 row
@@ -379,6 +379,13 @@ def merge_matched_fields(
                         candidate,
                     )
                 )
+    provenance_rows.extend(
+        _identifier_molecular_weight_provenance(
+            universe,
+            results,
+            provenance_rows,
+        )
+    )
     return (
         _ensure_result_columns(results),
         pd.DataFrame(provenance_rows, columns=_AUDIT_METADATA_COLUMNS),
@@ -393,15 +400,18 @@ def classify_completeness(
 ) -> pd.DataFrame:
     working = _ensure_result_columns(results.copy())
     recognized = working[list(ENDPOINT_KEYS)].notna().any(axis=1)
-    explicit_failure = working.get(
+    normalized_status = working.get(
         "status",
         pd.Series("", index=working.index, dtype="string"),
-    ).astype("string").str.casefold().eq("failed").fillna(False)
+    ).map(lambda value: clean_text(value).casefold())
+    status_success = normalized_status.eq("success")
+    explicit_failure = normalized_status.eq("failed")
+    source_matched = working["_source_matched"].fillna(False).astype(bool)
     core_complete = working[list(CORE_MODEL_FIELDS)].apply(
         pd.to_numeric,
         errors="coerce",
     ).notna().all(axis=1)
-    complete = recognized & ~explicit_failure
+    complete = source_matched & status_success
     if require_core:
         complete &= core_complete
 
@@ -409,6 +419,9 @@ def classify_completeness(
         {
             "_compound_key": working["_compound_key"],
             "compound": working["compound"],
+            "source_matched": source_matched,
+            "normalized_status": normalized_status,
+            "status_success": status_success,
             "recognized_endpoint": recognized,
             "explicit_failure": explicit_failure,
             "core_complete": core_complete,
@@ -428,6 +441,15 @@ def classify_completeness(
                     errors="coerce",
                 ).iloc[0]
             )
+        )
+        for position in working.index
+    ]
+    completeness["missing_endpoint_fields"] = [
+        ", ".join(
+            field_name
+            for field_name in ENDPOINT_KEYS
+            if _is_null(working.at[position, field_name])
+            or clean_text(working.at[position, field_name]) == ""
         )
         for position in working.index
     ]
@@ -498,13 +520,19 @@ def merge_network_epi(
     )
     network["source_priority"] = 20_000
     matched, network_match_audit = match_sources(universe, network)
+    successful_network = matched.loc[
+        matched.get(
+            "status",
+            pd.Series("", index=matched.index, dtype="string"),
+        ).map(lambda value: clean_text(value).casefold()).eq("success")
+    ].copy()
     (
         results,
         network_provenance,
         network_conflicts,
     ) = _merge_network_fields(
         results,
-        matched,
+        successful_network,
         resolution.provenance,
     )
     require_core = (
@@ -564,7 +592,6 @@ def _universe_indexes(universe: pd.DataFrame) -> dict[str, dict[str, list[str]]]
 def _match_row(
     row: pd.Series,
     indexes: dict[str, dict[str, list[str]]],
-    ignored_smiles: set[str] | None = None,
 ) -> tuple[str, str, str | None]:
     normalizers = (
         ("cas", normalize_cas),
@@ -574,45 +601,19 @@ def _match_row(
     matches = []
     for method, normalizer in normalizers:
         value = normalizer(row.get(method))
-        if method == "smiles" and value in (ignored_smiles or set()):
-            continue
         candidates = set(indexes[method].get(value, ())) if value else set()
-        if candidates:
-            matches.append((method, candidates))
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            return method, "ambiguous", None
+        matches.append((method, next(iter(candidates))))
     if not matches:
         return "", "unmatched", None
 
-    method, candidates = matches[0]
-    if len(candidates) != 1:
-        return method, "ambiguous", None
-    compound_key = next(iter(candidates))
+    method, compound_key = matches[0]
+    if any(candidate_key != compound_key for _, candidate_key in matches[1:]):
+        return method, "conflict", None
     return method, "matched", compound_key
-
-
-def _source_smiles_group(row: pd.Series) -> tuple[str, str, str, str]:
-    return (
-        clean_text(row.get("source_type")),
-        clean_text(row.get("source_file")),
-        clean_text(row.get("source_sheet")),
-        normalize_smiles(row.get("smiles")),
-    )
-
-
-def _ambiguous_source_smiles(
-    sources: pd.DataFrame,
-) -> set[tuple[str, str, str, str]]:
-    names_by_group = {}
-    for _, row in sources.iterrows():
-        group = _source_smiles_group(row)
-        smiles = group[-1]
-        name = normalize_name(row.get("compound"))
-        if smiles and name:
-            names_by_group.setdefault(group, set()).add(name)
-    return {
-        group
-        for group, names in names_by_group.items()
-        if len(names) > 1
-    }
 
 
 def _base_results(universe: pd.DataFrame) -> pd.DataFrame:
@@ -631,6 +632,8 @@ def _ensure_result_columns(results: pd.DataFrame) -> pd.DataFrame:
     for column in dict.fromkeys([*ENDPOINT_KEYS, *CORE_MODEL_FIELDS]):
         if column not in results.columns:
             results[column] = pd.NA
+    if "_source_matched" not in results.columns:
+        results["_source_matched"] = False
     return results
 
 
@@ -693,6 +696,43 @@ def _provenance_row(
         "source_row": source_row.get("source_row", pd.NA),
         "source_priority": source_row.get("source_priority", pd.NA),
     }
+
+
+def _identifier_molecular_weight_provenance(
+    universe: pd.DataFrame,
+    results: pd.DataFrame,
+    provenance_rows: list[dict],
+) -> list[dict]:
+    adopted_keys = {
+        row["_compound_key"]
+        for row in provenance_rows
+        if row.get("field") == "molecular_weight"
+    }
+    result_positions = {
+        compound_key: position
+        for position, compound_key in results["_compound_key"].items()
+    }
+    rows = []
+    for _, universe_row in universe.iterrows():
+        compound_key = universe_row["_compound_key"]
+        source_row = universe_row.get("_identifier_mw_source_row", pd.NA)
+        if _is_null(source_row) or compound_key in adopted_keys:
+            continue
+        position = result_positions[compound_key]
+        rows.append(
+            {
+                "_compound_key": compound_key,
+                "compound": results.at[position, "compound"],
+                "field": "molecular_weight",
+                "value": results.at[position, "molecular_weight"],
+                "source_type": "identifier_completion",
+                "source_file": "",
+                "source_sheet": "",
+                "source_row": source_row,
+                "source_priority": pd.NA,
+            }
+        )
+    return rows
 
 
 def _conflict_columns() -> list[str]:
@@ -766,6 +806,10 @@ def _merge_network_fields(
             pd.DataFrame(columns=_conflict_columns()),
         )
 
+    provenance_by_field = {
+        (row["_compound_key"], row["field"]): row.to_dict()
+        for _, row in existing_provenance.iterrows()
+    }
     value_fields = _source_value_fields(matched)
     for field_name in value_fields:
         if field_name not in merged.columns:
@@ -785,6 +829,7 @@ def _merge_network_fields(
         position = positions.get(compound_key)
         if position is None:
             continue
+        merged.at[position, "_source_matched"] = True
         for field_name in value_fields:
             for _, candidate in source_group.iterrows():
                 candidate_value = candidate.get(field_name, pd.NA)
@@ -793,37 +838,41 @@ def _merge_network_fields(
                 adopted_value = merged.at[position, field_name]
                 if (
                     field_name == "status"
-                    and clean_text(adopted_value).casefold() == "failed"
-                    and clean_text(candidate_value).casefold() != "failed"
+                    and clean_text(adopted_value).casefold() != "success"
+                    and clean_text(candidate_value).casefold() == "success"
                 ):
-                    # Status is query metadata, not a user-supplied model value.
+                    # A successful request may repair prior query status metadata.
                     merged.at[position, field_name] = candidate_value
-                    provenance_rows.append(
-                        _provenance_row(
-                            compound_key,
-                            field_name,
-                            candidate,
-                        )
+                    provenance_row = _provenance_row(
+                        compound_key,
+                        field_name,
+                        candidate,
                     )
+                    provenance_rows.append(provenance_row)
+                    provenance_by_field[(compound_key, field_name)] = provenance_row
                     continue
                 if _is_null(adopted_value):
                     merged.at[position, field_name] = candidate_value
-                    provenance_rows.append(
-                        _provenance_row(
-                            compound_key,
-                            field_name,
-                            candidate,
-                        )
+                    provenance_row = _provenance_row(
+                        compound_key,
+                        field_name,
+                        candidate,
                     )
+                    provenance_rows.append(provenance_row)
+                    provenance_by_field[(compound_key, field_name)] = provenance_row
                     continue
                 if _values_equal(adopted_value, candidate_value):
                     continue
-                adopted = _adopted_source(
-                    existing_provenance,
-                    provenance_rows,
-                    compound_key,
-                    field_name,
-                    adopted_value,
+                adopted = provenance_by_field.get(
+                    (compound_key, field_name),
+                    {
+                        "value": adopted_value,
+                        "source_type": "existing",
+                        "source_file": "",
+                        "source_sheet": "",
+                        "source_row": pd.NA,
+                        "source_priority": pd.NA,
+                    },
                 )
                 conflict_rows.append(
                     _conflict_row(
@@ -838,34 +887,6 @@ def _merge_network_fields(
         pd.DataFrame(provenance_rows, columns=_AUDIT_METADATA_COLUMNS),
         pd.DataFrame(conflict_rows, columns=_conflict_columns()),
     )
-
-
-def _adopted_source(
-    existing_provenance: pd.DataFrame,
-    new_provenance: list[dict],
-    compound_key: str,
-    field_name: str,
-    value,
-) -> dict:
-    combined = _append_frames(
-        existing_provenance,
-        pd.DataFrame(new_provenance),
-    )
-    if not combined.empty and {"_compound_key", "field"}.issubset(combined.columns):
-        matches = combined.loc[
-            combined["_compound_key"].eq(compound_key)
-            & combined["field"].eq(field_name)
-        ]
-        if not matches.empty:
-            return matches.iloc[-1].to_dict()
-    return {
-        "value": value,
-        "source_type": "existing",
-        "source_file": "",
-        "source_sheet": "",
-        "source_row": pd.NA,
-        "source_priority": pd.NA,
-    }
 
 
 def _append_frames(first: pd.DataFrame, second: pd.DataFrame) -> pd.DataFrame:

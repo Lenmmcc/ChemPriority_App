@@ -20,7 +20,7 @@ def complete_epi_rows(compounds):
     return pd.DataFrame(
         {
             "compound": compounds,
-            "smiles": ["CC"] * count,
+            "smiles": ["C" * (position + 2) for position in range(count)],
             "cas": [""] * count,
             "status": ["success"] * count,
             "molecular_weight": [100.0] * count,
@@ -219,7 +219,7 @@ class EPISupplementWorkbookTests(unittest.TestCase):
         )
         self.assertEqual(downstream.query_input["compound"].tolist(), ["B"])
 
-    def test_missing_status_is_not_treated_as_an_unknown_failure(self):
+    def test_missing_status_requires_query(self):
         resolution = resolve_epi_sources(
             pd.DataFrame(
                 {
@@ -239,10 +239,54 @@ class EPISupplementWorkbookTests(unittest.TestCase):
             pd.DataFrame(),
         )
 
-        self.assertTrue(bool(resolution.completeness.loc[1, "complete"]))
-        self.assertFalse(bool(resolution.completeness.loc[1, "needs_query"]))
+        self.assertFalse(bool(resolution.completeness.loc[1, "complete"]))
+        self.assertTrue(bool(resolution.completeness.loc[1, "needs_query"]))
+        self.assertEqual(resolution.query_input["compound"].tolist(), ["B"])
 
-    def test_higher_priority_identifier_wins_when_lower_identifiers_disagree(self):
+    def test_success_without_optional_endpoints_skips_query_and_audits_missing(self):
+        resolution = resolve_epi_sources(
+            pd.DataFrame(
+                {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+            ),
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "smiles": ["CC"],
+                    "status": [" SUCCESS "],
+                }
+            ),
+            pd.DataFrame(),
+        )
+
+        self.assertTrue(resolution.query_input.empty)
+        self.assertTrue(bool(resolution.completeness.loc[0, "complete"]))
+        missing = resolution.completeness.loc[0, "missing_endpoint_fields"]
+        self.assertIn("log_kow", missing)
+        self.assertIn("henry_atm_m3_mol", missing)
+
+    def test_non_success_statuses_require_query_even_with_recognized_endpoint(self):
+        statuses = ["", "error", "timeout", "failed"]
+        compounds = ["missing", "error", "timeout", "failed"]
+        smiles = ["C" * (position + 2) for position in range(len(compounds))]
+        resolution = resolve_epi_sources(
+            pd.DataFrame(
+                {"compound": compounds, "smiles": smiles, "cas": [""] * 4}
+            ),
+            pd.DataFrame(
+                {
+                    "compound": compounds,
+                    "smiles": smiles,
+                    "status": statuses,
+                    "log_kow": [1.0] * 4,
+                }
+            ),
+            pd.DataFrame(),
+        )
+
+        self.assertEqual(resolution.query_input["compound"].tolist(), compounds)
+        self.assertFalse(resolution.completeness["complete"].any())
+
+    def test_conflicting_identifier_targets_are_quarantined(self):
         universe = pd.DataFrame(
             {
                 "compound": ["A", "B"],
@@ -263,9 +307,58 @@ class EPISupplementWorkbookTests(unittest.TestCase):
 
         self.assertEqual(len(resolution.match_audit), 1)
         self.assertEqual(resolution.match_audit.loc[0, "match_method"], "cas")
-        self.assertEqual(resolution.match_audit.loc[0, "match_status"], "matched")
-        self.assertEqual(resolution.results.loc[0, "log_kow"], 3.0)
+        self.assertEqual(resolution.match_audit.loc[0, "match_status"], "conflict")
+        self.assertTrue(resolution.provenance.empty)
+        self.assertEqual(resolution.query_input["compound"].tolist(), ["A", "B"])
+
+    def test_repeated_source_smiles_is_not_skipped_to_force_name_matches(self):
+        universe = pd.DataFrame(
+            {
+                "compound": ["A", "B"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["", ""],
+            }
+        )
+        uploaded = pd.DataFrame(
+            {
+                "compound": ["A", "B"],
+                "smiles": ["CC", "CC"],
+                "status": ["success", "success"],
+                "log_kow": [1.0, 2.0],
+            }
+        )
+
+        resolution = resolve_epi_sources(universe, uploaded, pd.DataFrame())
+
+        self.assertEqual(
+            resolution.match_audit["match_status"].tolist(),
+            ["matched", "conflict"],
+        )
         self.assertEqual(resolution.query_input["compound"].tolist(), ["B"])
+
+    def test_ambiguous_identifier_is_quarantined_without_name_fallback(self):
+        universe = pd.DataFrame(
+            {
+                "compound": ["A", "B"],
+                "smiles": ["CC", "CC"],
+                "cas": ["", ""],
+            }
+        )
+        uploaded = pd.DataFrame(
+            {
+                "compound": ["A"],
+                "smiles": ["CC"],
+                "status": ["success"],
+                "log_kow": [1.0],
+            }
+        )
+
+        resolution = resolve_epi_sources(universe, uploaded, pd.DataFrame())
+
+        self.assertEqual(resolution.match_audit.loc[0, "match_method"], "smiles")
+        self.assertEqual(resolution.match_audit.loc[0, "match_status"], "ambiguous")
+        self.assertTrue(resolution.provenance.empty)
+        self.assertEqual(resolution.query_input["compound"].tolist(), ["A", "B"])
 
     def test_uploaded_priority_records_conflict_and_pool_only_fills_nulls(self):
         universe = pd.DataFrame(
@@ -323,6 +416,15 @@ class EPISupplementWorkbookTests(unittest.TestCase):
 
         self.assertEqual(resolution.results.loc[0, "molecular_weight"], 88.0)
         self.assertTrue(resolution.query_input.empty)
+        molecular_weight_source = resolution.provenance.loc[
+            resolution.provenance["field"].eq("molecular_weight")
+        ]
+        self.assertEqual(len(molecular_weight_source), 1)
+        self.assertEqual(
+            molecular_weight_source.iloc[0]["source_type"],
+            "identifier_completion",
+        )
+        self.assertEqual(molecular_weight_source.iloc[0]["value"], 88.0)
 
     def test_network_merge_fills_only_missing_values_and_rebuilds_query_targets(self):
         universe = pd.DataFrame(
@@ -415,3 +517,74 @@ class EPISupplementWorkbookTests(unittest.TestCase):
         self.assertEqual(merged.results.loc[0, "status"], "success")
         self.assertEqual(merged.results.loc[0, "log_kow"], 2.0)
         self.assertTrue(merged.query_input.empty)
+
+    def test_successful_network_result_recovers_every_non_success_status(self):
+        for current_status in ("", "error", "timeout", "failed"):
+            with self.subTest(current_status=current_status):
+                universe = pd.DataFrame(
+                    {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+                )
+                uploaded = complete_epi_rows(["A"])
+                uploaded["status"] = current_status
+                resolution = resolve_epi_sources(
+                    universe,
+                    uploaded,
+                    pd.DataFrame(),
+                )
+                self.assertEqual(
+                    resolution.query_input["compound"].tolist(),
+                    ["A"],
+                )
+
+                merged = merge_network_epi(
+                    resolution,
+                    pd.DataFrame(
+                        {
+                            "compound": ["A"],
+                            "smiles": ["CC"],
+                            "status": ["success"],
+                            "log_kow": [99.0],
+                        }
+                    ),
+                    pd.DataFrame(),
+                    pd.DataFrame(),
+                )
+
+                self.assertEqual(merged.results.loc[0, "status"], "success")
+                self.assertEqual(merged.results.loc[0, "log_kow"], 2.0)
+                self.assertTrue(merged.query_input.empty)
+
+    def test_unsuccessful_network_result_does_not_recover_or_fill_values(self):
+        universe = pd.DataFrame(
+            {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+        )
+        uploaded = complete_epi_rows(["A"])
+        uploaded["status"] = "failed"
+        uploaded["log_baf"] = pd.NA
+        resolution = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            require_core=True,
+        )
+
+        merged = merge_network_epi(
+            resolution,
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "smiles": ["CC"],
+                    "status": ["error"],
+                    "log_baf": [9.0],
+                }
+            ),
+            pd.DataFrame(),
+            pd.DataFrame(
+                {"compound": ["A"], "error": ["temporary network error"]}
+            ),
+        )
+
+        self.assertEqual(merged.results.loc[0, "status"], "failed")
+        self.assertTrue(pd.isna(merged.results.loc[0, "log_baf"]))
+        self.assertEqual(merged.query_input["compound"].tolist(), ["A"])
+        self.assertEqual(len(merged.errors), 1)
