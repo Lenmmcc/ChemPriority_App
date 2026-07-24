@@ -1,5 +1,4 @@
 import io
-import ast
 import unittest
 from pathlib import Path
 
@@ -11,7 +10,6 @@ import pandas as pd
 from openpyxl import load_workbook
 
 import src.cp_screening_workflow as workflow
-from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
 from src.cp_screening_workflow import (
     EXPECTED_WORKBOOK_SHEETS,
     PBMToxPiConfig,
@@ -25,6 +23,12 @@ from src.cp_screening_workflow import (
     generate_pbm_toxpi_robustness_plot,
     limit_toxpi_plot_rows,
     run_pbm_toxpi_robustness,
+)
+from src.multi_file_screening import (
+    PrimaryWorkbook,
+    SampleColumnMapping,
+    default_sample_mapping,
+    normalize_samples_for_mappings,
 )
 
 
@@ -42,24 +46,7 @@ M  END
 
 
 def load_screening_mapping_normalizer():
-    page_path = Path("pages/0_综合筛查流程.py")
-    page_module = ast.parse(page_path.read_text(encoding="utf-8"), filename=str(page_path))
-    function = next(
-        node
-        for node in page_module.body
-        if isinstance(node, ast.FunctionDef) and node.name == "normalize_samples_for_mappings"
-    )
-    namespace = {
-        "pd": pd,
-        "prepare_structure_dataframe": prepare_structure_dataframe,
-        "STANDARD_COMPOUND_COL": "Name",
-        "STANDARD_FORMULA_COL": "formula",
-        "STANDARD_SMILES_COL": "SMILES_input",
-        "STANDARD_CAS_COL": "CAS_input",
-        "clean_text": lambda value: "" if value is None or pd.isna(value) else str(value).strip(),
-    }
-    exec(compile(ast.Module(body=[function], type_ignores=[]), str(page_path), "exec"), namespace)
-    return namespace["normalize_samples_for_mappings"]
+    return normalize_samples_for_mappings
 
 
 class CpScreeningWorkflowTests(unittest.TestCase):
@@ -86,33 +73,23 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             plt.close(figure)
 
     def test_screening_default_mapping_detects_recognized_mol_column(self):
-        page_path = Path("pages/0_综合筛查流程.py")
-        page_module = ast.parse(page_path.read_text(encoding="utf-8"), filename=str(page_path))
-        function = next(
-            node
-            for node in page_module.body
-            if isinstance(node, ast.FunctionDef) and node.name == "sample_mapping_defaults"
-        )
-        namespace = {
-            "guess_column": lambda columns, candidates, fallback_index=0: columns[fallback_index],
-            "guess_peak_area_column": lambda columns: columns[0],
-            "group_area_columns": lambda columns: [],
-            "find_mol_text_column": find_mol_text_column,
-        }
-        exec(compile(ast.Module(body=[function], type_ignores=[]), str(page_path), "exec"), namespace)
-
-        defaults = namespace["sample_mapping_defaults"](
-            {"data": pd.DataFrame({"Name": ["Ethanol"], " Structure ": [ETHANOL_MOL]})}
+        defaults = default_sample_mapping(
+            PrimaryWorkbook(
+                file_name="Ethanol.xlsx",
+                sample_id="Ethanol",
+                data=pd.DataFrame({"Name": ["Ethanol"], " Structure ": [ETHANOL_MOL]}),
+            )
         )
 
-        self.assertEqual(defaults["mol_column"], " Structure ")
+        self.assertEqual(defaults.mol_column, " Structure ")
 
     def test_screening_mapping_uses_mol_derived_smiles_for_downstream_input(self):
         normalize_samples = load_screening_mapping_normalizer()
         samples = [
-            {
-                "name": "Ethanol",
-                "data": pd.DataFrame(
+            PrimaryWorkbook(
+                file_name="Ethanol.xlsx",
+                sample_id="Ethanol",
+                data=pd.DataFrame(
                     {
                         "Compound": ["Ethanol"],
                         "Formula": ["C2H6O"],
@@ -120,18 +97,16 @@ class CpScreeningWorkflowTests(unittest.TestCase):
                         "Structure": [ETHANOL_MOL],
                     }
                 ),
-            }
+            )
         ]
         mappings = {
-            "Ethanol": {
-                "compound_col": "Compound",
-                "formula_col": "Formula",
-                "peak_area_col": "Peak_Area",
-                "sample_cols": ["Peak_Area"],
-                "mol_column": "Structure",
-                "smiles_col": None,
-                "cas_col": None,
-            }
+            "Ethanol": SampleColumnMapping(
+                compound_col="Compound",
+                formula_col="Formula",
+                peak_area_col="Peak_Area",
+                group_area_cols=("Peak_Area",),
+                mol_column="Structure",
+            )
         }
 
         normalized, _, _ = normalize_samples(samples, mappings)
@@ -142,9 +117,10 @@ class CpScreeningWorkflowTests(unittest.TestCase):
     def test_screening_mapping_preserves_raw_smiles_when_mol_is_the_fallback(self):
         normalize_samples = load_screening_mapping_normalizer()
         samples = [
-            {
-                "name": "Ethanol",
-                "data": pd.DataFrame(
+            PrimaryWorkbook(
+                file_name="Ethanol.xlsx",
+                sample_id="Ethanol",
+                data=pd.DataFrame(
                     {
                         "Compound": ["Ethanol"],
                         "Formula": ["C2H6O"],
@@ -153,18 +129,17 @@ class CpScreeningWorkflowTests(unittest.TestCase):
                         "smiles": ["not valid"],
                     }
                 ),
-            }
+            )
         ]
         mappings = {
-            "Ethanol": {
-                "compound_col": "Compound",
-                "formula_col": "Formula",
-                "peak_area_col": "Peak_Area",
-                "sample_cols": ["Peak_Area"],
-                "mol_column": "Structure",
-                "smiles_col": "smiles",
-                "cas_col": None,
-            }
+            "Ethanol": SampleColumnMapping(
+                compound_col="Compound",
+                formula_col="Formula",
+                peak_area_col="Peak_Area",
+                group_area_cols=("Peak_Area",),
+                mol_column="Structure",
+                smiles_col="smiles",
+            )
         }
 
         normalized, _, _ = normalize_samples(samples, mappings)
@@ -1106,12 +1081,13 @@ class CpScreeningWorkflowTests(unittest.TestCase):
     def test_comprehensive_screening_page_front_half_figures_are_rendered(self):
         page_path = Path("pages/0_综合筛查流程.py")
         page_text = page_path.read_text(encoding="utf-8")
+        shared_text = Path("src/multi_file_screening.py").read_text(encoding="utf-8")
 
         self.assertIn("render_front_half_figures(front_state)", page_text)
         self.assertNotIn("point_screening_results", page_text)
         self.assertNotIn("POINT_FRONT_HALF_FIGURES", page_text)
-        self.assertIn("Group_Area_Mean", page_text)
-        self.assertIn("build_group_area_mean_by_sample", page_text)
+        self.assertIn("Group_Area_Mean", shared_text)
+        self.assertIn("build_group_area_mean_by_sample", shared_text)
         self.assertIn("def with_warning_stage(", page_text)
         self.assertIn("with_warning_stage(table, key)", page_text)
         self.assertNotIn("    with_warning_stage,\n", page_text)
@@ -1124,7 +1100,7 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertIn("PER_SAMPLE_FRONT_HALF_FIGURES", page_text)
         self.assertIn("SUMMARY_FRONT_HALF_FIGURES", page_text)
         self.assertIn("summary_figure_paths", page_text)
-        self.assertIn("save_boxplot_log_transformed", page_text)
+        self.assertIn("save_boxplot_log_transformed", shared_text)
         per_sample_figures = page_text.split("PER_SAMPLE_FRONT_HALF_FIGURES", 1)[1].split("]", 1)[0]
         self.assertNotIn("boxplot_log_transformed", per_sample_figures)
         self.assertNotIn("TOXPI_RADIAL_MAX_COMPOUNDS", page_text)
@@ -1141,7 +1117,9 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertNotIn("generate_multi_toxpi_plot", page_text)
         self.assertIn("def render_sample_mapping_tabs(samples):", page_text)
         self.assertIn("mapping_tabs = st.tabs", page_text)
-        self.assertIn("normalize_samples_for_mappings", page_text)
+        self.assertIn("from src.multi_file_screening import", page_text)
+        self.assertIn("prepare_multi_file_screening(", page_text)
+        self.assertNotIn("def normalize_samples_for_mappings(", page_text)
         self.assertIn("sample_mappings", page_text)
         self.assertIn('front_state["representative_table"]', page_text)
 
