@@ -266,17 +266,6 @@ def render_sample_mapping_tabs(samples):
     return sample_mappings
 
 
-def dataframe_with_sample(screening_results, attr_name):
-    frames = []
-    for sample_id, result in screening_results:
-        table = getattr(result, attr_name)
-        if isinstance(table, pd.DataFrame) and not table.empty:
-            frame = table.copy()
-            frame.insert(0, "sample_id", sample_id)
-            frames.append(frame)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-
 def clean_text(value):
     if value is None or pd.isna(value):
         return ""
@@ -299,7 +288,7 @@ def with_warning_stage(table, fallback_stage):
 
 def workflow_tables(front_state, downstream_state=None):
     downstream_state = downstream_state or {}
-    screening_results = front_state.get("screening_results", [])
+    front_tables = front_state.get("tables", {})
     warnings = []
     if isinstance(front_state.get("warnings"), pd.DataFrame):
         warnings.append(front_state["warnings"])
@@ -316,9 +305,12 @@ def workflow_tables(front_state, downstream_state=None):
         excluded = pov_results[failed_mask | incomplete_mask].copy()
 
     return {
-        "Input_Check": dataframe_with_sample(screening_results, "input_check"),
-        "Elemental_Ratios_DBE": dataframe_with_sample(screening_results, "all_formulas"),
-        "Category_Summary": dataframe_with_sample(screening_results, "category_summary"),
+        "Input_Check": front_tables.get("Input_Check", pd.DataFrame()),
+        "Elemental_Ratios_DBE": front_tables.get(
+            "Elemental_Ratios_DBE",
+            pd.DataFrame(),
+        ),
+        "Category_Summary": front_tables.get("Category_Summary", pd.DataFrame()),
         "Sample_Peak_Area": front_state.get("sample_peak_area", pd.DataFrame()),
         "Group_Area_Raw_Long": front_state.get("group_area_raw_long", pd.DataFrame()),
         "Group_Area_Mean_By_Sample": front_state.get("group_area_mean_by_sample", pd.DataFrame()),

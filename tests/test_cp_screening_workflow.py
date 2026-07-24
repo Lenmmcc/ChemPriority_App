@@ -1120,6 +1120,12 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         self.assertIn("from src.multi_file_screening import", page_text)
         self.assertIn("prepare_multi_file_screening(", page_text)
         self.assertNotIn("def normalize_samples_for_mappings(", page_text)
+        self.assertNotIn("def dataframe_with_sample(", page_text)
+        self.assertIn('front_tables = front_state.get("tables", {})', page_text)
+        self.assertIn(
+            '"Input_Check": front_tables.get("Input_Check", pd.DataFrame())',
+            page_text,
+        )
         self.assertIn("sample_mappings", page_text)
         self.assertIn('front_state["representative_table"]', page_text)
 

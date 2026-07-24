@@ -84,6 +84,7 @@ def read_primary_workbooks(records) -> list[PrimaryWorkbook]:
                 content_bytes=data,
             )
         )
+    _validate_primary_workbook_identities(samples)
     return samples
 
 
@@ -130,7 +131,9 @@ def build_upload_structure_preparation_preview(
     summaries = []
     audits = []
     for sample in samples:
-        mapping = mappings.get(sample.sample_id) or default_sample_mapping(sample)
+        mapping = mappings.get(sample.sample_id)
+        if mapping is None:
+            continue
         prepared = prepare_structure_dataframe(
             sample.data,
             mol_column=mapping.mol_column,
@@ -158,7 +161,19 @@ def normalize_samples_for_mappings(
     warnings = []
 
     for sample in samples:
-        mapping = mappings.get(sample.sample_id) or default_sample_mapping(sample)
+        mapping = mappings.get(sample.sample_id)
+        if mapping is None:
+            warnings.append(
+                {
+                    "stage": "column_mapping",
+                    "sample_id": sample.sample_id,
+                    "message": (
+                        "Sample column mapping is missing; this file was excluded "
+                        "from screening calculations."
+                    ),
+                }
+            )
+            continue
         frame = sample.data
         prepared = prepare_structure_dataframe(
             frame,
@@ -276,6 +291,7 @@ def prepare_multi_file_screening(
     detection_threshold: float,
     axis_ranges,
 ) -> MultiFileScreeningResult:
+    _validate_primary_workbook_identities(samples)
     output_root = Path(tempfile.mkdtemp(prefix="cp_screening_"))
     screening_results = []
     warnings = []
@@ -491,6 +507,47 @@ def _guess_column(columns, candidates, fallback_index=0):
     return columns[fallback_index] if columns else None
 
 
+def _validate_primary_workbook_identities(
+    samples: list[PrimaryWorkbook],
+) -> None:
+    duplicate_file_names = _duplicate_casefolded(
+        [sample.file_name for sample in samples]
+    )
+    if duplicate_file_names:
+        raise ValueError(
+            "Duplicate primary file names are not allowed (case-insensitive): "
+            + ", ".join(duplicate_file_names)
+            + ". Rename the files before uploading them again."
+        )
+
+    duplicate_sample_ids = _duplicate_casefolded(
+        [sample.sample_id for sample in samples]
+    )
+    if duplicate_sample_ids:
+        raise ValueError(
+            "Duplicate primary sample IDs/file stems are not allowed "
+            "(case-insensitive): "
+            + ", ".join(duplicate_sample_ids)
+            + ". Rename the files so every filename stem is unique."
+        )
+
+
+def _duplicate_casefolded(values) -> list[str]:
+    groups = {}
+    for value in values:
+        text = str(value)
+        groups.setdefault(text.casefold(), []).append(text)
+    return sorted(
+        {
+            item
+            for group in groups.values()
+            if len(group) > 1
+            for item in group
+        },
+        key=str.casefold,
+    )
+
+
 def _group_area_columns(columns):
     return [column for column in columns if is_group_area_column(column)]
 
@@ -577,18 +634,31 @@ def _input_file_mappings(
 ) -> pd.DataFrame:
     rows = []
     for sample in samples:
-        mapping = mappings.get(sample.sample_id) or default_sample_mapping(sample)
+        mapping = mappings.get(sample.sample_id)
+        available_group_area_cols = (
+            [
+                column
+                for column in mapping.group_area_cols
+                if column in sample.data.columns
+            ]
+            if mapping is not None
+            else []
+        )
         rows.append(
             {
                 "sample_id": sample.sample_id,
                 "file_name": sample.file_name,
-                "compound_col": mapping.compound_col,
-                "formula_col": mapping.formula_col,
-                "peak_area_col": mapping.peak_area_col,
-                "group_area_cols": list(mapping.group_area_cols),
-                "mol_column": mapping.mol_column,
-                "smiles_col": mapping.smiles_col,
-                "cas_col": mapping.cas_col,
+                "mapping_status": "provided" if mapping is not None else "missing",
+                "participating": bool(available_group_area_cols),
+                "compound_col": mapping.compound_col if mapping is not None else None,
+                "formula_col": mapping.formula_col if mapping is not None else None,
+                "peak_area_col": mapping.peak_area_col if mapping is not None else None,
+                "group_area_cols": (
+                    list(mapping.group_area_cols) if mapping is not None else []
+                ),
+                "mol_column": mapping.mol_column if mapping is not None else None,
+                "smiles_col": mapping.smiles_col if mapping is not None else None,
+                "cas_col": mapping.cas_col if mapping is not None else None,
             }
         )
     return pd.DataFrame(rows)
