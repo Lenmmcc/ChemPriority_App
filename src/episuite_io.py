@@ -621,13 +621,17 @@ def extract_epi_web_summary(compound, smiles, data, cas=None, query_note=""):
     }
 
 
-def parse_uploaded_result(uploaded_file):
+def parse_uploaded_result(uploaded_file, sheet_name: str | int | None = None):
     name = uploaded_file.name
     suffix = Path(name).suffix.lower()
     raw = uploaded_file.getvalue()
 
     if suffix in {".xlsx", ".xls"}:
-        return parse_table_result(pd.read_excel(io.BytesIO(raw)), source_name=name)
+        selected_sheet = 0 if sheet_name is None else sheet_name
+        return parse_table_result(
+            pd.read_excel(io.BytesIO(raw), sheet_name=selected_sheet),
+            source_name=name,
+        )
     if suffix == ".csv":
         return parse_table_result(pd.read_csv(io.BytesIO(raw)), source_name=name)
 
