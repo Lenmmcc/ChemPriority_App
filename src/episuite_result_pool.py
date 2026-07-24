@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pandas as pd
 
 from src.episuite_io import ENDPOINT_KEYS
@@ -11,6 +13,26 @@ POOL_VERSION = 1
 
 def make_epi_pool_contributor_id(input_signature, source_type) -> str:
     return f"epi-page:{source_type}:{input_signature}"
+
+
+def make_uploaded_result_source_signature(file_parts) -> str:
+    digest = hashlib.sha256()
+    for file_name, contents, selected_sheet in file_parts:
+        for value in (file_name, contents, "" if selected_sheet is None else selected_sheet):
+            encoded = value if isinstance(value, bytes) else str(value).encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def advance_epi_uploader_epoch(state, epoch_state_key) -> int:
+    try:
+        epoch = int(state.get(epoch_state_key, 0))
+    except (TypeError, ValueError):
+        epoch = 0
+    epoch += 1
+    state[epoch_state_key] = epoch
+    return epoch
 
 
 def upsert_epi_pool(state, contributor_id, results, provenance) -> None:

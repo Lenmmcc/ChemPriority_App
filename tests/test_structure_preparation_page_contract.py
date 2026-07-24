@@ -76,6 +76,9 @@ class StructurePreparationPageContractTests(unittest.TestCase):
         self.assertIn("remove_epi_pool_source_contributor(\"uploaded\")", source)
         self.assertIn("replace_epi_pool_source_contributor", source)
         self.assertIn("epi_uploaded_pool_source_signature", source)
+        self.assertIn("advance_epi_uploader_epoch", source)
+        self.assertIn('key=f"epi_result_files_{result_uploader_epoch}"', source)
+        self.assertIn("make_uploaded_result_source_signature", source)
         self.assertIn("clear_epi_pool(st.session_state)", source)
 
     def test_epi_page_parses_recognized_result_workbook_sheets(self):

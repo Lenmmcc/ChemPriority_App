@@ -8,8 +8,10 @@ from src.episuite_result_pool import (
     clear_epi_pool,
     clear_tracked_epi_pool_contributor,
     make_epi_pool_contributor_id,
+    make_uploaded_result_source_signature,
     read_epi_pool,
     replace_epi_pool_source_contributor,
+    advance_epi_uploader_epoch,
     remove_epi_pool_contributor,
     remove_stale_epi_pool_contributor,
     upsert_epi_pool,
@@ -328,6 +330,71 @@ class EPIResultPoolTests(unittest.TestCase):
             "epi_uploaded_pool_source_signature",
         )
         self.assertTrue(read_epi_pool(state)[0].empty)
+
+    def test_selected_sheet_is_part_of_uploaded_result_source_signature(self):
+        sheet_a = make_uploaded_result_source_signature(
+            [("results.xlsx", b"same workbook bytes", "Core_Summary")]
+        )
+        sheet_b = make_uploaded_result_source_signature(
+            [("results.xlsx", b"same workbook bytes", "EPI_Results")]
+        )
+
+        self.assertNotEqual(sheet_a, sheet_b)
+
+    def test_new_sheet_with_empty_payload_removes_old_upload_but_preserves_api(self):
+        api_id = make_epi_pool_contributor_id("input", "api")
+        upload_id = make_epi_pool_contributor_id("input", "uploaded")
+        state = {
+            "epi_api_pool_contributor_id": api_id,
+            "epi_uploaded_pool_contributor_id": upload_id,
+            "epi_uploaded_pool_source_signature": make_uploaded_result_source_signature(
+                [("results.xlsx", b"same workbook bytes", "Core_Summary")]
+            ),
+        }
+        for contributor_id in (api_id, upload_id):
+            upsert_epi_pool(
+                state,
+                contributor_id,
+                pd.DataFrame({"compound": [contributor_id]}),
+                pd.DataFrame(),
+            )
+
+        changed = replace_epi_pool_source_contributor(
+            state,
+            "epi_uploaded_pool_contributor_id",
+            "epi_uploaded_pool_source_signature",
+            make_uploaded_result_source_signature(
+                [("results.xlsx", b"same workbook bytes", "EPI_Results")]
+            ),
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(read_epi_pool(state)[0]["compound"].tolist(), [api_id])
+
+    def test_clearing_upload_state_advances_uploader_epoch_without_recovering_rows(self):
+        contributor_id = make_epi_pool_contributor_id("input", "uploaded")
+        state = {
+            "epi_uploaded_pool_contributor_id": contributor_id,
+            "epi_uploaded_pool_source_signature": "old-upload",
+            "epi_result_uploader_epoch": 0,
+        }
+        upsert_epi_pool(
+            state,
+            contributor_id,
+            pd.DataFrame({"compound": ["A"]}),
+            pd.DataFrame(),
+        )
+
+        clear_tracked_epi_pool_contributor(
+            state,
+            "epi_uploaded_pool_contributor_id",
+            "epi_uploaded_pool_source_signature",
+        )
+        next_epoch = advance_epi_uploader_epoch(state, "epi_result_uploader_epoch")
+
+        self.assertEqual(next_epoch, 1)
+        self.assertTrue(read_epi_pool(state)[0].empty)
+        self.assertNotIn("epi_uploaded_pool_source_signature", state)
 
 
 if __name__ == "__main__":

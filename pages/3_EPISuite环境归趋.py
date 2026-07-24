@@ -33,9 +33,11 @@ from src.episuite_io import (  # noqa: E402
 from src.episuite_result_pool import (  # noqa: E402
     build_api_epi_pool_payload,
     build_uploaded_epi_pool_payload,
+    advance_epi_uploader_epoch,
     clear_epi_pool,
     clear_tracked_epi_pool_contributor,
     make_epi_pool_contributor_id,
+    make_uploaded_result_source_signature,
     remove_epi_pool_contributor,
     remove_stale_epi_pool_contributor,
     replace_epi_pool_source_contributor,
@@ -68,6 +70,7 @@ POOL_CONTRIBUTOR_STATE_KEYS = {
     "uploaded": "epi_uploaded_pool_contributor_id",
 }
 UPLOAD_POOL_SOURCE_SIGNATURE_KEY = "epi_uploaded_pool_source_signature"
+RESULT_UPLOADER_EPOCH_KEY = "epi_result_uploader_epoch"
 
 DETAIL_RESULT_SHEETS = [
     ("Properties", "理化性质"),
@@ -246,8 +249,10 @@ if st.session_state.get("epi_clear_shared_pool_confirm"):
     confirm_col, cancel_col = st.columns(2)
     if confirm_col.button("确认清空会话 EPI 结果", key="epi_clear_shared_pool_confirm_button"):
         clear_epi_pool(st.session_state)
-        for state_key in POOL_CONTRIBUTOR_STATE_KEYS.values():
-            st.session_state.pop(state_key, None)
+        for source_type in POOL_CONTRIBUTOR_STATE_KEYS:
+            remove_epi_pool_source_contributor(source_type)
+        clear_result_cache()
+        advance_epi_uploader_epoch(st.session_state, RESULT_UPLOADER_EPOCH_KEY)
         st.session_state.pop("epi_clear_shared_pool_confirm", None)
         st.rerun()
     if cancel_col.button("取消", key="epi_clear_shared_pool_cancel"):
@@ -397,32 +402,26 @@ with tab_fallback:
 
 with tab_parse:
     st.subheader("上传 EPI Suite / EPI Web Suite 结果")
+    result_uploader_epoch = st.session_state.get(RESULT_UPLOADER_EPOCH_KEY, 0)
     result_files = st.file_uploader(
         "上传 EPI Suite / EPI Web Suite 结果文件",
         type=["csv", "xlsx", "xls", "txt", "doc"],
         accept_multiple_files=True,
+        key=f"epi_result_files_{result_uploader_epoch}",
         help="优先推荐 CSV 或 Excel；也支持复制保存的 TXT，以及老版 EPI Suite 的 DOC 文本提取。",
     )
 
     parsed_frames = []
     warning_frames = []
     if result_files:
-        upload_signature_hasher = hashlib.sha256()
-        for result_file in result_files:
-            upload_signature_hasher.update(result_file.name.encode("utf-8"))
-            upload_signature_hasher.update(result_file.getvalue())
-        replace_epi_pool_source_contributor(
-            st.session_state,
-            POOL_CONTRIBUTOR_STATE_KEYS["uploaded"],
-            UPLOAD_POOL_SOURCE_SIGNATURE_KEY,
-            upload_signature_hasher.hexdigest(),
-        )
+        upload_source_parts = []
         for file_index, result_file in enumerate(result_files):
+            result_bytes = result_file.getvalue()
+            selected_sheet = None
             try:
-                selected_sheet = None
                 if result_file.name.lower().endswith((".xlsx", ".xls")):
                     inspection = inspect_epi_workbook(
-                        result_file.getvalue(), result_file.name
+                        result_bytes, result_file.name
                     )
                     selected_sheet = inspection.default_result_sheet
                     if selected_sheet is None:
@@ -445,6 +444,16 @@ with tab_parse:
                         [{"source_file": result_file.name, "warning": f"解析失败：{exc}"}]
                     )
                 )
+            finally:
+                upload_source_parts.append(
+                    (result_file.name, result_bytes, selected_sheet)
+                )
+        replace_epi_pool_source_contributor(
+            st.session_state,
+            POOL_CONTRIBUTOR_STATE_KEYS["uploaded"],
+            UPLOAD_POOL_SOURCE_SIGNATURE_KEY,
+            make_uploaded_result_source_signature(upload_source_parts),
+        )
     else:
         remove_epi_pool_source_contributor("uploaded")
 
