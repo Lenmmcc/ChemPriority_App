@@ -657,6 +657,8 @@ def _source_value_fields(source: pd.DataFrame) -> list[str]:
 def _is_null(value) -> bool:
     if value is None:
         return True
+    if isinstance(value, str):
+        return clean_text(value) == ""
     try:
         result = pd.isna(value)
     except (TypeError, ValueError):
@@ -836,21 +838,6 @@ def _merge_network_fields(
                 if _is_null(candidate_value):
                     continue
                 adopted_value = merged.at[position, field_name]
-                if (
-                    field_name == "status"
-                    and clean_text(adopted_value).casefold() != "success"
-                    and clean_text(candidate_value).casefold() == "success"
-                ):
-                    # A successful request may repair prior query status metadata.
-                    merged.at[position, field_name] = candidate_value
-                    provenance_row = _provenance_row(
-                        compound_key,
-                        field_name,
-                        candidate,
-                    )
-                    provenance_rows.append(provenance_row)
-                    provenance_by_field[(compound_key, field_name)] = provenance_row
-                    continue
                 if _is_null(adopted_value):
                     merged.at[position, field_name] = candidate_value
                     provenance_row = _provenance_row(
@@ -882,6 +869,20 @@ def _merge_network_fields(
                         candidate,
                     )
                 )
+                if (
+                    field_name == "status"
+                    and clean_text(adopted_value).casefold() != "success"
+                    and clean_text(candidate_value).casefold() == "success"
+                ):
+                    # Record the unequal status candidate before adopting recovery.
+                    merged.at[position, field_name] = candidate_value
+                    provenance_row = _provenance_row(
+                        compound_key,
+                        field_name,
+                        candidate,
+                    )
+                    provenance_rows.append(provenance_row)
+                    provenance_by_field[(compound_key, field_name)] = provenance_row
     return (
         merged,
         pd.DataFrame(provenance_rows, columns=_AUDIT_METADATA_COLUMNS),

@@ -392,6 +392,50 @@ class EPISupplementWorkbookTests(unittest.TestCase):
         self.assertEqual(len(log_kow_conflicts), 2)
         self.assertTrue(log_kow_conflicts["adopted_source_file"].eq("first.xlsx").all())
 
+    def test_uploaded_blank_values_allow_session_pool_to_fill(self):
+        universe = pd.DataFrame(
+            {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
+        )
+        uploaded = pd.DataFrame(
+            {
+                "compound": ["A"],
+                "smiles": ["CC"],
+                "status": ["   "],
+                "log_kow": [""],
+                "henry_atm_m3_mol": ["  "],
+            }
+        )
+        pool = pd.DataFrame(
+            {
+                "compound": ["A"],
+                "smiles": ["CC"],
+                "status": ["success"],
+                "log_kow": [2.0],
+                "henry_atm_m3_mol": [5.0e-6],
+            }
+        )
+
+        resolution = resolve_epi_sources(universe, uploaded, pool)
+
+        self.assertEqual(resolution.results.loc[0, "status"], "success")
+        self.assertEqual(resolution.results.loc[0, "log_kow"], 2.0)
+        self.assertEqual(
+            resolution.results.loc[0, "henry_atm_m3_mol"],
+            5.0e-6,
+        )
+        self.assertTrue(resolution.query_input.empty)
+        adopted = resolution.provenance.loc[
+            resolution.provenance["field"].isin(
+                ["status", "log_kow", "henry_atm_m3_mol"]
+            )
+        ]
+        self.assertTrue(adopted["source_type"].eq("session_pool").all())
+        self.assertFalse(
+            resolution.conflict_audit["field"]
+            .isin(["status", "log_kow", "henry_atm_m3_mol"])
+            .any()
+        )
+
     def test_identifier_molecular_weight_completes_downstream_core(self):
         universe = pd.DataFrame(
             {"compound": ["A"], "smiles": ["CC"], "cas": [""]}
@@ -517,6 +561,10 @@ class EPISupplementWorkbookTests(unittest.TestCase):
         self.assertEqual(merged.results.loc[0, "status"], "success")
         self.assertEqual(merged.results.loc[0, "log_kow"], 2.0)
         self.assertTrue(merged.query_input.empty)
+        self.assertCountEqual(
+            merged.conflict_audit["field"].tolist(),
+            ["status", "log_kow"],
+        )
 
     def test_successful_network_result_recovers_every_non_success_status(self):
         for current_status in ("", "error", "timeout", "failed"):
