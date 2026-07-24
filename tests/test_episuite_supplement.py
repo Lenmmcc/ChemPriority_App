@@ -47,7 +47,44 @@ class EPISupplementWorkbookTests(unittest.TestCase):
         self.assertEqual(parsed.loc[0, "compound"], "Ethanol")
         self.assertEqual(parsed.loc[0, "cas"], "64-17-5")
         self.assertEqual(parsed.loc[0, "log_kow"], -0.31)
-        self.assertTrue(warnings.empty)
+        self.assertFalse(warnings.empty)
+
+    def test_log_kow_uses_estimated_value_when_experimental_is_empty(self):
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "log_kow_experimental": [pd.NA],
+                    "log_kow_estimated": [1.5],
+                }
+            ).to_excel(writer, sheet_name="Core_Summary", index=False)
+
+        parsed, _ = parse_epi_supplement(
+            buffer.getvalue(),
+            EPISupplementMapping("download.xlsx", "Lake-A.xlsx", "Core_Summary"),
+        )
+
+        self.assertEqual(parsed.loc[0, "log_kow"], 1.5)
+
+    def test_existing_log_kow_is_not_overwritten_by_download_value_columns(self):
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "log_kow": [2.5],
+                    "log_kow_experimental": [1.5],
+                    "log_kow_estimated": [1.0],
+                }
+            ).to_excel(writer, sheet_name="EPI_Results", index=False)
+
+        parsed, _ = parse_epi_supplement(
+            buffer.getvalue(),
+            EPISupplementMapping("direct.xlsx", "Lake-A.xlsx", "EPI_Results"),
+        )
+
+        self.assertEqual(parsed.loc[0, "log_kow"], 2.5)
 
     def test_epi_results_sheet_is_second_recognized_format(self):
         buffer = io.BytesIO()

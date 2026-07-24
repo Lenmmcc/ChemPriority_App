@@ -9,7 +9,6 @@ from src.episuite_io import ENDPOINT_KEYS, parse_table_result
 
 
 RECOGNIZED_RESULT_SHEETS = ("Core_Summary", "EPI_Results")
-MISSING_ENDPOINT_WARNING_PREFIX = "以下目标指标没有在表格列名中识别到："
 
 
 @dataclass(frozen=True)
@@ -75,13 +74,6 @@ def parse_epi_supplement(
         normalized,
         source_name=mapping.source_file,
     )
-    if not warnings.empty:
-        warnings = warnings.loc[
-            ~warnings["warning"].astype("string").str.startswith(
-                MISSING_ENDPOINT_WARNING_PREFIX,
-                na=False,
-            )
-        ].reset_index(drop=True)
     parsed["primary_file"] = mapping.primary_file
     parsed["source_sheet"] = mapping.sheet_name
     parsed["source_priority"] = int(mapping.priority)
