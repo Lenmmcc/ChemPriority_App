@@ -6,7 +6,10 @@ from src.episuite_result_pool import (
     build_api_epi_pool_payload,
     build_uploaded_epi_pool_payload,
     clear_epi_pool,
+    clear_tracked_epi_pool_contributor,
+    make_epi_pool_contributor_id,
     read_epi_pool,
+    replace_epi_pool_source_contributor,
     remove_epi_pool_contributor,
     remove_stale_epi_pool_contributor,
     upsert_epi_pool,
@@ -169,6 +172,162 @@ class EPIResultPoolTests(unittest.TestCase):
 
         self.assertFalse(removed)
         self.assertEqual(read_epi_pool(state)[0]["compound"].tolist(), ["A"])
+
+    def test_api_and_upload_contributors_preserve_separate_values_for_one_input(self):
+        state = {}
+        api_id = make_epi_pool_contributor_id("same-input", "api")
+        upload_id = make_epi_pool_contributor_id("same-input", "uploaded")
+        api_results, api_provenance = build_api_epi_pool_payload(
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "status": ["success"],
+                    "henry_atm_m3_mol": [5.0e-6],
+                }
+            ),
+            source_file="https://example.test/epi",
+        )
+        upload_results, upload_provenance = build_uploaded_epi_pool_payload(
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    "log_kow": [1.5],
+                    "source_file": ["upload.xlsx"],
+                    "source_row": [2],
+                }
+            )
+        )
+        upsert_epi_pool(state, api_id, api_results, api_provenance)
+        upsert_epi_pool(state, upload_id, upload_results, upload_provenance)
+
+        results, provenance = read_epi_pool(state)
+
+        self.assertEqual(set(results["source_type"]), {"api", "uploaded"})
+        self.assertEqual(
+            results.loc[results["source_type"].eq("api"), "henry_atm_m3_mol"].iloc[0],
+            5.0e-6,
+        )
+        self.assertEqual(
+            results.loc[results["source_type"].eq("uploaded"), "log_kow"].iloc[0],
+            1.5,
+        )
+        self.assertEqual(set(provenance["source_type"]), {"api", "uploaded"})
+
+    def test_republishing_upload_contributor_does_not_remove_api_contributor(self):
+        state = {}
+        api_id = make_epi_pool_contributor_id("same-input", "api")
+        upload_id = make_epi_pool_contributor_id("same-input", "uploaded")
+        upsert_epi_pool(
+            state,
+            api_id,
+            pd.DataFrame({"compound": ["A"], "source_type": ["api"]}),
+            pd.DataFrame(),
+        )
+        upsert_epi_pool(
+            state,
+            upload_id,
+            pd.DataFrame({"compound": ["A"], "log_kow": [1.0], "source_type": ["uploaded"]}),
+            pd.DataFrame(),
+        )
+        upsert_epi_pool(
+            state,
+            upload_id,
+            pd.DataFrame({"compound": ["A"], "log_kow": [2.0], "source_type": ["uploaded"]}),
+            pd.DataFrame(),
+        )
+
+        results, _ = read_epi_pool(state)
+        self.assertEqual(set(results["source_type"]), {"api", "uploaded"})
+        self.assertEqual(
+            results.loc[results["source_type"].eq("uploaded"), "log_kow"].iloc[0],
+            2.0,
+        )
+
+    def test_input_change_removes_api_and_upload_contributors(self):
+        state = {
+            "epi_api_pool_contributor_id": make_epi_pool_contributor_id("old", "api"),
+            "epi_uploaded_pool_contributor_id": make_epi_pool_contributor_id("old", "uploaded"),
+        }
+        for contributor_id in state.copy().values():
+            upsert_epi_pool(
+                state,
+                contributor_id,
+                pd.DataFrame({"compound": [contributor_id]}),
+                pd.DataFrame(),
+            )
+
+        for source_type, state_key in (
+            ("api", "epi_api_pool_contributor_id"),
+            ("uploaded", "epi_uploaded_pool_contributor_id"),
+        ):
+            remove_stale_epi_pool_contributor(
+                state, state_key, make_epi_pool_contributor_id("new", source_type)
+            )
+
+        self.assertTrue(read_epi_pool(state)[0].empty)
+
+    def test_replacing_upload_selection_removes_only_old_upload_contributor(self):
+        state = {
+            "epi_api_pool_contributor_id": make_epi_pool_contributor_id("input", "api"),
+            "epi_uploaded_pool_contributor_id": make_epi_pool_contributor_id(
+                "input", "uploaded"
+            ),
+            "epi_uploaded_pool_source_signature": "old-upload",
+        }
+        for contributor_id in (
+            state["epi_api_pool_contributor_id"],
+            state["epi_uploaded_pool_contributor_id"],
+        ):
+            upsert_epi_pool(
+                state,
+                contributor_id,
+                pd.DataFrame({"compound": [contributor_id]}),
+                pd.DataFrame(),
+            )
+
+        changed = replace_epi_pool_source_contributor(
+            state,
+            "epi_uploaded_pool_contributor_id",
+            "epi_uploaded_pool_source_signature",
+            "new-upload",
+        )
+
+        self.assertTrue(changed)
+        self.assertNotIn("epi_uploaded_pool_contributor_id", state)
+        self.assertEqual(
+            read_epi_pool(state)[0]["compound"].tolist(),
+            [make_epi_pool_contributor_id("input", "api")],
+        )
+
+    def test_same_upload_selection_does_not_remove_its_contributor(self):
+        contributor_id = make_epi_pool_contributor_id("input", "uploaded")
+        state = {
+            "epi_uploaded_pool_contributor_id": contributor_id,
+            "epi_uploaded_pool_source_signature": "same-upload",
+        }
+        upsert_epi_pool(
+            state,
+            contributor_id,
+            pd.DataFrame({"compound": ["A"]}),
+            pd.DataFrame(),
+        )
+
+        changed = replace_epi_pool_source_contributor(
+            state,
+            "epi_uploaded_pool_contributor_id",
+            "epi_uploaded_pool_source_signature",
+            "same-upload",
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(read_epi_pool(state)[0]["compound"].tolist(), ["A"])
+
+        clear_tracked_epi_pool_contributor(
+            state,
+            "epi_uploaded_pool_contributor_id",
+            "epi_uploaded_pool_source_signature",
+        )
+        self.assertTrue(read_epi_pool(state)[0].empty)
 
 
 if __name__ == "__main__":

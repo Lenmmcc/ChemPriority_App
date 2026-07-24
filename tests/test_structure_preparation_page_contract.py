@@ -53,15 +53,29 @@ class StructurePreparationPageContractTests(unittest.TestCase):
         source = _page_source("3")
 
         self.assertIn("from src.episuite_result_pool import", source)
-        self.assertIn("def publish_epi_results_to_pool(results, provenance=None):", source)
+        self.assertIn(
+            'def publish_epi_results_to_pool(results, provenance=None, source_type="api"):',
+            source,
+        )
         self.assertIn("upsert_epi_pool(", source)
         self.assertIn("build_api_epi_pool_payload", source)
         self.assertIn("build_uploaded_epi_pool_payload", source)
+        self.assertIn('POOL_CONTRIBUTOR_STATE_KEYS = {', source)
+        self.assertIn('"api": "epi_api_pool_contributor_id"', source)
+        self.assertIn('"uploaded": "epi_uploaded_pool_contributor_id"', source)
+        self.assertIn('source_type="api"', source)
+        self.assertIn('source_type="uploaded"', source)
         self.assertIn('successful_web_results = web_results.loc[web_results["status"].eq("success")]', source)
-        self.assertIn("publish_epi_results_to_pool(*api_pool_payload)", source)
-        self.assertIn("publish_epi_results_to_pool(*uploaded_pool_payload)", source)
+        self.assertIn('publish_epi_results_to_pool(*api_pool_payload, source_type="api")', source)
+        self.assertIn(
+            'publish_epi_results_to_pool(*uploaded_pool_payload, source_type="uploaded")',
+            source,
+        )
         self.assertIn("remove_epi_pool_contributor", source)
         self.assertIn("remove_stale_epi_pool_contributor", source)
+        self.assertIn("remove_epi_pool_source_contributor(\"uploaded\")", source)
+        self.assertIn("replace_epi_pool_source_contributor", source)
+        self.assertIn("epi_uploaded_pool_source_signature", source)
         self.assertIn("clear_epi_pool(st.session_state)", source)
 
     def test_epi_page_parses_recognized_result_workbook_sheets(self):

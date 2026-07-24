@@ -9,6 +9,10 @@ POOL_KEY = "shared_epi_result_pool"
 POOL_VERSION = 1
 
 
+def make_epi_pool_contributor_id(input_signature, source_type) -> str:
+    return f"epi-page:{source_type}:{input_signature}"
+
+
 def upsert_epi_pool(state, contributor_id, results, provenance) -> None:
     pool = dict(state.get(POOL_KEY) or {})
     contributors = dict(pool.get("contributors") or {})
@@ -75,6 +79,32 @@ def remove_stale_epi_pool_contributor(
         return False
     remove_epi_pool_contributor(state, previous)
     state.pop(contributor_state_key, None)
+    return True
+
+
+def clear_tracked_epi_pool_contributor(
+    state, contributor_state_key, source_signature_state_key=None
+) -> None:
+    contributor_id = state.pop(contributor_state_key, None)
+    if source_signature_state_key is not None:
+        state.pop(source_signature_state_key, None)
+    if contributor_id:
+        remove_epi_pool_contributor(state, contributor_id)
+
+
+def replace_epi_pool_source_contributor(
+    state,
+    contributor_state_key,
+    source_signature_state_key,
+    source_signature,
+) -> bool:
+    signature = str(source_signature)
+    if state.get(source_signature_state_key) == signature:
+        return False
+    clear_tracked_epi_pool_contributor(
+        state, contributor_state_key, source_signature_state_key
+    )
+    state[source_signature_state_key] = signature
     return True
 
 

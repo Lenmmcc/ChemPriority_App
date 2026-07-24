@@ -34,8 +34,11 @@ from src.episuite_result_pool import (  # noqa: E402
     build_api_epi_pool_payload,
     build_uploaded_epi_pool_payload,
     clear_epi_pool,
+    clear_tracked_epi_pool_contributor,
+    make_epi_pool_contributor_id,
     remove_epi_pool_contributor,
     remove_stale_epi_pool_contributor,
+    replace_epi_pool_source_contributor,
     upsert_epi_pool,
 )
 from src.episuite_supplement import inspect_epi_workbook  # noqa: E402
@@ -60,7 +63,11 @@ RESULT_CACHE_KEYS = (
     "epi_parsed_results",
     "epi_parse_warnings",
 )
-POOL_CONTRIBUTOR_KEY = "epi_pool_contributor_id"
+POOL_CONTRIBUTOR_STATE_KEYS = {
+    "api": "epi_api_pool_contributor_id",
+    "uploaded": "epi_uploaded_pool_contributor_id",
+}
+UPLOAD_POOL_SOURCE_SIGNATURE_KEY = "epi_uploaded_pool_source_signature"
 
 DETAIL_RESULT_SHEETS = [
     ("Properties", "理化性质"),
@@ -78,17 +85,33 @@ def clear_result_cache():
 
 
 def clear_cached_input():
-    contributor_id = st.session_state.pop(POOL_CONTRIBUTOR_KEY, None)
-    if contributor_id:
-        remove_epi_pool_contributor(st.session_state, contributor_id)
+    for source_type in POOL_CONTRIBUTOR_STATE_KEYS:
+        remove_epi_pool_source_contributor(source_type)
     for key in INPUT_CACHE_KEYS:
         st.session_state.pop(key, None)
     clear_result_cache()
 
 
-def publish_epi_results_to_pool(results, provenance=None):
-    contributor_id = f"epi-page:{st.session_state['epi_input_signature']}"
-    previous = st.session_state.get(POOL_CONTRIBUTOR_KEY)
+def remove_epi_pool_source_contributor(source_type):
+    contributor_state_key = POOL_CONTRIBUTOR_STATE_KEYS[source_type]
+    if source_type == "uploaded":
+        clear_tracked_epi_pool_contributor(
+            st.session_state,
+            contributor_state_key,
+            UPLOAD_POOL_SOURCE_SIGNATURE_KEY,
+        )
+        return
+    contributor_id = st.session_state.pop(contributor_state_key, None)
+    if contributor_id:
+        remove_epi_pool_contributor(st.session_state, contributor_id)
+
+
+def publish_epi_results_to_pool(results, provenance=None, source_type="api"):
+    contributor_state_key = POOL_CONTRIBUTOR_STATE_KEYS[source_type]
+    contributor_id = make_epi_pool_contributor_id(
+        st.session_state["epi_input_signature"], source_type
+    )
+    previous = st.session_state.get(contributor_state_key)
     if previous and previous != contributor_id:
         remove_epi_pool_contributor(st.session_state, previous)
     upsert_epi_pool(
@@ -97,7 +120,7 @@ def publish_epi_results_to_pool(results, provenance=None):
         results,
         pd.DataFrame() if provenance is None else provenance,
     )
-    st.session_state[POOL_CONTRIBUTOR_KEY] = contributor_id
+    st.session_state[contributor_state_key] = contributor_id
 
 
 def append_structure_preparation_sheet(workbook_buffer, prepared_df):
@@ -192,11 +215,13 @@ if uploaded_file is not None:
     uploaded_bytes = uploaded_file.getvalue()
     input_signature = hashlib.sha256(uploaded_bytes).hexdigest()
     if st.session_state.get("epi_input_signature") != input_signature:
-        remove_stale_epi_pool_contributor(
-            st.session_state,
-            POOL_CONTRIBUTOR_KEY,
-            f"epi-page:{input_signature}",
-        )
+        for source_type, state_key in POOL_CONTRIBUTOR_STATE_KEYS.items():
+            remove_stale_epi_pool_contributor(
+                st.session_state,
+                state_key,
+                make_epi_pool_contributor_id(input_signature, source_type),
+            )
+        st.session_state.pop(UPLOAD_POOL_SOURCE_SIGNATURE_KEY, None)
         clear_result_cache()
     st.session_state["epi_input_bytes"] = uploaded_bytes
     st.session_state["epi_input_name"] = uploaded_file.name
@@ -221,7 +246,8 @@ if st.session_state.get("epi_clear_shared_pool_confirm"):
     confirm_col, cancel_col = st.columns(2)
     if confirm_col.button("确认清空会话 EPI 结果", key="epi_clear_shared_pool_confirm_button"):
         clear_epi_pool(st.session_state)
-        st.session_state.pop(POOL_CONTRIBUTOR_KEY, None)
+        for state_key in POOL_CONTRIBUTOR_STATE_KEYS.values():
+            st.session_state.pop(state_key, None)
         st.session_state.pop("epi_clear_shared_pool_confirm", None)
         st.rerun()
     if cancel_col.button("取消", key="epi_clear_shared_pool_cancel"):
@@ -326,7 +352,7 @@ with tab_predict:
             successful_web_results, source_file=api_url
         )
         if not api_pool_payload[0].empty:
-            publish_epi_results_to_pool(*api_pool_payload)
+            publish_epi_results_to_pool(*api_pool_payload, source_type="api")
 
         if web_errors.empty:
             st.success("EPI Web Suite 预测完成。")
@@ -381,6 +407,16 @@ with tab_parse:
     parsed_frames = []
     warning_frames = []
     if result_files:
+        upload_signature_hasher = hashlib.sha256()
+        for result_file in result_files:
+            upload_signature_hasher.update(result_file.name.encode("utf-8"))
+            upload_signature_hasher.update(result_file.getvalue())
+        replace_epi_pool_source_contributor(
+            st.session_state,
+            POOL_CONTRIBUTOR_STATE_KEYS["uploaded"],
+            UPLOAD_POOL_SOURCE_SIGNATURE_KEY,
+            upload_signature_hasher.hexdigest(),
+        )
         for file_index, result_file in enumerate(result_files):
             try:
                 selected_sheet = None
@@ -409,6 +445,8 @@ with tab_parse:
                         [{"source_file": result_file.name, "warning": f"解析失败：{exc}"}]
                     )
                 )
+    else:
+        remove_epi_pool_source_contributor("uploaded")
 
     if parsed_frames:
         parsed_results = pd.concat(parsed_frames, ignore_index=True)
@@ -426,7 +464,7 @@ with tab_parse:
         st.session_state.pop("epi_web_tables", None)
         uploaded_pool_payload = build_uploaded_epi_pool_payload(merged_results)
         if not uploaded_pool_payload[0].empty:
-            publish_epi_results_to_pool(*uploaded_pool_payload)
+            publish_epi_results_to_pool(*uploaded_pool_payload, source_type="uploaded")
 
         st.success("结果文件解析完成。")
         st.subheader("合并后的环境归趋结果")
