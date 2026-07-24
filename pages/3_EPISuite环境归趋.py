@@ -31,8 +31,11 @@ from src.episuite_io import (  # noqa: E402
     validate_input,
 )
 from src.episuite_result_pool import (  # noqa: E402
+    build_api_epi_pool_payload,
+    build_uploaded_epi_pool_payload,
     clear_epi_pool,
     remove_epi_pool_contributor,
+    remove_stale_epi_pool_contributor,
     upsert_epi_pool,
 )
 from src.episuite_supplement import inspect_epi_workbook  # noqa: E402
@@ -189,6 +192,11 @@ if uploaded_file is not None:
     uploaded_bytes = uploaded_file.getvalue()
     input_signature = hashlib.sha256(uploaded_bytes).hexdigest()
     if st.session_state.get("epi_input_signature") != input_signature:
+        remove_stale_epi_pool_contributor(
+            st.session_state,
+            POOL_CONTRIBUTOR_KEY,
+            f"epi-page:{input_signature}",
+        )
         clear_result_cache()
     st.session_state["epi_input_bytes"] = uploaded_bytes
     st.session_state["epi_input_name"] = uploaded_file.name
@@ -314,8 +322,11 @@ with tab_predict:
         st.session_state["epi_parsed_results"] = web_results
         st.session_state["epi_parse_warnings"] = web_errors.rename(columns={"error": "warning"})
         successful_web_results = web_results.loc[web_results["status"].eq("success")]
-        if not successful_web_results.empty:
-            publish_epi_results_to_pool(successful_web_results)
+        api_pool_payload = build_api_epi_pool_payload(
+            successful_web_results, source_file=api_url
+        )
+        if not api_pool_payload[0].empty:
+            publish_epi_results_to_pool(*api_pool_payload)
 
         if web_errors.empty:
             st.success("EPI Web Suite 预测完成。")
@@ -387,6 +398,8 @@ with tab_parse:
                 parsed_df, warnings_df = parse_uploaded_result(
                     result_file, sheet_name=selected_sheet
                 )
+                if selected_sheet is not None:
+                    parsed_df["source_sheet"] = selected_sheet
                 parsed_frames.append(parsed_df)
                 if not warnings_df.empty:
                     warning_frames.append(warnings_df)
@@ -411,8 +424,9 @@ with tab_parse:
         st.session_state["epi_parse_warnings"] = parse_warnings
         st.session_state.pop("epi_raw_results", None)
         st.session_state.pop("epi_web_tables", None)
-        if not merged_results.empty:
-            publish_epi_results_to_pool(merged_results)
+        uploaded_pool_payload = build_uploaded_epi_pool_payload(merged_results)
+        if not uploaded_pool_payload[0].empty:
+            publish_epi_results_to_pool(*uploaded_pool_payload)
 
         st.success("结果文件解析完成。")
         st.subheader("合并后的环境归趋结果")

@@ -55,10 +55,13 @@ class StructurePreparationPageContractTests(unittest.TestCase):
         self.assertIn("from src.episuite_result_pool import", source)
         self.assertIn("def publish_epi_results_to_pool(results, provenance=None):", source)
         self.assertIn("upsert_epi_pool(", source)
+        self.assertIn("build_api_epi_pool_payload", source)
+        self.assertIn("build_uploaded_epi_pool_payload", source)
         self.assertIn('successful_web_results = web_results.loc[web_results["status"].eq("success")]', source)
-        self.assertIn("publish_epi_results_to_pool(successful_web_results)", source)
-        self.assertIn("publish_epi_results_to_pool(merged_results", source)
+        self.assertIn("publish_epi_results_to_pool(*api_pool_payload)", source)
+        self.assertIn("publish_epi_results_to_pool(*uploaded_pool_payload)", source)
         self.assertIn("remove_epi_pool_contributor", source)
+        self.assertIn("remove_stale_epi_pool_contributor", source)
         self.assertIn("clear_epi_pool(st.session_state)", source)
 
     def test_epi_page_parses_recognized_result_workbook_sheets(self):
