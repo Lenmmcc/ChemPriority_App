@@ -77,9 +77,26 @@ class StructurePreparationPageContractTests(unittest.TestCase):
         self.assertIn("replace_epi_pool_source_contributor", source)
         self.assertIn("epi_uploaded_pool_source_signature", source)
         self.assertIn("advance_epi_uploader_epoch", source)
+        self.assertIn('INPUT_UPLOADER_EPOCH_KEY = "epi_input_uploader_epoch"', source)
+        self.assertIn('key=f"epi_input_file_{input_uploader_epoch}"', source)
         self.assertIn('key=f"epi_result_files_{result_uploader_epoch}"', source)
         self.assertIn("make_uploaded_result_source_signature", source)
         self.assertIn("clear_epi_pool(st.session_state)", source)
+
+    def test_epi_clear_current_data_resets_both_uploader_generations(self):
+        source = _page_source("3")
+        clear_start = source.index("def clear_cached_input():")
+        clear_end = source.index("def remove_epi_pool_source_contributor", clear_start)
+        clear_source = source[clear_start:clear_end]
+
+        self.assertIn(
+            "advance_epi_uploader_epoch(st.session_state, INPUT_UPLOADER_EPOCH_KEY)",
+            clear_source,
+        )
+        self.assertIn(
+            "advance_epi_uploader_epoch(st.session_state, RESULT_UPLOADER_EPOCH_KEY)",
+            clear_source,
+        )
 
     def test_epi_page_parses_recognized_result_workbook_sheets(self):
         source = _page_source("3")

@@ -396,6 +396,18 @@ class EPIResultPoolTests(unittest.TestCase):
         self.assertTrue(read_epi_pool(state)[0].empty)
         self.assertNotIn("epi_uploaded_pool_source_signature", state)
 
+    def test_clearing_current_data_can_advance_input_and_result_uploader_epochs(self):
+        state = {
+            "epi_input_uploader_epoch": 4,
+            "epi_result_uploader_epoch": 9,
+        }
+
+        input_epoch = advance_epi_uploader_epoch(state, "epi_input_uploader_epoch")
+        result_epoch = advance_epi_uploader_epoch(state, "epi_result_uploader_epoch")
+
+        self.assertEqual(input_epoch, 5)
+        self.assertEqual(result_epoch, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

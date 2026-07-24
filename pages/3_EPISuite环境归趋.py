@@ -70,6 +70,7 @@ POOL_CONTRIBUTOR_STATE_KEYS = {
     "uploaded": "epi_uploaded_pool_contributor_id",
 }
 UPLOAD_POOL_SOURCE_SIGNATURE_KEY = "epi_uploaded_pool_source_signature"
+INPUT_UPLOADER_EPOCH_KEY = "epi_input_uploader_epoch"
 RESULT_UPLOADER_EPOCH_KEY = "epi_result_uploader_epoch"
 
 DETAIL_RESULT_SHEETS = [
@@ -93,6 +94,8 @@ def clear_cached_input():
     for key in INPUT_CACHE_KEYS:
         st.session_state.pop(key, None)
     clear_result_cache()
+    advance_epi_uploader_epoch(st.session_state, INPUT_UPLOADER_EPOCH_KEY)
+    advance_epi_uploader_epoch(st.session_state, RESULT_UPLOADER_EPOCH_KEY)
 
 
 def remove_epi_pool_source_contributor(source_type):
@@ -196,9 +199,11 @@ left_col, right_col = st.columns([2, 1])
 
 with left_col:
     st.subheader("1. 上传 EPI Suite 输入表")
+    input_uploader_epoch = st.session_state.get(INPUT_UPLOADER_EPOCH_KEY, 0)
     uploaded_file = st.file_uploader(
         "上传 Excel 文件",
         type=["xlsx", "xls"],
+        key=f"epi_input_file_{input_uploader_epoch}",
         help="文件至少需要包含 compound 和 smiles 两列；cas 可选。有 cas 时会与 smiles 一起提交，并同时保留估算值与实验/库值。",
     )
 
