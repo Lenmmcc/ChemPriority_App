@@ -1839,6 +1839,12 @@ if result is not None:
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
             handle_checkpoint(failed_checkpoint)
+            result = failed_result
+            charts = failed_charts
+            module_workbooks = OrderedDict(
+                st.session_state.get("auto_query_module_workbooks")
+                or OrderedDict()
+            )
             st.session_state["auto_query_checkpoint_warning"] = str(exc)
             retry_status.error(f"EPI 重试未完成：{exc}")
         else:

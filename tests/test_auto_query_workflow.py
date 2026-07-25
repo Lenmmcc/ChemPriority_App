@@ -3118,6 +3118,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         )
         app.session_state["auto_query_workflow_result"] = original
         app.session_state["auto_query_workflow_charts"] = OrderedDict()
+        app.session_state["auto_query_result_table"] = "EPI_Query_Attempts"
         app = app.run(timeout=20)
 
         retry_error = AutoWorkflowEpiRetryError(
@@ -3153,6 +3154,18 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIs(
             app.session_state["auto_query_workflow_result"],
             updated,
+        )
+        rendered_frames = [
+            element.value
+            for element in app.dataframe
+            if isinstance(element.value, pd.DataFrame)
+        ]
+        self.assertTrue(
+            any(
+                "label" in frame.columns
+                and frame["label"].tolist() == ["Failed B"]
+                for frame in rendered_frames
+            )
         )
         self.assertEqual(list(app.exception), [])
 
