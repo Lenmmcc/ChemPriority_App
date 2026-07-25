@@ -637,7 +637,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             {
                 "primary_file": ["A.xlsx", "B.xlsx"],
                 "sample_id": ["Sample A", "Sample B"],
-                "source_row": [0, 0],
+                "source_row": [2, 2],
                 "identity_key": ["cas:11-11-1", "cas:22-22-2"],
                 "identity_status": ["resolved", "resolved"],
                 "compound": ["Shared", "Shared"],

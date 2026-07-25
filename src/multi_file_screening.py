@@ -564,7 +564,7 @@ def build_representative_screening_table(
         frame = sample["data"].copy()
         frame["sample_id"] = sample["name"]
         frame["_primary_file"] = sample.get("file_name", "")
-        frame["_source_row"] = range(len(frame))
+        frame["_source_row"] = range(2, len(frame) + 2)
         frame["Name"] = frame[compound_col].map(_clean_text)
         frame["formula"] = frame[formula_col] if formula_col in frame.columns else pd.NA
         peak_area_cols = sample_cols or [peak_area_col]
