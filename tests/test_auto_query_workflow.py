@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import importlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import re
 import struct
@@ -21,6 +22,7 @@ from streamlit.runtime.memory_media_file_storage import MemoryMediaFileStorage
 from streamlit.testing.v1 import AppTest
 
 from src.auto_query_checkpoint import (
+    CheckpointStorageError,
     cleanup_expired_checkpoints,
     delete_checkpoint,
     generate_run_token,
@@ -2911,6 +2913,134 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(token, page_text)
 
+    def test_checkpoint_round_trips_multiple_input_filenames_and_retry_table(self):
+        result = _result_with_epi_retry_input(["B"])
+        with TemporaryDirectory() as root:
+            token = generate_run_token()
+            save_checkpoint(
+                token,
+                _checkpoint_for(result),
+                [r"C:\uploads\A.xlsx", "/srv/uploads/B.xlsx"],
+                OrderedDict(),
+                root=root,
+            )
+            loaded = load_checkpoint(token, root=root)
+
+        self.assertEqual(loaded.input_filenames, ("A.xlsx", "B.xlsx"))
+        self.assertEqual(
+            loaded.checkpoint.result.tables["EPI_Retry_Input"][
+                "compound"
+            ].tolist(),
+            ["B"],
+        )
+
+    def test_schema_v1_input_filename_loads_as_singleton_tuple(self):
+        result = _result_with_epi_retry_input(["B"])
+        with TemporaryDirectory() as root:
+            token = generate_run_token()
+            run_dir = save_checkpoint(
+                token,
+                _checkpoint_for(result),
+                ["A.xlsx", "B.xlsx"],
+                OrderedDict(),
+                root=root,
+            )
+            manifest_path = run_dir / "manifest.json"
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["schema_version"] = 1
+            manifest["input_filename"] = manifest.pop("input_filenames")[0]
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            loaded = load_checkpoint(token, root=root)
+
+        self.assertEqual(loaded.input_filenames, ("A.xlsx",))
+        self.assertEqual(
+            loaded.checkpoint.result.tables["EPI_Retry_Input"][
+                "compound"
+            ].tolist(),
+            ["B"],
+        )
+
+    def test_unknown_future_checkpoint_schema_is_rejected(self):
+        with TemporaryDirectory() as root:
+            token = generate_run_token()
+            run_dir = save_checkpoint(
+                token,
+                _checkpoint_for(_result_with_epi_retry_input(["B"])),
+                ["A.xlsx", "B.xlsx"],
+                OrderedDict(),
+                root=root,
+            )
+            manifest_path = run_dir / "manifest.json"
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["schema_version"] = 3
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(CheckpointStorageError):
+                load_checkpoint(token, root=root)
+
+    def test_checkpoint_rejects_empty_or_invalid_input_filename_collections(self):
+        invalid_values = (
+            [],
+            123,
+            ["A.xlsx", None],
+        )
+        with TemporaryDirectory() as root:
+            for input_filenames in invalid_values:
+                with self.subTest(input_filenames=input_filenames):
+                    with self.assertRaises(CheckpointStorageError):
+                        save_checkpoint(
+                            generate_run_token(),
+                            _checkpoint_for(
+                                _result_with_epi_retry_input(["B"])
+                            ),
+                            input_filenames,
+                            OrderedDict(),
+                            root=root,
+                        )
+
+    def test_page_6_recovery_shows_all_checkpoint_input_filenames(self):
+        with TemporaryDirectory() as root:
+            checkpoint_root = Path(root)
+            token = generate_run_token()
+            save_checkpoint(
+                token,
+                _checkpoint_for(_result_with_epi_retry_input(["B"])),
+                ["Lake-A.xlsx", "Lake-B.xlsx"],
+                OrderedDict(),
+                root=checkpoint_root,
+            )
+            with _isolated_page_checkpoint_storage(checkpoint_root):
+                app = AppTest.from_file(
+                    "pages/6_一键批量查询.py",
+                    default_timeout=20,
+                )
+                app.query_params["run"] = token
+                app.run(timeout=20)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(
+            app.session_state["auto_query_primary_file_names"],
+            ["Lake-A.xlsx", "Lake-B.xlsx"],
+        )
+        self.assertTrue(
+            any(
+                "Lake-A.xlsx" in caption.value
+                and "Lake-B.xlsx" in caption.value
+                for caption in app.caption
+            )
+        )
+
     def test_page_6_shows_epi_retry_button_only_for_nonempty_retry_input(self):
         app = _app_test_with_cached_workbook()
         app.session_state["auto_query_workflow_result"] = (
@@ -2970,7 +3100,12 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             self.assertIn(token, page_text)
 
     def test_page_6_epi_retry_click_updates_session_exports_and_checkpoint(self):
-        app = _app_test_with_cached_workbook()
+        app = _app_test_with_cached_workbooks(
+            [
+                ("Lake-A.xlsx", _app_test_workbook_bytes("Compound A")),
+                ("Lake-B.xlsx", _app_test_workbook_bytes("Compound B")),
+            ]
+        )
         next(
             box
             for box in app.checkbox
@@ -3053,6 +3188,12 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         )
         self.assertGreaterEqual(save.call_count, 1)
         self.assertEqual(save.call_args.args[1].status, "completed")
+        self.assertTrue(
+            all(
+                call.args[2] == ["Lake-A.xlsx", "Lake-B.xlsx"]
+                for call in save.call_args_list
+            )
+        )
         self.assertEqual(list(app.exception), [])
 
     def test_page_6_epi_retry_zip_failure_removes_stale_full_zip_and_checkpoints_failure(
@@ -3140,6 +3281,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
 
         stored_checkpoint = save.call_args.args[1]
         self.assertEqual(stored_checkpoint.status, "failed")
+        self.assertEqual(save.call_args.args[2], ["smoke.xlsx"])
         self.assertIs(stored_checkpoint.result, updated)
         self.assertEqual(
             len(stored_checkpoint.result.tables["EPI_Query_Attempts"]),
@@ -4022,6 +4164,21 @@ def _result_with_epi_retry_input(failed_compounds):
             columns=["step", "status", "rows", "message"]
         ),
         warnings=pd.DataFrame(columns=["stage", "message"]),
+    )
+
+
+def _checkpoint_for(result):
+    return AutoWorkflowCheckpoint(
+        run_id=generate_run_token(),
+        input_signature="checkpoint-input",
+        settings_signature="checkpoint-settings",
+        selected_steps=("EPI Suite 环境归趋",),
+        finished_steps=(),
+        current_step="EPI Suite 环境归趋",
+        status="failed",
+        result=result,
+        error_message="retry incomplete",
+        updated_at=datetime.now(timezone.utc).isoformat(),
     )
 
 

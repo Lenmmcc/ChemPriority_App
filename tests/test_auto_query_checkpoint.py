@@ -655,7 +655,7 @@ class AutoQueryCheckpointTests(unittest.TestCase):
             self.assertEqual(set(removed), set(run_dirs))
             self.assertTrue(all(not run_dir.exists() for run_dir in run_dirs))
 
-    def test_input_filename_is_cross_platform_basename_and_preserves_chinese(self):
+    def test_input_filenames_are_cross_platform_basenames_and_preserve_chinese(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             now = datetime(2026, 7, 16, 4, 0, tzinfo=timezone.utc)
@@ -679,8 +679,47 @@ class AutoQueryCheckpointTests(unittest.TestCase):
                     )
                     loaded = load_checkpoint(token, root=root, now=now)
 
-                    self.assertEqual(manifest["input_filename"], "中文样品.xlsx")
-                    self.assertEqual(loaded.input_filename, "中文样品.xlsx")
+                    self.assertEqual(
+                        manifest["input_filenames"],
+                        ["中文样品.xlsx"],
+                    )
+                    self.assertEqual(
+                        loaded.input_filenames,
+                        ("中文样品.xlsx",),
+                    )
+
+    def test_cleanup_uses_schema_v1_manifest_expiry_instead_of_stale_mtime(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            now = datetime(2026, 7, 16, 4, 0, tzinfo=timezone.utc)
+            token = generate_run_token()
+            run_dir = save_checkpoint(
+                token,
+                example_checkpoint(now),
+                ["A.xlsx", "B.xlsx"],
+                {},
+                root=root,
+                now=now,
+            )
+            manifest_path = run_dir / "manifest.json"
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["schema_version"] = 1
+            manifest["input_filename"] = manifest.pop("input_filenames")[0]
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            set_tree_mtime(run_dir, now - timedelta(days=2))
+
+            removed = cleanup_expired_checkpoints(
+                root=root,
+                now=now + timedelta(hours=1),
+            )
+
+            self.assertEqual(removed, [])
+            self.assertTrue(run_dir.is_dir())
 
 
 if __name__ == "__main__":

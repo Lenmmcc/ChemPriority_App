@@ -856,11 +856,17 @@ if recovery_token and st.session_state.get("auto_query_run_token") != recovery_t
         )
         st.session_state["auto_query_run_token"] = recovery_token
         st.session_state["auto_query_checkpoint_manifest"] = loaded.manifest
+        st.session_state["auto_query_primary_file_names"] = list(
+            loaded.input_filenames
+        )
         st.session_state["auto_query_partial_result"] = checkpoint.result
         st.session_state["auto_query_workflow_result"] = checkpoint.result
         st.session_state["auto_query_module_workbooks"] = loaded.module_workbooks
         st.session_state["auto_query_workflow_charts"] = checkpoint.result.charts
         st.success("已恢复上次运行的部分结果。")
+        st.caption(
+            "已恢复输入文件：" + "、".join(loaded.input_filenames)
+        )
         st.caption(
             "恢复网址包含短期访问令牌，请勿分享；临时结果 24 小时后过期，"
             "服务器重新部署后不保证保留。"
@@ -1375,7 +1381,7 @@ def handle_checkpoint(checkpoint, *, strict_module_export=False):
             save_checkpoint(
                 run_token,
                 checkpoint,
-                active_uploads[0]["name"],
+                primary_names,
                 module_workbooks,
             )
         except Exception as exc:
