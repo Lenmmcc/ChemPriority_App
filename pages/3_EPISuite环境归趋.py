@@ -44,7 +44,7 @@ from src.episuite_result_pool import (  # noqa: E402
     upsert_epi_pool,
 )
 from src.episuite_supplement import inspect_epi_workbook  # noqa: E402
-from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
+from src.query_cache import render_query_cache_controls  # noqa: E402
 from src.mol_structure_parser import (  # noqa: E402
     prepare_structure_dataframe,
     summarize_structure_preparation,
@@ -325,10 +325,7 @@ with tab_predict:
             key="epi_query_max_workers",
             help="默认 3 个并发请求；遇到外部服务限流时可调低。",
         )
-        st.caption(f"缓存文件：{current_cache_path()}")
-        if st.button("清理本地查询缓存", key="epi_clear_query_cache"):
-            clear_query_cache()
-            st.success("本地查询缓存已清理。")
+        render_query_cache_controls(st, "epi")
 
     if st.button("开始网页端预测", type="primary"):
         progress_bar = st.progress(0)

@@ -55,7 +55,7 @@ from src.multi_file_screening import (
     prepare_multi_file_screening,
     read_primary_workbooks,
 )
-from src.query_cache import clear_query_cache, current_cache_path
+from src.query_cache import render_query_cache_controls
 from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
 from src.r_screening_replica.schema import ScreeningAxisRanges
 from src.auto_query_progress import (
@@ -1183,10 +1183,7 @@ with st.expander("运行设置", expanded=False):
         )
     with col_cache:
         cache_enabled = st.checkbox("启用本地查询缓存", value=True)
-        st.caption(f"缓存文件：{current_cache_path()}")
-        if st.button("清理本地查询缓存", key="auto_clear_query_cache"):
-            clear_query_cache()
-            st.success("本地查询缓存已清理。")
+        render_query_cache_controls(st, "auto")
 
     speed_a, speed_b, speed_c = st.columns(3)
     with speed_a:
