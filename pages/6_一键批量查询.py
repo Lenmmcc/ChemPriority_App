@@ -34,7 +34,7 @@ from src.auto_query_checkpoint import (
 )
 from src.cp_screening_workflow import PBMToxPiConfig
 from src.episuite_io import ENDPOINT_KEYS
-from src.episuite_result_pool import read_epi_pool
+from src.episuite_result_pool import advance_epi_uploader_epoch, read_epi_pool
 from src.episuite_supplement import (
     EPISupplementMapping,
     inspect_epi_workbook,
@@ -45,6 +45,8 @@ from src.episuite_supplement import (
 from src.image_safety import is_png_over_pixel_limit, png_dimensions
 from src.multi_file_screening import (
     SampleColumnMapping,
+    build_primary_epi_membership,
+    build_primary_epi_universe,
     build_upload_structure_preparation_preview,
     default_sample_mapping,
     prepare_multi_file_screening,
@@ -97,6 +99,32 @@ CHECKPOINT_STATE_KEYS = (
     "auto_query_checkpoint_warning",
 )
 SETTINGS_SIGNATURE_KEY = "auto_query_settings_signature"
+EPI_SUPPLEMENT_UPLOADER_EPOCH_KEY = (
+    "auto_query_epi_supplement_uploader_epoch"
+)
+
+
+def _clear_epi_mapping_widget_state():
+    for key in list(st.session_state):
+        if str(key).startswith("auto_epi_"):
+            st.session_state.pop(key, None)
+
+
+def clear_epi_supplement_state():
+    clear_uploads(
+        st.session_state,
+        (
+            *EPI_SUPPLEMENT_CACHE_KEYS,
+            *RESULT_CACHE_KEYS,
+            *CHECKPOINT_STATE_KEYS,
+        ),
+    )
+    _clear_epi_mapping_widget_state()
+    advance_epi_uploader_epoch(
+        st.session_state,
+        EPI_SUPPLEMENT_UPLOADER_EPOCH_KEY,
+    )
+    st.query_params.pop("run", None)
 
 
 def clear_auto_query_state():
@@ -117,7 +145,11 @@ def clear_auto_query_state():
     )
     st.session_state.pop(SETTINGS_SIGNATURE_KEY, None)
     st.session_state.pop("auto_query_upload", None)
-    st.session_state.pop("auto_query_epi_supplements", None)
+    _clear_epi_mapping_widget_state()
+    advance_epi_uploader_epoch(
+        st.session_state,
+        EPI_SUPPLEMENT_UPLOADER_EPOCH_KEY,
+    )
     st.query_params.pop("run", None)
 
 
@@ -146,9 +178,12 @@ def _widget_key(prefix, file_name, index):
 
 
 def _default_column(columns, candidates):
-    casefolded = {str(column).casefold(): column for column in columns}
+    casefolded = {
+        str(column).strip().casefold(): column
+        for column in columns
+    }
     for candidate in candidates:
-        matched = casefolded.get(str(candidate).casefold())
+        matched = casefolded.get(str(candidate).strip().casefold())
         if matched is not None:
             return matched
     return None
@@ -267,42 +302,6 @@ def _render_sample_mapping_tabs(samples):
     return sample_mappings
 
 
-def _primary_epi_universe(samples, sample_mappings):
-    frames = []
-    for sample in samples:
-        mapping = sample_mappings[sample.sample_id]
-        prepared = prepare_structure_dataframe(
-            sample.data,
-            mol_column=mapping.mol_column,
-            smiles_column=mapping.smiles_col,
-        )
-        frame = pd.DataFrame(
-            {
-                "compound": sample.data[mapping.compound_col],
-                "smiles": prepared["smiles"],
-                "cas": (
-                    sample.data[mapping.cas_col]
-                    if mapping.cas_col
-                    else ""
-                ),
-            }
-        )
-        frames.append(frame)
-    if not frames:
-        return pd.DataFrame(columns=["compound", "smiles", "cas"])
-    universe = pd.concat(frames, ignore_index=True)
-    compound_keys = (
-        universe["compound"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.casefold()
-    )
-    return universe.loc[
-        compound_keys.ne("") & ~compound_keys.duplicated()
-    ].reset_index(drop=True)
-
-
 def _render_epi_supplement_mappings(
     active_supplements,
     primary_names,
@@ -357,7 +356,7 @@ def _render_epi_supplement_mappings(
             except Exception as exc:
                 st.error(f"{source_file} / {selected_sheet} 读取失败：{exc}")
                 continue
-            columns = [str(column).strip() for column in sheet_frame.columns]
+            columns = list(sheet_frame.columns)
             optional_columns = ["", *columns]
             id_a, id_b, id_c = st.columns(3)
             identifier_defaults = {
@@ -387,6 +386,7 @@ def _render_epi_supplement_mappings(
                         source_file,
                         index,
                     ),
+                    format_func=lambda value: str(value).strip(),
                 ) or None
             with id_b:
                 smiles_col = st.selectbox(
@@ -401,6 +401,7 @@ def _render_epi_supplement_mappings(
                         source_file,
                         index,
                     ),
+                    format_func=lambda value: str(value).strip(),
                 ) or None
             with id_c:
                 cas_col = st.selectbox(
@@ -415,6 +416,7 @@ def _render_epi_supplement_mappings(
                         source_file,
                         index,
                     ),
+                    format_func=lambda value: str(value).strip(),
                 ) or None
 
             priority = st.number_input(
@@ -442,6 +444,7 @@ def _render_epi_supplement_mappings(
                                 source_file,
                                 index,
                             ),
+                            format_func=lambda value: str(value).strip(),
                         )
                     if selected:
                         endpoint_columns[endpoint] = selected
@@ -470,7 +473,14 @@ def _render_epi_supplement_mappings(
             parsed_frames.append(parsed)
             if not parse_warnings.empty:
                 warning_table = parse_warnings.copy()
-                warning_table.insert(0, "source_file", source_file)
+                if "source_file" in warning_table.columns:
+                    warning_table["source_file"] = (
+                        warning_table["source_file"]
+                        .fillna(source_file)
+                        .replace("", source_file)
+                    )
+                else:
+                    warning_table.insert(0, "source_file", source_file)
                 warnings.append(warning_table)
     return (
         mappings,
@@ -955,6 +965,14 @@ preview_rows = [
 ]
 _show_dataframe(pd.DataFrame(preview_rows))
 sample_mappings = _render_sample_mapping_tabs(samples)
+primary_epi_membership = build_primary_epi_membership(
+    samples,
+    sample_mappings,
+)
+primary_epi_universe = build_primary_epi_universe(
+    samples,
+    sample_mappings,
+)
 
 upload_structure_summary, prepared_input_df = (
     build_upload_structure_preparation_preview(samples, sample_mappings)
@@ -1005,12 +1023,22 @@ parsed_supplements = pd.DataFrame()
 session_pool_results, _ = read_epi_pool(st.session_state)
 if run_epi or run_pov_toxpi:
     st.subheader("EPI 补充结果")
+    epi_supplement_epoch = st.session_state.get(
+        EPI_SUPPLEMENT_UPLOADER_EPOCH_KEY,
+        0,
+    )
     epi_uploads = st.file_uploader(
         "上传 EPI 补充 Excel",
         type=["xlsx", "xls"],
         accept_multiple_files=True,
-        key="auto_query_epi_supplements",
+        key=f"auto_query_epi_supplements_{epi_supplement_epoch}",
     )
+    if st.button(
+        "仅清空 EPI 补充文件",
+        key="auto_clear_epi_supplements",
+    ):
+        clear_epi_supplement_state()
+        st.rerun()
     if epi_uploads:
         active_epi_supplements, epi_input_changed = store_uploads(
             st.session_state,
@@ -1045,10 +1073,11 @@ if run_epi or run_pov_toxpi:
 
     st.caption(f"同一会话 EPI 结果池：{len(session_pool_results)} 条。")
     preview_resolution = resolve_epi_sources(
-        _primary_epi_universe(samples, sample_mappings),
+        primary_epi_universe,
         parsed_supplements,
         session_pool_results,
         require_core=bool(run_pov_toxpi),
+        primary_membership=primary_epi_membership,
     )
     completeness = preview_resolution.completeness
     match_audit = preview_resolution.match_audit

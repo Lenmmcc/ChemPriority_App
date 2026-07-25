@@ -1,6 +1,7 @@
 import unittest
 
 import pandas as pd
+import src.multi_file_screening as multi_file_screening
 
 from src.cp_screening_workflow import build_pbm_toxpi_input
 from src.multi_file_screening import (
@@ -12,6 +13,69 @@ from src.r_screening_replica.schema import ScreeningAxisRanges
 
 
 class MultiFileScreeningTests(unittest.TestCase):
+    def test_primary_epi_universe_uses_hierarchical_identity_without_name_dedup(self):
+        self.assertTrue(
+            hasattr(multi_file_screening, "build_primary_epi_universe")
+        )
+        samples = [
+            PrimaryWorkbook(
+                file_name="A.xlsx",
+                sample_id="A",
+                data=pd.DataFrame(
+                    {
+                        "Name": ["Shared", "Shared duplicate"],
+                        "Formula": ["C2H6O", "C2H6O"],
+                        "Area": [10.0, 9.0],
+                        "SMILES": ["CCO", "CCO"],
+                        "CAS": ["64-17-5", "64-17-5"],
+                    }
+                ),
+            ),
+            PrimaryWorkbook(
+                file_name="B.xlsx",
+                sample_id="B",
+                data=pd.DataFrame(
+                    {
+                        "Name": ["Shared", "Shared"],
+                        "Formula": ["C3H8O", "C4H10O"],
+                        "Area": [8.0, 7.0],
+                        "SMILES": ["CCCO", "CCCCO"],
+                        "CAS": ["71-23-8", "78-83-1"],
+                    }
+                ),
+            ),
+        ]
+        mappings = {
+            sample.sample_id: SampleColumnMapping(
+                compound_col="Name",
+                formula_col="Formula",
+                peak_area_col="Area",
+                group_area_cols=("Area",),
+                smiles_col="SMILES",
+                cas_col="CAS",
+            )
+            for sample in samples
+        }
+
+        membership = multi_file_screening.build_primary_epi_membership(
+            samples,
+            mappings,
+        )
+        universe = multi_file_screening.build_primary_epi_universe(
+            samples,
+            mappings,
+        )
+
+        self.assertEqual(len(membership), 4)
+        self.assertEqual(
+            set(universe["cas"]),
+            {"64-17-5", "71-23-8", "78-83-1"},
+        )
+        self.assertEqual(
+            universe.loc[universe["compound"].eq("Shared"), "cas"].tolist(),
+            ["64-17-5", "71-23-8", "78-83-1"],
+        )
+
     def test_raw_representative_and_pbm_rows_preserve_multi_file_semantics(self):
         samples = [
             PrimaryWorkbook(

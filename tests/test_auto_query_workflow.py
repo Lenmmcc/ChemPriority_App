@@ -92,6 +92,16 @@ def _app_test_workbook_bytes(compound=None):
     return buffer.getvalue()
 
 
+def _app_test_epi_workbook_bytes():
+    buffer = io.BytesIO()
+    complete_epi_rows(["Compound A"]).to_excel(
+        buffer,
+        sheet_name="Core_Summary",
+        index=False,
+    )
+    return buffer.getvalue()
+
+
 def _app_test_with_cached_workbook():
     upload = {"name": "smoke.xlsx", "bytes": _app_test_workbook_bytes()}
     return _app_test_with_cached_workbooks([(upload["name"], upload["bytes"])])
@@ -166,6 +176,179 @@ def _isolated_page_checkpoint_storage(root):
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_page_6_clears_only_epi_supplements_and_preserves_primary_and_pool(self):
+        app = _app_test_with_cached_workbooks(
+            [("Lake-A.xlsx", _app_test_workbook_bytes("Compound A"))]
+        )
+        supplement = {
+            "name": "Lake-A_EPI.xlsx",
+            "bytes": _app_test_epi_workbook_bytes(),
+        }
+        app.session_state["auto_query_epi_supplement_files"] = [supplement]
+        app.session_state["auto_query_epi_supplement_signature"] = (
+            upload_signature([supplement])
+        )
+        next(
+            box
+            for box in app.checkbox
+            if box.label == "EPI Suite 环境归趋"
+        ).check().run()
+        app.session_state["auto_query_workflow_result"] = object()
+        app.session_state["auto_query_checkpoint_manifest"] = {"old": True}
+        pool_state = {
+            "version": 1,
+            "contributors": {
+                "keep": {
+                    "results": [{"compound": "Pool compound"}],
+                    "provenance": [],
+                }
+            },
+        }
+        app.session_state["shared_epi_result_pool"] = pool_state
+        previous_epoch = (
+            app.session_state[
+                "auto_query_epi_supplement_uploader_epoch"
+            ]
+            if "auto_query_epi_supplement_uploader_epoch"
+            in app.session_state
+            else 0
+        )
+
+        clear_button = next(
+            button
+            for button in app.button
+            if button.label == "仅清空 EPI 补充文件"
+        )
+        clear_button.click().run()
+
+        self.assertIn("auto_query_input_files", app.session_state)
+        self.assertNotIn("auto_query_epi_supplement_files", app.session_state)
+        self.assertNotIn(
+            "auto_query_epi_supplement_signature",
+            app.session_state,
+        )
+        self.assertNotIn("auto_query_workflow_result", app.session_state)
+        self.assertNotIn("auto_query_checkpoint_manifest", app.session_state)
+        self.assertEqual(
+            app.session_state["shared_epi_result_pool"],
+            pool_state,
+        )
+        self.assertEqual(
+            app.session_state[
+                "auto_query_epi_supplement_uploader_epoch"
+            ],
+            previous_epoch + 1,
+        )
+        self.assertFalse(
+            any(
+                str(key).startswith("auto_epi_")
+                for key in app.session_state.filtered_state
+            )
+        )
+
+    def test_page_6_isolates_bad_epi_supplement_and_keeps_valid_file(self):
+        app = _app_test_with_cached_workbooks(
+            [("Lake-A.xlsx", _app_test_workbook_bytes("Compound A"))]
+        )
+        supplements = [
+            {"name": "broken.xlsx", "bytes": b"not an excel workbook"},
+            {
+                "name": "Lake-A_EPI.xlsx",
+                "bytes": _app_test_epi_workbook_bytes(),
+            },
+        ]
+        app.session_state["auto_query_epi_supplement_files"] = supplements
+        app.session_state["auto_query_epi_supplement_signature"] = (
+            upload_signature(supplements)
+        )
+
+        next(
+            box
+            for box in app.checkbox
+            if box.label == "EPI Suite 环境归趋"
+        ).check().run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(
+            any("broken.xlsx 读取失败" in message.value for message in app.error)
+        )
+        self.assertTrue(
+            any(
+                expander.label == "Lake-A_EPI.xlsx"
+                for expander in app.expander
+            )
+        )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_workflow_enforces_uploaded_primary_membership_before_epi_merge(
+        self,
+        run_identifier,
+        run_epi,
+    ):
+        self.assertIn(
+            "primary_membership",
+            AutoWorkflowPreparedInput.__dataclass_fields__,
+        )
+        input_frame = _workflow_input_rows(["Only A", "Only B"])
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(
+                compound_col="Name",
+                formula_col="NIST Lib Hit Formula",
+                peak_area_col="Avg TIC",
+            ),
+            prepared_input=input_frame,
+            representative_table=build_representative_table(
+                input_frame,
+                AutoWorkflowMapping(
+                    compound_col="Name",
+                    formula_col="NIST Lib Hit Formula",
+                    peak_area_col="Avg TIC",
+                ),
+            ),
+            primary_membership=pd.DataFrame(
+                {
+                    "primary_file": ["A.xlsx", "B.xlsx"],
+                    "compound": ["Only A", "Only B"],
+                    "smiles": ["CC", "CCC"],
+                    "cas": ["11-11-1", "22-22-2"],
+                }
+            ),
+        )
+        completed = _completed_identifier_rows(["Only A", "Only B"])
+        completed["smiles"] = ["CC", "CCC"]
+        completed["cas"] = ["11-11-1", "22-22-2"]
+        run_identifier.return_value = (completed, pd.DataFrame())
+        uploaded = complete_epi_rows(["Only B"])
+        uploaded["smiles"] = "CCC"
+        uploaded["cas"] = "22-22-2"
+        uploaded["primary_file"] = "A.xlsx"
+        run_epi.return_value = (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        result = run_auto_query_workflow(
+            input_frame,
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=False,
+                run_epi=True,
+                cache_enabled=False,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=uploaded,
+        )
+
+        retry_input = result.tables["EPI_Retry_Input"]
+        self.assertIn("Only B", retry_input["compound"].tolist())
+        audit = result.tables["EPI_Match_Audit"]
+        self.assertIn(
+            "association_mismatch",
+            audit["match_status"].tolist(),
+        )
+
     def test_page_6_accepts_multiple_primary_files_and_keeps_both_in_settings(self):
         app = _app_test_with_cached_workbooks(
             [

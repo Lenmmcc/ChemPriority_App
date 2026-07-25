@@ -316,6 +316,7 @@ class AutoWorkflowPreparedInput:
     local_tables: OrderedDict[str, pd.DataFrame] = field(default_factory=OrderedDict)
     local_charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
     local_warnings: list[str] = field(default_factory=list)
+    primary_membership: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -465,6 +466,7 @@ def auto_input_from_multi_file_result(
             "message",
             pd.Series(dtype=str),
         ).tolist(),
+        primary_membership=result.primary_membership,
     )
 
 
@@ -689,6 +691,7 @@ def run_auto_query_workflow(
             else epi_pool_results,
             completed_identifiers=completed_identifiers,
             require_core=bool(config.run_pov_lrtp_toxpi),
+            primary_membership=prepared_input.primary_membership,
         )
         attempt_events = []
         epi_value = None

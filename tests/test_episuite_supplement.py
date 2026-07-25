@@ -1,4 +1,5 @@
 import io
+import inspect
 import unittest
 
 import pandas as pd
@@ -154,6 +155,152 @@ class EPISupplementWorkbookTests(unittest.TestCase):
                 ["Lake-A.xlsx", "Lake-B.xlsx"],
             )
         )
+
+    def test_uploaded_association_rejects_compound_found_only_in_other_primary(self):
+        self.assertIn(
+            "primary_membership",
+            inspect.signature(resolve_epi_sources).parameters,
+        )
+        universe = pd.DataFrame(
+            {
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", "22-22-2"],
+            }
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", "22-22-2"],
+            }
+        )
+        uploaded = complete_epi_rows(["Shared"])
+        uploaded["smiles"] = "CCC"
+        uploaded["cas"] = "22-22-2"
+        uploaded["primary_file"] = "A.xlsx"
+
+        resolution = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            primary_membership=membership,
+            require_core=True,
+        )
+
+        only_b = resolution.results.set_index("cas").loc["22-22-2"]
+        self.assertFalse(bool(only_b["_source_matched"]))
+        self.assertTrue(
+            resolution.completeness.loc[
+                resolution.results["cas"].eq("22-22-2"), "needs_query"
+            ]
+            .iloc[0]
+        )
+        audit = resolution.match_audit.iloc[0]
+        self.assertEqual(audit["match_status"], "association_mismatch")
+        self.assertEqual(audit["primary_file"], "A.xlsx")
+
+    def test_uploaded_association_allows_globally_reused_compound_present_in_primary(self):
+        self.assertIn(
+            "primary_membership",
+            inspect.signature(resolve_epi_sources).parameters,
+        )
+        universe = pd.DataFrame(
+            {
+                "compound": ["Shared"],
+                "smiles": ["CCO"],
+                "cas": ["64-17-5"],
+            }
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CCO", "CCO"],
+                "cas": ["64-17-5", "64-17-5"],
+            }
+        )
+        uploaded = complete_epi_rows(["Shared"])
+        uploaded["smiles"] = "CCO"
+        uploaded["cas"] = "64-17-5"
+        uploaded["primary_file"] = "A.xlsx"
+
+        resolution = resolve_epi_sources(
+            universe,
+            uploaded,
+            pd.DataFrame(),
+            primary_membership=membership,
+            require_core=True,
+        )
+
+        self.assertTrue(bool(resolution.results.loc[0, "_source_matched"]))
+        self.assertFalse(bool(resolution.completeness.loc[0, "needs_query"]))
+        self.assertEqual(
+            resolution.match_audit.loc[0, "association_status"],
+            "matched",
+        )
+
+    def test_pool_without_primary_file_still_matches_global_universe(self):
+        self.assertIn(
+            "primary_membership",
+            inspect.signature(resolve_epi_sources).parameters,
+        )
+        universe = pd.DataFrame(
+            {"compound": ["B"], "smiles": ["CCC"], "cas": ["22-22-2"]}
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["B.xlsx"],
+                "compound": ["B"],
+                "smiles": ["CCC"],
+                "cas": ["22-22-2"],
+            }
+        )
+        pool = complete_epi_rows(["B"])
+        pool["smiles"] = "CCC"
+        pool["cas"] = "22-22-2"
+
+        resolution = resolve_epi_sources(
+            universe,
+            pd.DataFrame(),
+            pool,
+            primary_membership=membership,
+            require_core=True,
+        )
+
+        self.assertTrue(bool(resolution.results.loc[0, "_source_matched"]))
+        self.assertEqual(resolution.match_audit.loc[0, "match_status"], "matched")
+        self.assertEqual(
+            resolution.match_audit.loc[0, "association_status"],
+            "not_applicable",
+        )
+
+    def test_custom_header_mapping_is_trimmed_and_case_insensitive(self):
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            pd.DataFrame(
+                {
+                    " Compound Name ": ["A"],
+                    " Custom VP ": [0.125],
+                }
+            ).to_excel(writer, sheet_name="Manual Results", index=False)
+
+        parsed, _ = parse_epi_supplement(
+            buffer.getvalue(),
+            EPISupplementMapping(
+                source_file="manual.xlsx",
+                primary_file="A.xlsx",
+                sheet_name="Manual Results",
+                compound_col="compound name",
+                endpoint_columns={
+                    "vapor_pressure_mm_hg": "custom vp",
+                },
+            ),
+        )
+
+        self.assertEqual(parsed.loc[0, "compound"], "A")
+        self.assertEqual(parsed.loc[0, "vapor_pressure_mm_hg"], 0.125)
 
     def test_cas_match_wins_and_uploaded_values_are_not_overwritten(self):
         universe = pd.DataFrame(

@@ -92,16 +92,16 @@ def parse_epi_supplement(
     mapping: EPISupplementMapping,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     frame = pd.read_excel(io.BytesIO(data), sheet_name=mapping.sheet_name)
-    rename_map = {
-        source: target
-        for target, source in {
+    rename_map = {}
+    for target, requested_source in {
             "compound": mapping.compound_col,
             "smiles": mapping.smiles_col,
             "cas": mapping.cas_col,
             **mapping.endpoint_columns,
-        }.items()
-        if source and source in frame.columns
-    }
+        }.items():
+        source = _resolve_workbook_header(frame.columns, requested_source)
+        if source is not None:
+            rename_map[source] = target
     normalized = frame.rename(columns=rename_map)
     if "log_kow" not in normalized.columns:
         experimental = normalized.get("log_kow_experimental")
@@ -134,6 +134,22 @@ def parse_epi_supplement(
         if endpoint not in parsed.columns:
             parsed[endpoint] = pd.NA
     return parsed, warnings
+
+
+def _resolve_workbook_header(columns, requested):
+    if requested is None:
+        return None
+    if requested in columns:
+        return requested
+    normalized_requested = str(requested).strip().casefold()
+    if not normalized_requested:
+        return None
+    matches = [
+        column
+        for column in columns
+        if str(column).strip().casefold() == normalized_requested
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def clean_text(value) -> str:
@@ -264,9 +280,11 @@ def prepare_source(
 def match_sources(
     universe: pd.DataFrame,
     sources: pd.DataFrame,
+    primary_membership: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     audit_columns = [
         "source_type",
+        "primary_file",
         "source_file",
         "source_sheet",
         "source_row",
@@ -274,6 +292,8 @@ def match_sources(
         "compound",
         "smiles",
         "cas",
+        "association_status",
+        "association_match_method",
         "match_method",
         "match_status",
         "_compound_key",
@@ -282,13 +302,59 @@ def match_sources(
         return pd.DataFrame(), pd.DataFrame(columns=audit_columns)
 
     indexes = _universe_indexes(universe)
+    membership_by_primary = {}
+    if (
+        isinstance(primary_membership, pd.DataFrame)
+        and not primary_membership.empty
+        and "primary_file" in primary_membership.columns
+    ):
+        primary_names = primary_membership["primary_file"].map(clean_text)
+        for primary_key in primary_names.map(str.casefold).unique():
+            if not primary_key:
+                continue
+            scoped = primary_membership.loc[
+                primary_names.map(str.casefold).eq(primary_key)
+            ].copy()
+            membership_by_primary[primary_key] = scoped
+
     matched_rows = []
     audit_rows = []
     for _, source_row in sources.iterrows():
         method, status, compound_key = _match_row(source_row, indexes)
+        primary_file = clean_text(source_row.get("primary_file"))
+        association_status = "not_applicable"
+        association_method = ""
+        association_required = (
+            clean_text(source_row.get("source_type")).casefold() == "uploaded"
+            and bool(primary_file)
+            and bool(membership_by_primary)
+        )
+        if association_required:
+            scoped_membership = membership_by_primary.get(
+                primary_file.casefold()
+            )
+            if scoped_membership is None or scoped_membership.empty:
+                association_status = "primary_not_found"
+            else:
+                (
+                    association_method,
+                    association_status,
+                    _,
+                ) = _match_association_row(
+                    source_row,
+                    _universe_indexes(scoped_membership),
+                )
+            if association_status != "matched":
+                status = (
+                    "association_mismatch"
+                    if status == "matched"
+                    else f"association_{association_status}"
+                )
+                compound_key = None
         audit_rows.append(
             {
                 "source_type": source_row.get("source_type", ""),
+                "primary_file": primary_file,
                 "source_file": source_row.get("source_file", ""),
                 "source_sheet": source_row.get("source_sheet", ""),
                 "source_row": source_row.get("source_row", pd.NA),
@@ -296,6 +362,8 @@ def match_sources(
                 "compound": source_row.get("compound", ""),
                 "smiles": source_row.get("smiles", ""),
                 "cas": source_row.get("cas", ""),
+                "association_status": association_status,
+                "association_match_method": association_method,
                 "match_method": method,
                 "match_status": status,
                 "_compound_key": compound_key if status == "matched" else pd.NA,
@@ -462,8 +530,15 @@ def resolve_epi_sources(
     pool_results: pd.DataFrame,
     completed_identifiers: pd.DataFrame | None = None,
     require_core: bool = False,
+    primary_membership: pd.DataFrame | None = None,
 ) -> EPIResolution:
     universe = prepare_universe(compound_universe, completed_identifiers)
+    membership = (
+        prepare_universe(primary_membership, completed_identifiers)
+        if isinstance(primary_membership, pd.DataFrame)
+        and not primary_membership.empty
+        else pd.DataFrame()
+    )
     uploaded = prepare_source(
         uploaded_results,
         "uploaded",
@@ -477,6 +552,7 @@ def resolve_epi_sources(
     matched, match_audit = match_sources(
         universe,
         _append_frames(uploaded, pool),
+        primary_membership=membership,
     )
     results, provenance, conflicts = merge_matched_fields(universe, matched)
     completeness = classify_completeness(
@@ -605,6 +681,8 @@ def _match_row(
         if not candidates:
             continue
         if len(candidates) > 1:
+            if matches and matches[0][1] in candidates:
+                continue
             return method, "ambiguous", None
         matches.append((method, next(iter(candidates))))
     if not matches:
@@ -614,6 +692,26 @@ def _match_row(
     if any(candidate_key != compound_key for _, candidate_key in matches[1:]):
         return method, "conflict", None
     return method, "matched", compound_key
+
+
+def _match_association_row(
+    row: pd.Series,
+    indexes: dict[str, dict[str, list[str]]],
+) -> tuple[str, str, str | None]:
+    normalizers = (
+        ("cas", normalize_cas),
+        ("smiles", normalize_smiles),
+        ("compound", normalize_name),
+    )
+    for method, normalizer in normalizers:
+        value = normalizer(row.get(method))
+        if not value:
+            continue
+        candidates = indexes[method].get(value, ())
+        if candidates:
+            return method, "matched", candidates[0]
+        return method, "unmatched", None
+    return "", "unmatched", None
 
 
 def _base_results(universe: pd.DataFrame) -> pd.DataFrame:

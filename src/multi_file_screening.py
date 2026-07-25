@@ -67,6 +67,7 @@ class MultiFileScreeningResult:
     structure_preparation_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     df_detection_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     selected_peak_cols: list[str] = field(default_factory=list)
+    primary_membership: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def read_primary_workbooks(records) -> list[PrimaryWorkbook]:
@@ -148,6 +149,88 @@ def build_upload_structure_preparation_preview(
     return (
         pd.DataFrame(summaries),
         pd.concat(audits, ignore_index=True) if audits else pd.DataFrame(),
+    )
+
+
+def build_primary_epi_membership(
+    samples: list[PrimaryWorkbook],
+    mappings: Mapping[str, SampleColumnMapping],
+) -> pd.DataFrame:
+    rows = []
+    for sample in samples:
+        mapping = mappings.get(sample.sample_id)
+        if mapping is None:
+            continue
+        prepared = prepare_structure_dataframe(
+            sample.data,
+            mol_column=mapping.mol_column,
+            smiles_column=mapping.smiles_col,
+        )
+        for position, (_, source_row) in enumerate(
+            sample.data.iterrows(),
+            start=2,
+        ):
+            compound = (
+                _clean_text(source_row.get(mapping.compound_col))
+                if mapping.compound_col
+                else ""
+            )
+            smiles = _clean_text(prepared.iloc[position - 2].get("smiles"))
+            cas = (
+                _clean_text(source_row.get(mapping.cas_col))
+                if mapping.cas_col
+                else ""
+            )
+            if not any((compound, smiles, cas)):
+                continue
+            rows.append(
+                {
+                    "primary_file": sample.file_name,
+                    "sample_id": sample.sample_id,
+                    "source_row": position,
+                    "compound": compound,
+                    "smiles": smiles,
+                    "cas": cas,
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "primary_file",
+            "sample_id",
+            "source_row",
+            "compound",
+            "smiles",
+            "cas",
+        ],
+    )
+
+
+def build_primary_epi_universe(
+    samples: list[PrimaryWorkbook],
+    mappings: Mapping[str, SampleColumnMapping],
+) -> pd.DataFrame:
+    membership = build_primary_epi_membership(samples, mappings)
+    if membership.empty:
+        return pd.DataFrame(columns=["compound", "smiles", "cas"])
+    identity_keys = []
+    for _, row in membership.iterrows():
+        cas = _clean_text(row.get("cas")).replace(" ", "")
+        smiles = _clean_text(row.get("smiles"))
+        compound = " ".join(
+            _clean_text(row.get("compound")).casefold().split()
+        )
+        if cas:
+            identity_keys.append(f"cas:{cas}")
+        elif smiles:
+            identity_keys.append(f"smiles:{smiles}")
+        else:
+            identity_keys.append(f"compound:{compound}")
+    universe = membership.assign(_identity_key=identity_keys)
+    return (
+        universe.loc[~universe["_identity_key"].duplicated()]
+        [["compound", "smiles", "cas"]]
+        .reset_index(drop=True)
     )
 
 
@@ -497,6 +580,10 @@ def prepare_multi_file_screening(
         structure_preparation_summary=structure_summaries,
         df_detection_table=df_detection_table,
         selected_peak_cols=selected_peak_cols,
+        primary_membership=build_primary_epi_membership(
+            samples,
+            mappings,
+        ),
     )
 
 
