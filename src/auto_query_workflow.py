@@ -30,7 +30,11 @@ from src.cp_screening_workflow import (
 from src.echa_ghs import run_echa_ghs_batch
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch
-from src.episuite_supplement import merge_network_epi, resolve_epi_sources
+from src.episuite_supplement import (
+    merge_network_epi,
+    prepare_universe,
+    resolve_epi_sources,
+)
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, REQUIRED_IDENTIFIER_COLUMNS, run_identifier_completion_batch
 from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
 from src.multi_file_screening import MultiFileScreeningResult
@@ -93,6 +97,8 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
         "03_EPI_Suite",
         "EPI_Suite_Results.xlsx",
         (
+            "EPI_Identity_Universe",
+            "EPI_Primary_Membership",
             "EPI_Results",
             "EPI_Raw_Results",
             "EPI_Errors",
@@ -317,6 +323,7 @@ class AutoWorkflowPreparedInput:
     local_charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
     local_warnings: list[str] = field(default_factory=list)
     primary_membership: pd.DataFrame = field(default_factory=pd.DataFrame)
+    epi_universe: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -467,6 +474,7 @@ def auto_input_from_multi_file_result(
             pd.Series(dtype=str),
         ).tolist(),
         primary_membership=result.primary_membership,
+        epi_universe=result.epi_universe,
     )
 
 
@@ -487,9 +495,22 @@ def run_auto_query_workflow(
     mapping = prepared_input.mapping
     prepared_frame = prepared_input.prepared_input
     representative = prepared_input.representative_table
+    epi_identity_universe = (
+        prepared_input.epi_universe.copy().reset_index(drop=True)
+        if (
+            isinstance(prepared_input.epi_universe, pd.DataFrame)
+            and not prepared_input.epi_universe.empty
+        )
+        else pd.DataFrame()
+    )
     tables: OrderedDict[str, pd.DataFrame] = OrderedDict()
     charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
     tables["Structure_Preparation"] = prepared_frame
+    if not epi_identity_universe.empty:
+        tables["EPI_Identity_Universe"] = epi_identity_universe.copy()
+        tables["EPI_Primary_Membership"] = (
+            prepared_input.primary_membership.copy()
+        )
     status_rows = []
     warning_rows = []
     plot_warnings = configure_plot_style()
@@ -638,7 +659,13 @@ def run_auto_query_workflow(
         ]
     )
     if needs_identifier:
-        identifier_input = _build_identifier_input(representative)
+        identifier_input = (
+            _build_identifier_input_from_epi_universe(
+                epi_identity_universe
+            )
+            if not epi_identity_universe.empty
+            else _build_identifier_input(representative)
+        )
         tables["Identifier_Input"] = identifier_input
 
         def identifier_progress(done, total, label):
@@ -671,15 +698,38 @@ def run_auto_query_workflow(
             record("标识符补全", "完成", len(completed_identifiers))
         emit_checkpoint("标识符补全")
 
-    query_input = _query_input_from_identifiers(identifier_input, completed_identifiers)
+    prepared_epi_universe = pd.DataFrame()
+    if not epi_identity_universe.empty:
+        prepared_epi_universe = prepare_universe(
+            epi_identity_universe,
+            completed_identifiers,
+        )
+        query_input = _build_identifier_input_from_epi_universe(
+            prepared_epi_universe
+        )
+    else:
+        query_input = _query_input_from_identifiers(
+            identifier_input,
+            completed_identifiers,
+        )
     compound_universe = build_compound_universe(identifier_input)
 
     run_epi_step = config.run_epi or config.run_pov_lrtp_toxpi
     if run_epi_step:
-        epi_input = query_input.loc[
-            :,
-            ["compound", "smiles", "cas"],
-        ].reset_index(drop=True)
+        if not prepared_epi_universe.empty:
+            epi_input = prepared_epi_universe.loc[
+                :,
+                [
+                    column
+                    for column in prepared_epi_universe.columns
+                    if not column.startswith("_")
+                ],
+            ].reset_index(drop=True)
+        else:
+            epi_input = query_input.loc[
+                :,
+                ["compound", "smiles", "cas"],
+            ].reset_index(drop=True)
         tables["EPI_Input"] = epi_input
         resolution = resolve_epi_sources(
             epi_input,
@@ -1565,6 +1615,18 @@ def _build_identifier_input(representative: pd.DataFrame) -> pd.DataFrame:
     output["dtxsid"] = ""
     output["echa_id"] = ""
     return output[REQUIRED_IDENTIFIER_COLUMNS]
+
+
+def _build_identifier_input_from_epi_universe(
+    epi_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    output = pd.DataFrame(index=epi_universe.index)
+    for column in REQUIRED_IDENTIFIER_COLUMNS:
+        if column in epi_universe.columns:
+            output[column] = epi_universe[column].map(_clean_text)
+        else:
+            output[column] = ""
+    return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
 
 
 def _query_input_from_identifiers(

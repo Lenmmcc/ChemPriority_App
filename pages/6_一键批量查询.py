@@ -69,6 +69,7 @@ from src.upload_state import (
     invalidate_results_on_settings_change,
     settings_signature,
     store_uploads,
+    typed_settings_value,
     upload_bytes,
     upload_name,
     upload_signature,
@@ -187,6 +188,22 @@ def _default_column(columns, candidates):
         if matched is not None:
             return matched
     return None
+
+
+def _epi_supplement_settings_payload(mapping):
+    payload = asdict(mapping)
+    for key in ("compound_col", "smiles_col", "cas_col"):
+        selected = payload.get(key)
+        payload[key] = (
+            typed_settings_value(selected)
+            if selected is not None
+            else None
+        )
+    payload["endpoint_columns"] = {
+        endpoint: typed_settings_value(selected)
+        for endpoint, selected in mapping.endpoint_columns.items()
+    }
+    return payload
 
 
 def _render_sample_mapping_tabs(samples):
@@ -1238,7 +1255,7 @@ result_settings = {
         for sample_id, sample_mapping in sample_mappings.items()
     ],
     "epi_supplements": [
-        asdict(supplement_mapping)
+        _epi_supplement_settings_payload(supplement_mapping)
         for supplement_mapping in supplement_mappings
     ],
     "modules": {

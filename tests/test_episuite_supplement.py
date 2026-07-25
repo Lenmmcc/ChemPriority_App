@@ -1,6 +1,7 @@
 import io
 import inspect
 import unittest
+from datetime import datetime
 
 import pandas as pd
 
@@ -301,6 +302,32 @@ class EPISupplementWorkbookTests(unittest.TestCase):
 
         self.assertEqual(parsed.loc[0, "compound"], "A")
         self.assertEqual(parsed.loc[0, "vapor_pressure_mm_hg"], 0.125)
+
+    def test_datetime_header_mapping_preserves_raw_column_object(self):
+        endpoint_header = datetime(2026, 7, 25, 12, 30, 0)
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            pd.DataFrame(
+                {
+                    "compound": ["A"],
+                    endpoint_header: [0.375],
+                }
+            ).to_excel(writer, sheet_name="Manual Results", index=False)
+
+        parsed, _ = parse_epi_supplement(
+            buffer.getvalue(),
+            EPISupplementMapping(
+                source_file="manual.xlsx",
+                primary_file="A.xlsx",
+                sheet_name="Manual Results",
+                compound_col="compound",
+                endpoint_columns={
+                    "vapor_pressure_mm_hg": endpoint_header,
+                },
+            ),
+        )
+
+        self.assertEqual(parsed.loc[0, "vapor_pressure_mm_hg"], 0.375)
 
     def test_cas_match_wins_and_uploaded_values_are_not_overwritten(self):
         universe = pd.DataFrame(

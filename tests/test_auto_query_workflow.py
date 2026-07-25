@@ -102,6 +102,21 @@ def _app_test_epi_workbook_bytes():
     return buffer.getvalue()
 
 
+def _app_test_epi_datetime_header_workbook_bytes(endpoint_header):
+    buffer = io.BytesIO()
+    pd.DataFrame(
+        {
+            "compound": ["Compound A"],
+            endpoint_header: [0.25],
+        }
+    ).to_excel(
+        buffer,
+        sheet_name="Manual Results",
+        index=False,
+    )
+    return buffer.getvalue()
+
+
 def _app_test_with_cached_workbook():
     upload = {"name": "smoke.xlsx", "bytes": _app_test_workbook_bytes()}
     return _app_test_with_cached_workbooks([(upload["name"], upload["bytes"])])
@@ -279,6 +294,40 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             )
         )
 
+    def test_page_6_signs_datetime_epi_header_mapping_without_losing_raw_header(self):
+        endpoint_header = datetime(2026, 7, 25, 12, 30, 0)
+        app = _app_test_with_cached_workbooks(
+            [("Lake-A.xlsx", _app_test_workbook_bytes("Compound A"))]
+        )
+        supplement = {
+            "name": "Lake-A_EPI.xlsx",
+            "bytes": _app_test_epi_datetime_header_workbook_bytes(
+                endpoint_header
+            ),
+        }
+        app.session_state["auto_query_epi_supplement_files"] = [supplement]
+        app.session_state["auto_query_epi_supplement_signature"] = (
+            upload_signature([supplement])
+        )
+
+        next(
+            box
+            for box in app.checkbox
+            if box.label == "EPI Suite 环境归趋"
+        ).check().run()
+        endpoint_mapping = next(
+            selectbox
+            for selectbox in app.selectbox
+            if selectbox.label == "vapor_pressure_mm_hg"
+        )
+        endpoint_mapping.select(endpoint_header).run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIsInstance(
+            app.session_state["auto_query_settings_signature"],
+            str,
+        )
+
     @patch("src.auto_query_workflow.run_epi_web_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
     def test_workflow_enforces_uploaded_primary_membership_before_epi_merge(
@@ -347,6 +396,209 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn(
             "association_mismatch",
             audit["match_status"].tolist(),
+        )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_workflow_keeps_same_name_epi_identities_separate(
+        self,
+        run_identifier,
+        run_epi,
+    ):
+        self.assertIn(
+            "epi_universe",
+            AutoWorkflowPreparedInput.__dataclass_fields__,
+        )
+        representative = pd.DataFrame(
+            {
+                "Name": ["Shared"],
+                "formula": ["C2H6O"],
+                "Group_Area": [100.0],
+                "SMILES_input": ["CC"],
+                "CAS_input": ["11-11-1"],
+            }
+        )
+        epi_universe = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "identity_status": ["resolved", "resolved"],
+                "identity_candidates": ["[]", "[]"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", "22-22-2"],
+            }
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "identity_status": ["resolved", "resolved"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", "22-22-2"],
+            }
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(),
+            prepared_input=pd.DataFrame(),
+            representative_table=representative,
+            primary_membership=membership,
+            epi_universe=epi_universe,
+        )
+
+        def preserve_identifier_rows(identifier_input, **kwargs):
+            return identifier_input.copy(), pd.DataFrame()
+
+        run_identifier.side_effect = preserve_identifier_rows
+        run_epi.return_value = (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+        uploaded = complete_epi_rows(["Shared"])
+        uploaded["smiles"] = "CCC"
+        uploaded["cas"] = "22-22-2"
+        uploaded["primary_file"] = "B.xlsx"
+
+        result = run_auto_query_workflow(
+            pd.DataFrame(),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_epi=True,
+                cache_enabled=False,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=uploaded,
+        )
+
+        identifier_input = run_identifier.call_args.args[0]
+        self.assertEqual(
+            identifier_input["cas"].tolist(),
+            ["11-11-1", "22-22-2"],
+        )
+        self.assertEqual(
+            result.tables["EPI_Identity_Universe"][
+                "identity_key"
+            ].tolist(),
+            ["cas:11-11-1", "cas:22-22-2"],
+        )
+        self.assertEqual(
+            result.tables["EPI_Primary_Membership"][
+                "identity_key"
+            ].tolist(),
+            ["cas:11-11-1", "cas:22-22-2"],
+        )
+        self.assertEqual(
+            result.tables["EPI_Input"]["identity_key"].tolist(),
+            ["cas:11-11-1", "cas:22-22-2"],
+        )
+        epi_results = result.tables["EPI_Results"].set_index("identity_key")
+        self.assertEqual(len(epi_results), 2)
+        self.assertFalse(
+            bool(epi_results.loc["cas:11-11-1", "_source_matched"])
+        )
+        self.assertTrue(
+            bool(epi_results.loc["cas:22-22-2", "_source_matched"])
+        )
+        self.assertEqual(
+            result.tables["EPI_Retry_Input"]["identity_key"].tolist(),
+            ["cas:11-11-1"],
+        )
+        self.assertEqual(
+            result.tables["EPI_Match_Audit"]["identity_key"].tolist(),
+            ["cas:22-22-2"],
+        )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_workflow_enriches_partial_same_name_identity_without_overwriting_other(
+        self,
+        run_identifier,
+        run_epi,
+    ):
+        representative = pd.DataFrame(
+            {
+                "Name": ["Shared"],
+                "formula": ["C2H6O"],
+                "Group_Area": [100.0],
+                "SMILES_input": ["CC"],
+                "CAS_input": ["11-11-1"],
+            }
+        )
+        epi_universe = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1", "smiles:CCC"],
+                "identity_status": ["resolved", "resolved"],
+                "identity_candidates": ["[]", "[]"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", ""],
+            }
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "identity_key": ["cas:11-11-1", "smiles:CCC"],
+                "identity_status": ["resolved", "resolved"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", ""],
+            }
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(),
+            prepared_input=pd.DataFrame(),
+            representative_table=representative,
+            primary_membership=membership,
+            epi_universe=epi_universe,
+        )
+
+        def complete_partial_identity(identifier_input, **kwargs):
+            completed = identifier_input.copy()
+            completed.loc[completed["smiles"].eq("CCC"), "cas"] = "22-22-2"
+            return completed, pd.DataFrame()
+
+        run_identifier.side_effect = complete_partial_identity
+        run_epi.return_value = (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+        uploaded = complete_epi_rows(["Shared"])
+        uploaded["smiles"] = "CCC"
+        uploaded["cas"] = "22-22-2"
+        uploaded["primary_file"] = "B.xlsx"
+
+        result = run_auto_query_workflow(
+            pd.DataFrame(),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_epi=True,
+                cache_enabled=False,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=uploaded,
+        )
+
+        epi_input = result.tables["EPI_Input"].set_index("identity_key")
+        self.assertEqual(
+            epi_input.loc["cas:11-11-1", "cas"],
+            "11-11-1",
+        )
+        self.assertEqual(
+            epi_input.loc["smiles:CCC", "cas"],
+            "22-22-2",
+        )
+        results = result.tables["EPI_Results"].set_index("identity_key")
+        self.assertFalse(
+            bool(results.loc["cas:11-11-1", "_source_matched"])
+        )
+        self.assertTrue(
+            bool(results.loc["smiles:CCC", "_source_matched"])
+        )
+        self.assertEqual(
+            result.tables["EPI_Match_Audit"]["identity_key"].tolist(),
+            ["smiles:CCC"],
         )
 
     def test_page_6_accepts_multiple_primary_files_and_keeps_both_in_settings(self):

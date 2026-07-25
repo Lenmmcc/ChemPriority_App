@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import pandas as pd
@@ -13,6 +14,164 @@ from src.r_screening_replica.schema import ScreeningAxisRanges
 
 
 class MultiFileScreeningTests(unittest.TestCase):
+    def _primary_epi_identity_tables(self, rows):
+        sample = PrimaryWorkbook(
+            file_name="A.xlsx",
+            sample_id="A",
+            data=pd.DataFrame(
+                rows,
+                columns=["Name", "Formula", "Area", "SMILES", "CAS"],
+            ),
+        )
+        mappings = {
+            "A": SampleColumnMapping(
+                compound_col="Name",
+                formula_col="Formula",
+                peak_area_col="Area",
+                group_area_cols=("Area",),
+                smiles_col="SMILES",
+                cas_col="CAS",
+            )
+        }
+        return (
+            multi_file_screening.build_primary_epi_membership(
+                [sample],
+                mappings,
+            ),
+            multi_file_screening.build_primary_epi_universe(
+                [sample],
+                mappings,
+            ),
+        )
+
+    def test_primary_epi_identity_merges_partial_row_into_unique_cas_smiles_group(self):
+        self.assertIn(
+            "epi_universe",
+            multi_file_screening.MultiFileScreeningResult.__dataclass_fields__,
+        )
+        rows = [
+            ("Resolved", "C2H6O", 10.0, "CCO", "64-17-5"),
+            ("Partial", "C2H6O", 9.0, "CCO", ""),
+        ]
+
+        membership, universe = self._primary_epi_identity_tables(rows)
+        reversed_membership, reversed_universe = (
+            self._primary_epi_identity_tables(list(reversed(rows)))
+        )
+
+        self.assertEqual(len(universe), 1)
+        self.assertEqual(universe.loc[0, "compound"], "Resolved")
+        self.assertEqual(universe.loc[0, "smiles"], "CCO")
+        self.assertEqual(universe.loc[0, "cas"], "64-17-5")
+        self.assertEqual(membership["identity_key"].nunique(), 1)
+        self.assertEqual(
+            universe.loc[0, "identity_key"],
+            reversed_universe.loc[0, "identity_key"],
+        )
+        self.assertEqual(
+            set(membership["identity_key"]),
+            set(reversed_membership["identity_key"]),
+        )
+        self.assertEqual(
+            json.loads(universe.loc[0, "primary_files"]),
+            ["A.xlsx"],
+        )
+        self.assertEqual(len(json.loads(universe.loc[0, "source_refs"])), 2)
+
+    def test_primary_epi_identity_keeps_conflicting_cas_for_one_smiles_separate(self):
+        membership, universe = self._primary_epi_identity_tables(
+            [
+                ("Shared", "C2H6O", 10.0, "CCO", "64-17-5"),
+                ("Shared", "C2H6O", 9.0, "CCO", "75-07-0"),
+                ("Shared", "C2H6O", 8.0, "CCO", ""),
+            ]
+        )
+
+        self.assertEqual(len(universe), 3)
+        self.assertEqual(
+            set(universe["cas"]),
+            {"64-17-5", "75-07-0", ""},
+        )
+        ambiguous = universe.loc[universe["cas"].eq("")].iloc[0]
+        self.assertEqual(ambiguous["identity_status"], "ambiguous_smiles")
+        self.assertEqual(
+            set(json.loads(ambiguous["identity_candidates"])),
+            {
+                "cas:64-17-5",
+                "cas:75-07-0",
+            },
+        )
+        partial = membership.loc[membership["cas"].eq("")].iloc[0]
+        self.assertEqual(partial["identity_status"], "ambiguous_smiles")
+        conflicting_cas = universe.loc[universe["cas"].ne("")]
+        self.assertTrue(
+            conflicting_cas["identity_status"]
+            .eq("conflicting_smiles")
+            .all()
+        )
+        self.assertTrue(
+            all(
+                set(json.loads(candidates))
+                == {"cas:64-17-5", "cas:75-07-0"}
+                for candidates in conflicting_cas[
+                    "identity_candidates"
+                ]
+            )
+        )
+
+    def test_primary_epi_identity_keeps_same_name_distinct_cas_separate(self):
+        _, universe = self._primary_epi_identity_tables(
+            [
+                ("Shared", "C2H6O", 10.0, "CCO", "64-17-5"),
+                ("Shared", "C3H8O", 9.0, "CCCO", "71-23-8"),
+            ]
+        )
+
+        self.assertEqual(len(universe), 2)
+        self.assertEqual(
+            set(universe["identity_key"]),
+            {"cas:64-17-5", "cas:71-23-8"},
+        )
+
+    def test_primary_epi_name_only_row_merges_only_with_unique_strong_identity(self):
+        unique_membership, unique_universe = (
+            self._primary_epi_identity_tables(
+                [
+                    ("Unique", "C2H6O", 10.0, "CCO", "64-17-5"),
+                    ("Unique", "C2H6O", 9.0, "", ""),
+                ]
+            )
+        )
+        ambiguous_membership, ambiguous_universe = (
+            self._primary_epi_identity_tables(
+                [
+                    ("Shared", "C2H6O", 10.0, "CCO", "64-17-5"),
+                    ("Shared", "C3H8O", 9.0, "CCCO", "71-23-8"),
+                    ("Shared", "", 8.0, "", ""),
+                ]
+            )
+        )
+
+        self.assertEqual(len(unique_universe), 1)
+        self.assertEqual(unique_membership["identity_key"].nunique(), 1)
+        self.assertEqual(len(ambiguous_universe), 3)
+        ambiguous = ambiguous_universe.loc[
+            ambiguous_universe["cas"].eq("")
+            & ambiguous_universe["smiles"].eq("")
+        ].iloc[0]
+        self.assertEqual(ambiguous["identity_status"], "ambiguous_name")
+        self.assertEqual(
+            set(json.loads(ambiguous["identity_candidates"])),
+            {"cas:64-17-5", "cas:71-23-8"},
+        )
+        self.assertEqual(
+            ambiguous_membership.loc[
+                ambiguous_membership["cas"].eq(""),
+                "identity_key",
+            ].iloc[0],
+            ambiguous["identity_key"],
+        )
+
     def test_primary_epi_universe_uses_hierarchical_identity_without_name_dedup(self):
         self.assertTrue(
             hasattr(multi_file_screening, "build_primary_epi_universe")

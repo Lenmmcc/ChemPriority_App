@@ -32,6 +32,33 @@ class FakeUpload:
 
 
 class UploadStateTests(unittest.TestCase):
+    def test_typed_settings_value_serializes_datetime_without_string_collision(self):
+        self.assertTrue(
+            hasattr(upload_state, "typed_settings_value")
+        )
+        encoder = upload_state.typed_settings_value
+        header = datetime(2026, 7, 25, 12, 30, 0)
+
+        encoded_datetime = encoder(header)
+        encoded_string = encoder(header.isoformat())
+
+        self.assertNotEqual(encoded_datetime, encoded_string)
+        self.assertEqual(
+            encoded_datetime,
+            {
+                "value_type": "datetime.datetime",
+                "value_text": "2026-07-25T12:30:00",
+            },
+        )
+        self.assertEqual(
+            upload_state.settings_signature(
+                {"endpoint_column": encoded_datetime}
+            ),
+            upload_state.settings_signature(
+                {"endpoint_column": encoder(header)}
+            ),
+        )
+
     def test_store_uploads_restores_multiple_files_without_streamlit_objects(self):
         state = {}
 

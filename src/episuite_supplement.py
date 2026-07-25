@@ -292,6 +292,7 @@ def match_sources(
         "compound",
         "smiles",
         "cas",
+        "identity_key",
         "association_status",
         "association_match_method",
         "match_method",
@@ -302,6 +303,10 @@ def match_sources(
         return pd.DataFrame(), pd.DataFrame(columns=audit_columns)
 
     indexes = _universe_indexes(universe)
+    identity_by_compound_key = {
+        row["_compound_key"]: clean_text(row.get("identity_key"))
+        for _, row in universe.iterrows()
+    }
     membership_by_primary = {}
     if (
         isinstance(primary_membership, pd.DataFrame)
@@ -321,6 +326,7 @@ def match_sources(
     audit_rows = []
     for _, source_row in sources.iterrows():
         method, status, compound_key = _match_row(source_row, indexes)
+        globally_matched_key = compound_key
         primary_file = clean_text(source_row.get("primary_file"))
         association_status = "not_applicable"
         association_method = ""
@@ -362,6 +368,10 @@ def match_sources(
                 "compound": source_row.get("compound", ""),
                 "smiles": source_row.get("smiles", ""),
                 "cas": source_row.get("cas", ""),
+                "identity_key": identity_by_compound_key.get(
+                    globally_matched_key,
+                    "",
+                ),
                 "association_status": association_status,
                 "association_match_method": association_method,
                 "match_method": method,
@@ -486,6 +496,10 @@ def classify_completeness(
     completeness = pd.DataFrame(
         {
             "_compound_key": working["_compound_key"],
+            "identity_key": working.get(
+                "identity_key",
+                pd.Series("", index=working.index, dtype="string"),
+            ),
             "compound": working["compound"],
             "source_matched": source_matched,
             "normalized_status": normalized_status,
@@ -885,9 +899,21 @@ def _query_input(
     query_keys = set(
         completeness.loc[completeness["needs_query"], "_compound_key"]
     )
+    columns = [
+        column
+        for column in (
+            "identity_key",
+            "identity_status",
+            "identity_candidates",
+            "compound",
+            "smiles",
+            "cas",
+        )
+        if column in universe.columns
+    ]
     return universe.loc[
         universe["_compound_key"].isin(query_keys),
-        ["compound", "smiles", "cas"],
+        columns,
     ].reset_index(drop=True)
 
 

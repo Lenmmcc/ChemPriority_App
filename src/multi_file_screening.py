@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +69,7 @@ class MultiFileScreeningResult:
     df_detection_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     selected_peak_cols: list[str] = field(default_factory=list)
     primary_membership: pd.DataFrame = field(default_factory=pd.DataFrame)
+    epi_universe: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def read_primary_workbooks(records) -> list[PrimaryWorkbook]:
@@ -152,7 +154,7 @@ def build_upload_structure_preparation_preview(
     )
 
 
-def build_primary_epi_membership(
+def _build_primary_epi_membership_rows(
     samples: list[PrimaryWorkbook],
     mappings: Mapping[str, SampleColumnMapping],
 ) -> pd.DataFrame:
@@ -206,31 +208,250 @@ def build_primary_epi_membership(
     )
 
 
+def build_primary_epi_identity_tables(
+    samples: list[PrimaryWorkbook],
+    mappings: Mapping[str, SampleColumnMapping],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    membership = _build_primary_epi_membership_rows(samples, mappings)
+    if membership.empty:
+        annotated = membership.assign(
+            identity_key=pd.Series(dtype=str),
+            identity_status=pd.Series(dtype=str),
+            identity_candidates=pd.Series(dtype=str),
+        )
+        universe = pd.DataFrame(
+            columns=[
+                "identity_key",
+                "identity_status",
+                "identity_candidates",
+                "compound",
+                "smiles",
+                "cas",
+                "primary_files",
+                "source_refs",
+            ]
+        )
+        return annotated, universe
+
+    working = membership.copy().reset_index(drop=True)
+    working["_cas_norm"] = working["cas"].map(
+        lambda value: _clean_text(value).replace(" ", "")
+    )
+    working["_smiles_norm"] = working["smiles"].map(_clean_text)
+    working["_name_norm"] = working["compound"].map(
+        lambda value: " ".join(_clean_text(value).casefold().split())
+    )
+
+    assignments = {}
+    group_status = {}
+    group_candidates = {}
+
+    for cas in sorted(
+        value for value in working["_cas_norm"].unique() if value
+    ):
+        identity_key = f"cas:{cas}"
+        positions = working.index[working["_cas_norm"].eq(cas)].tolist()
+        for position in positions:
+            assignments[position] = identity_key
+        group_status[identity_key] = "resolved"
+        group_candidates[identity_key] = []
+
+    for smiles in sorted(
+        value
+        for value in working.loc[
+            working["_cas_norm"].ne(""),
+            "_smiles_norm",
+        ].unique()
+        if value
+    ):
+        cas_candidates = sorted(
+            {
+                f"cas:{cas}"
+                for cas in working.loc[
+                    working["_smiles_norm"].eq(smiles)
+                    & working["_cas_norm"].ne(""),
+                    "_cas_norm",
+                ]
+            }
+        )
+        if len(cas_candidates) <= 1:
+            continue
+        for identity_key in cas_candidates:
+            group_status[identity_key] = "conflicting_smiles"
+            group_candidates[identity_key] = cas_candidates
+
+    for smiles in sorted(
+        value
+        for value in working.loc[
+            working["_cas_norm"].eq(""),
+            "_smiles_norm",
+        ].unique()
+        if value
+    ):
+        positions = working.index[
+            working["_cas_norm"].eq("")
+            & working["_smiles_norm"].eq(smiles)
+        ].tolist()
+        cas_candidates = sorted(
+            {
+                f"cas:{cas}"
+                for cas in working.loc[
+                    working["_smiles_norm"].eq(smiles)
+                    & working["_cas_norm"].ne(""),
+                    "_cas_norm",
+                ]
+            }
+        )
+        if len(cas_candidates) == 1:
+            identity_key = cas_candidates[0]
+        elif len(cas_candidates) > 1:
+            identity_key = f"smiles:{smiles}:ambiguous"
+            group_status[identity_key] = "ambiguous_smiles"
+            group_candidates[identity_key] = cas_candidates
+        else:
+            identity_key = f"smiles:{smiles}"
+        for position in positions:
+            assignments[position] = identity_key
+        group_status.setdefault(identity_key, "resolved")
+        group_candidates.setdefault(identity_key, [])
+
+    strong_name_candidates = {}
+    for position, identity_key in assignments.items():
+        name = working.at[position, "_name_norm"]
+        if name:
+            strong_name_candidates.setdefault(name, set()).add(identity_key)
+
+    for name in sorted(
+        value
+        for value in working.loc[
+            working["_cas_norm"].eq("")
+            & working["_smiles_norm"].eq(""),
+            "_name_norm",
+        ].unique()
+        if value
+    ):
+        positions = working.index[
+            working["_cas_norm"].eq("")
+            & working["_smiles_norm"].eq("")
+            & working["_name_norm"].eq(name)
+        ].tolist()
+        candidates = sorted(strong_name_candidates.get(name, ()))
+        if len(candidates) == 1:
+            identity_key = candidates[0]
+        elif len(candidates) > 1:
+            identity_key = f"name:{name}:ambiguous"
+            group_status[identity_key] = "ambiguous_name"
+            group_candidates[identity_key] = candidates
+        else:
+            identity_key = f"name:{name}"
+        for position in positions:
+            assignments[position] = identity_key
+        group_status.setdefault(identity_key, "resolved")
+        group_candidates.setdefault(identity_key, [])
+
+    annotated = membership.copy().reset_index(drop=True)
+    annotated["identity_key"] = [
+        assignments[position] for position in annotated.index
+    ]
+    annotated["identity_status"] = annotated["identity_key"].map(
+        group_status
+    )
+    annotated["identity_candidates"] = annotated["identity_key"].map(
+        lambda key: _json_audit(group_candidates.get(key, ()))
+    )
+
+    universe_rows = []
+    for identity_key in sorted(set(assignments.values())):
+        positions = sorted(
+            position
+            for position, candidate in assignments.items()
+            if candidate == identity_key
+        )
+        rows = working.loc[positions]
+        source_refs = sorted(
+            [
+                {
+                    "primary_file": _clean_text(row.get("primary_file")),
+                    "sample_id": _clean_text(row.get("sample_id")),
+                    "source_row": int(row.get("source_row")),
+                }
+                for _, row in rows.iterrows()
+            ],
+            key=lambda item: (
+                item["primary_file"].casefold(),
+                item["sample_id"].casefold(),
+                item["source_row"],
+            ),
+        )
+        universe_rows.append(
+            {
+                "identity_key": identity_key,
+                "identity_status": group_status[identity_key],
+                "identity_candidates": _json_audit(
+                    group_candidates.get(identity_key, ())
+                ),
+                "compound": _coalesced_identity_value(
+                    rows,
+                    "compound",
+                ),
+                "smiles": _coalesced_identity_value(rows, "smiles"),
+                "cas": _coalesced_identity_value(rows, "cas"),
+                "primary_files": _json_audit(
+                    sorted(
+                        {
+                            _clean_text(value)
+                            for value in rows["primary_file"]
+                            if _clean_text(value)
+                        },
+                        key=str.casefold,
+                    )
+                ),
+                "source_refs": _json_audit(source_refs),
+            }
+        )
+    universe = pd.DataFrame(universe_rows)
+    return annotated, universe
+
+
+def build_primary_epi_membership(
+    samples: list[PrimaryWorkbook],
+    mappings: Mapping[str, SampleColumnMapping],
+) -> pd.DataFrame:
+    membership, _ = build_primary_epi_identity_tables(samples, mappings)
+    return membership
+
+
 def build_primary_epi_universe(
     samples: list[PrimaryWorkbook],
     mappings: Mapping[str, SampleColumnMapping],
 ) -> pd.DataFrame:
-    membership = build_primary_epi_membership(samples, mappings)
-    if membership.empty:
-        return pd.DataFrame(columns=["compound", "smiles", "cas"])
-    identity_keys = []
-    for _, row in membership.iterrows():
-        cas = _clean_text(row.get("cas")).replace(" ", "")
-        smiles = _clean_text(row.get("smiles"))
-        compound = " ".join(
-            _clean_text(row.get("compound")).casefold().split()
+    _, universe = build_primary_epi_identity_tables(samples, mappings)
+    return universe
+
+
+def _coalesced_identity_value(rows: pd.DataFrame, column: str) -> str:
+    candidates = []
+    for _, row in rows.iterrows():
+        value = _clean_text(row.get(column))
+        if not value:
+            continue
+        candidates.append(
+            (
+                0 if _clean_text(row.get("cas")) else 1,
+                0 if _clean_text(row.get("smiles")) else 1,
+                value.casefold(),
+                value,
+            )
         )
-        if cas:
-            identity_keys.append(f"cas:{cas}")
-        elif smiles:
-            identity_keys.append(f"smiles:{smiles}")
-        else:
-            identity_keys.append(f"compound:{compound}")
-    universe = membership.assign(_identity_key=identity_keys)
-    return (
-        universe.loc[~universe["_identity_key"].duplicated()]
-        [["compound", "smiles", "cas"]]
-        .reset_index(drop=True)
+    return min(candidates)[-1] if candidates else ""
+
+
+def _json_audit(value) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -554,6 +775,10 @@ def prepare_multi_file_screening(
             "category_summary",
         ),
     }
+    primary_membership, epi_universe = build_primary_epi_identity_tables(
+        samples,
+        mappings,
+    )
 
     return MultiFileScreeningResult(
         normalized_samples=normalized_samples,
@@ -580,10 +805,8 @@ def prepare_multi_file_screening(
         structure_preparation_summary=structure_summaries,
         df_detection_table=df_detection_table,
         selected_peak_cols=selected_peak_cols,
-        primary_membership=build_primary_epi_membership(
-            samples,
-            mappings,
-        ),
+        primary_membership=primary_membership,
+        epi_universe=epi_universe,
     )
 
 
