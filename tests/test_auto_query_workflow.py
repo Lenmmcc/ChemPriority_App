@@ -74,14 +74,19 @@ M  END
 """
 
 
-def _app_test_workbook_bytes():
+def _app_test_workbook_bytes(compound=None):
     buffer = io.BytesIO()
+    compounds = (
+        [compound]
+        if compound is not None
+        else ["Compound A", "Compound B"]
+    )
     pd.DataFrame(
         {
-            "Name": ["Compound A", "Compound B"],
-            "NIST Lib Hit Formula": ["C2H6O", "C3H8O"],
-            "Avg TIC": [10.0, 20.0],
-            "Group Area 1": [1.0, 2.0],
+            "Name": compounds,
+            "NIST Lib Hit Formula": ["C2H6O", "C3H8O"][: len(compounds)],
+            "Avg TIC": [10.0, 20.0][: len(compounds)],
+            "Group Area 1": [1.0, 2.0][: len(compounds)],
         }
     ).to_excel(buffer, index=False)
     return buffer.getvalue()
@@ -89,9 +94,17 @@ def _app_test_workbook_bytes():
 
 def _app_test_with_cached_workbook():
     upload = {"name": "smoke.xlsx", "bytes": _app_test_workbook_bytes()}
+    return _app_test_with_cached_workbooks([(upload["name"], upload["bytes"])])
+
+
+def _app_test_with_cached_workbooks(workbooks):
+    uploads = [
+        {"name": file_name, "bytes": content_bytes}
+        for file_name, content_bytes in workbooks
+    ]
     app = AppTest.from_file("pages/6_一键批量查询.py", default_timeout=20)
-    app.session_state["auto_query_input_files"] = [upload]
-    app.session_state["auto_query_input_signature"] = upload_signature([upload])
+    app.session_state["auto_query_input_files"] = uploads
+    app.session_state["auto_query_input_signature"] = upload_signature(uploads)
     return app.run(timeout=20)
 
 
@@ -153,6 +166,66 @@ def _isolated_page_checkpoint_storage(root):
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_page_6_accepts_multiple_primary_files_and_keeps_both_in_settings(self):
+        app = _app_test_with_cached_workbooks(
+            [
+                ("Lake-A.xlsx", _app_test_workbook_bytes("Compound A")),
+                ("Lake-B.xlsx", _app_test_workbook_bytes("Compound B")),
+            ]
+        )
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn(
+            "Lake-A.xlsx",
+            app.session_state["auto_query_primary_file_names"],
+        )
+        self.assertIn(
+            "Lake-B.xlsx",
+            app.session_state["auto_query_primary_file_names"],
+        )
+
+    def test_page_6_blocks_duplicate_primary_filenames(self):
+        app = _app_test_with_cached_workbooks(
+            [
+                ("Lake-A.xlsx", _app_test_workbook_bytes("Compound A")),
+                ("Lake-A.xlsx", _app_test_workbook_bytes("Compound B")),
+            ]
+        )
+
+        self.assertTrue(
+            any("文件名重复" in message.value for message in app.error)
+        )
+
+    def test_page_6_blocks_duplicate_casefolded_sample_stems(self):
+        app = _app_test_with_cached_workbooks(
+            [
+                ("Lake-A.xlsx", _app_test_workbook_bytes("Compound A")),
+                ("lake-a.xls", _app_test_workbook_bytes("Compound B")),
+            ]
+        )
+
+        self.assertTrue(
+            any("样品名称重复" in message.value for message in app.error)
+        )
+
+    def test_page_6_shows_epi_supplement_controls_when_pov_is_selected(self):
+        app = _app_test_with_cached_workbooks(
+            [("Lake-A.xlsx", _app_test_workbook_bytes("Compound A"))]
+        )
+
+        next(
+            box
+            for box in app.checkbox
+            if box.label == "Pov-LRTP / PBM / ToxPi"
+        ).check().run()
+
+        self.assertTrue(
+            any(
+                uploader.label == "上传 EPI 补充 Excel"
+                for uploader in app.get("file_uploader")
+            )
+        )
+
     @patch("src.auto_query_workflow.run_epi_web_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
     def test_complete_epi_seed_skips_network(

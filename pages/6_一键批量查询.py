@@ -1,7 +1,8 @@
 import io
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -14,14 +15,12 @@ from src.auto_query_workflow import (
     AutoWorkflowMapping,
     AutoWorkflowResult,
     PUBLIC_TABLE_NAMES,
+    auto_input_from_multi_file_result,
     build_auto_workflow_charts,
     build_auto_workflow_module_download,
     build_auto_workflow_module_workbook,
     build_auto_workflow_partial_zip,
     build_auto_workflow_zip,
-    build_representative_table,
-    detect_default_mapping,
-    read_input_workbook,
     run_auto_query_workflow,
 )
 from src.auto_query_checkpoint import (
@@ -34,7 +33,23 @@ from src.auto_query_checkpoint import (
     save_checkpoint,
 )
 from src.cp_screening_workflow import PBMToxPiConfig
+from src.episuite_io import ENDPOINT_KEYS
+from src.episuite_result_pool import read_epi_pool
+from src.episuite_supplement import (
+    EPISupplementMapping,
+    inspect_epi_workbook,
+    parse_epi_supplement,
+    resolve_epi_sources,
+    suggest_primary_filename,
+)
 from src.image_safety import is_png_over_pixel_limit, png_dimensions
+from src.multi_file_screening import (
+    SampleColumnMapping,
+    build_upload_structure_preparation_preview,
+    default_sample_mapping,
+    prepare_multi_file_screening,
+    read_primary_workbooks,
+)
 from src.query_cache import clear_query_cache, current_cache_path
 from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
 from src.r_screening_replica.schema import ScreeningAxisRanges
@@ -53,6 +68,8 @@ from src.upload_state import (
     settings_signature,
     store_uploads,
     upload_bytes,
+    upload_name,
+    upload_signature,
 )
 
 
@@ -62,6 +79,10 @@ MAX_CHART_PIXELS = 50_000_000
 INPUT_CACHE_KEYS = (
     "auto_query_input_files",
     "auto_query_input_signature",
+)
+EPI_SUPPLEMENT_CACHE_KEYS = (
+    "auto_query_epi_supplement_files",
+    "auto_query_epi_supplement_signature",
 )
 RESULT_CACHE_KEYS = (
     "auto_query_workflow_result",
@@ -87,10 +108,16 @@ def clear_auto_query_state():
             pass
     clear_uploads(
         st.session_state,
-        (*INPUT_CACHE_KEYS, *RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+        (
+            *INPUT_CACHE_KEYS,
+            *EPI_SUPPLEMENT_CACHE_KEYS,
+            *RESULT_CACHE_KEYS,
+            *CHECKPOINT_STATE_KEYS,
+        ),
     )
     st.session_state.pop(SETTINGS_SIGNATURE_KEY, None)
     st.session_state.pop("auto_query_upload", None)
+    st.session_state.pop("auto_query_epi_supplements", None)
     st.query_params.pop("run", None)
 
 
@@ -111,6 +138,353 @@ def _column_index(columns, value):
 def _optional_column_index(columns, value):
     options = ["", *columns]
     return options.index(value) if value in options else 0
+
+
+def _widget_key(prefix, file_name, index):
+    digest = settings_signature([prefix, file_name, index])[:12]
+    return f"{prefix}_{digest}"
+
+
+def _default_column(columns, candidates):
+    casefolded = {str(column).casefold(): column for column in columns}
+    for candidate in candidates:
+        matched = casefolded.get(str(candidate).casefold())
+        if matched is not None:
+            return matched
+    return None
+
+
+def _render_sample_mapping_tabs(samples):
+    sample_mappings = {}
+    mapping_tabs = st.tabs([sample.sample_id for sample in samples])
+    for index, (tab, sample) in enumerate(zip(mapping_tabs, samples)):
+        with tab:
+            columns = list(sample.data.columns)
+            defaults = default_sample_mapping(sample)
+            st.caption(
+                f"{sample.file_name} | {len(sample.data)} 行 | {len(columns)} 列"
+            )
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                compound_col = st.selectbox(
+                    "化合物名称列",
+                    columns,
+                    index=_column_index(columns, defaults.compound_col),
+                    key=_widget_key(
+                        "auto_compound_col",
+                        sample.file_name,
+                        index,
+                    ),
+                )
+            with col_b:
+                formula_col = st.selectbox(
+                    "分子式列",
+                    columns,
+                    index=_column_index(columns, defaults.formula_col),
+                    key=_widget_key(
+                        "auto_formula_col",
+                        sample.file_name,
+                        index,
+                    ),
+                )
+            with col_c:
+                peak_area_col = st.selectbox(
+                    "默认峰面积列",
+                    columns,
+                    index=_column_index(columns, defaults.peak_area_col),
+                    key=_widget_key(
+                        "auto_peak_area_col",
+                        sample.file_name,
+                        index,
+                    ),
+                )
+
+            group_area_cols = st.multiselect(
+                "参与化学类型图、DBE图、VK图、DF 和 ToxPi 的 Group Area 列",
+                columns,
+                default=[
+                    column
+                    for column in defaults.group_area_cols
+                    if column in columns
+                ],
+                key=_widget_key(
+                    "auto_group_area_cols",
+                    sample.file_name,
+                    index,
+                ),
+            )
+            optional_columns = ["", *columns]
+            opt_a, opt_b, opt_c = st.columns(3)
+            with opt_a:
+                mol_column = st.selectbox(
+                    "可选：MOL 文本列",
+                    optional_columns,
+                    index=_optional_column_index(
+                        columns,
+                        defaults.mol_column,
+                    ),
+                    key=_widget_key(
+                        "auto_mol_col",
+                        sample.file_name,
+                        index,
+                    ),
+                ) or None
+            with opt_b:
+                smiles_col = st.selectbox(
+                    "可选：已有 SMILES 列",
+                    optional_columns,
+                    index=_optional_column_index(
+                        columns,
+                        defaults.smiles_col,
+                    ),
+                    key=_widget_key(
+                        "auto_smiles_col",
+                        sample.file_name,
+                        index,
+                    ),
+                ) or None
+            with opt_c:
+                cas_col = st.selectbox(
+                    "可选：已有 CAS 列",
+                    optional_columns,
+                    index=_optional_column_index(columns, defaults.cas_col),
+                    key=_widget_key(
+                        "auto_cas_col",
+                        sample.file_name,
+                        index,
+                    ),
+                ) or None
+
+            sample_mappings[sample.sample_id] = SampleColumnMapping(
+                compound_col=compound_col,
+                formula_col=formula_col,
+                peak_area_col=peak_area_col,
+                group_area_cols=tuple(group_area_cols),
+                mol_column=mol_column,
+                smiles_col=smiles_col,
+                cas_col=cas_col,
+            )
+    return sample_mappings
+
+
+def _primary_epi_universe(samples, sample_mappings):
+    frames = []
+    for sample in samples:
+        mapping = sample_mappings[sample.sample_id]
+        prepared = prepare_structure_dataframe(
+            sample.data,
+            mol_column=mapping.mol_column,
+            smiles_column=mapping.smiles_col,
+        )
+        frame = pd.DataFrame(
+            {
+                "compound": sample.data[mapping.compound_col],
+                "smiles": prepared["smiles"],
+                "cas": (
+                    sample.data[mapping.cas_col]
+                    if mapping.cas_col
+                    else ""
+                ),
+            }
+        )
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["compound", "smiles", "cas"])
+    universe = pd.concat(frames, ignore_index=True)
+    compound_keys = (
+        universe["compound"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+    )
+    return universe.loc[
+        compound_keys.ne("") & ~compound_keys.duplicated()
+    ].reset_index(drop=True)
+
+
+def _render_epi_supplement_mappings(
+    active_supplements,
+    primary_names,
+):
+    mappings = []
+    parsed_frames = []
+    warnings = []
+    for index, record in enumerate(active_supplements):
+        source_file = upload_name(record)
+        payload = upload_bytes(record)
+        try:
+            inspection = inspect_epi_workbook(payload, source_file)
+        except Exception as exc:
+            st.error(f"{source_file} 读取失败：{exc}")
+            continue
+        if not inspection.sheet_names:
+            st.error(f"{source_file} 不包含可读取的工作表。")
+            continue
+
+        with st.expander(source_file, expanded=True):
+            suggested = suggest_primary_filename(source_file, primary_names)
+            primary_options = ["", *primary_names]
+            selected_primary = st.selectbox(
+                "关联主 Excel 文件",
+                primary_options,
+                index=(
+                    primary_options.index(suggested)
+                    if suggested in primary_options
+                    else 0
+                ),
+                help=(
+                    "系统只根据补充文件名建议关联；不会根据化学物重合自动选择。"
+                    "请确认或手动修正。"
+                ),
+                key=_widget_key("auto_epi_primary", source_file, index),
+            )
+            default_sheet = (
+                inspection.default_result_sheet
+                or inspection.sheet_names[0]
+            )
+            selected_sheet = st.selectbox(
+                "EPI 结果工作表",
+                list(inspection.sheet_names),
+                index=list(inspection.sheet_names).index(default_sheet),
+                key=_widget_key("auto_epi_sheet", source_file, index),
+            )
+            try:
+                sheet_frame = pd.read_excel(
+                    io.BytesIO(payload),
+                    sheet_name=selected_sheet,
+                )
+            except Exception as exc:
+                st.error(f"{source_file} / {selected_sheet} 读取失败：{exc}")
+                continue
+            columns = [str(column).strip() for column in sheet_frame.columns]
+            optional_columns = ["", *columns]
+            id_a, id_b, id_c = st.columns(3)
+            identifier_defaults = {
+                "compound": _default_column(
+                    columns,
+                    ("compound", "Name", "Chemical name"),
+                ),
+                "smiles": _default_column(
+                    columns,
+                    ("smiles", "SMILES", "canonical_smiles"),
+                ),
+                "cas": _default_column(
+                    columns,
+                    ("cas", "CAS", "CASRN", "CAS No."),
+                ),
+            }
+            with id_a:
+                compound_col = st.selectbox(
+                    "化合物名称标识列",
+                    optional_columns,
+                    index=_optional_column_index(
+                        columns,
+                        identifier_defaults["compound"],
+                    ),
+                    key=_widget_key(
+                        "auto_epi_compound",
+                        source_file,
+                        index,
+                    ),
+                ) or None
+            with id_b:
+                smiles_col = st.selectbox(
+                    "SMILES 标识列",
+                    optional_columns,
+                    index=_optional_column_index(
+                        columns,
+                        identifier_defaults["smiles"],
+                    ),
+                    key=_widget_key(
+                        "auto_epi_smiles",
+                        source_file,
+                        index,
+                    ),
+                ) or None
+            with id_c:
+                cas_col = st.selectbox(
+                    "CAS 标识列",
+                    optional_columns,
+                    index=_optional_column_index(
+                        columns,
+                        identifier_defaults["cas"],
+                    ),
+                    key=_widget_key(
+                        "auto_epi_cas",
+                        source_file,
+                        index,
+                    ),
+                ) or None
+
+            priority = st.number_input(
+                "来源优先级（数字越小越优先）",
+                min_value=0,
+                value=index,
+                step=1,
+                key=_widget_key("auto_epi_priority", source_file, index),
+            )
+            endpoint_columns = {}
+            with st.expander("EPI 终点列映射", expanded=False):
+                endpoint_groups = st.columns(2)
+                for endpoint_index, endpoint in enumerate(ENDPOINT_KEYS):
+                    default_endpoint = _default_column(columns, (endpoint,))
+                    with endpoint_groups[endpoint_index % 2]:
+                        selected = st.selectbox(
+                            endpoint,
+                            optional_columns,
+                            index=_optional_column_index(
+                                columns,
+                                default_endpoint,
+                            ),
+                            key=_widget_key(
+                                f"auto_epi_endpoint_{endpoint}",
+                                source_file,
+                                index,
+                            ),
+                        )
+                    if selected:
+                        endpoint_columns[endpoint] = selected
+
+            mapping = EPISupplementMapping(
+                source_file=source_file,
+                primary_file=selected_primary,
+                sheet_name=selected_sheet,
+                compound_col=compound_col,
+                smiles_col=smiles_col,
+                cas_col=cas_col,
+                endpoint_columns=endpoint_columns,
+                priority=int(priority),
+            )
+            mappings.append(mapping)
+            if not selected_primary:
+                st.warning("请选择此补充文件对应的主 Excel 文件。")
+                continue
+            try:
+                parsed, parse_warnings = parse_epi_supplement(payload, mapping)
+            except Exception as exc:
+                st.error(
+                    f"{source_file} / {selected_sheet} 解析失败：{exc}"
+                )
+                continue
+            parsed_frames.append(parsed)
+            if not parse_warnings.empty:
+                warning_table = parse_warnings.copy()
+                warning_table.insert(0, "source_file", source_file)
+                warnings.append(warning_table)
+    return (
+        mappings,
+        (
+            pd.concat(parsed_frames, ignore_index=True)
+            if parsed_frames
+            else pd.DataFrame()
+        ),
+        (
+            pd.concat(warnings, ignore_index=True)
+            if warnings
+            else pd.DataFrame()
+        ),
+    )
 
 
 def _show_dataframe(frame):
@@ -470,20 +844,23 @@ if recovery_token and st.session_state.get("auto_query_run_token") != recovery_t
                 st.caption(f"上次错误：{checkpoint.error_message}")
 
 
-uploaded_file = st.file_uploader(
-    "上传统一格式 Excel 文件",
+uploaded_files = st.file_uploader(
+    "上传一个或多个 Excel 文件",
     type=["xlsx", "xls"],
-    accept_multiple_files=False,
-    help="当前按 Sheet1 / 第一个工作表读取，默认识别 Name、NIST Lib Hit Formula、Avg TIC 和 Group Area 列。",
+    accept_multiple_files=True,
+    help=(
+        "每个文件按第一个工作表读取，并分别设置列映射；"
+        "文件名 stem 作为 sample_id。"
+    ),
     key="auto_query_upload",
 )
 
-if uploaded_file is not None:
+if uploaded_files:
     active_uploads, input_changed = store_uploads(
         st.session_state,
         "auto_query_input_files",
         "auto_query_input_signature",
-        [uploaded_file],
+        uploaded_files,
     )
     if input_changed:
         clear_uploads(
@@ -493,20 +870,6 @@ if uploaded_file is not None:
         st.query_params.pop("run", None)
 else:
     active_uploads = cached_uploads(st.session_state, "auto_query_input_files")
-
-checkpoint_manifest = st.session_state.get("auto_query_checkpoint_manifest") or {}
-current_input_signature = st.session_state.get("auto_query_input_signature")
-checkpoint_input_signature = checkpoint_manifest.get("input_signature")
-if (
-    current_input_signature
-    and checkpoint_input_signature
-    and current_input_signature != checkpoint_input_signature
-):
-    clear_uploads(
-        st.session_state,
-        (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
-    )
-    st.query_params.pop("run", None)
 
 if st.button("清空当前数据", key="auto_clear_cached_input"):
     clear_auto_query_state()
@@ -529,92 +892,93 @@ if not active_uploads:
         st.info("请先上传 Excel 文件。")
     st.stop()
 
-st.success("已加载输入文件。")
+primary_names = [upload_name(record) for record in active_uploads]
+duplicate_names = sorted(
+    {
+        name
+        for name in primary_names
+        if sum(
+            candidate.casefold() == name.casefold()
+            for candidate in primary_names
+        )
+        > 1
+    },
+    key=str.casefold,
+)
+if duplicate_names:
+    st.error(
+        "主 Excel 文件名重复，请重命名后重新上传："
+        + "、".join(duplicate_names)
+    )
+    st.stop()
+
+sample_stems = [Path(name).stem for name in primary_names]
+duplicate_stems = sorted(
+    {
+        stem
+        for stem in sample_stems
+        if sum(
+            candidate.casefold() == stem.casefold()
+            for candidate in sample_stems
+        )
+        > 1
+    },
+    key=str.casefold,
+)
+if duplicate_stems:
+    st.error(
+        "主 Excel 样品名称重复，请重命名后重新上传："
+        + "、".join(duplicate_stems)
+    )
+    st.stop()
 
 try:
-    input_df = read_input_workbook(io.BytesIO(upload_bytes(active_uploads[0])))
+    samples = read_primary_workbooks(active_uploads)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")
     st.stop()
 
-default_mapping = detect_default_mapping(input_df.columns)
-columns = list(input_df.columns)
+st.session_state["auto_query_primary_file_names"] = [
+    sample.file_name for sample in samples
+]
+st.success(f"已加载输入文件：{len(samples)} 个。")
 
-st.subheader("输入文件检查")
-col_rows, col_cols, col_groups = st.columns(3)
-with col_rows:
-    st.metric("数据行数", len(input_df))
-with col_cols:
-    st.metric("列数", len(columns))
-with col_groups:
-    st.metric("Group Area 列", len(default_mapping.group_area_cols))
+st.subheader("输入文件检查与逐文件列映射")
+preview_rows = [
+    {
+        "sample_id": sample.sample_id,
+        "file_name": sample.file_name,
+        "rows": len(sample.data),
+        "columns": len(sample.data.columns),
+    }
+    for sample in samples
+]
+_show_dataframe(pd.DataFrame(preview_rows))
+sample_mappings = _render_sample_mapping_tabs(samples)
 
-with st.expander("列识别与校正", expanded=False):
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        compound_col = st.selectbox(
-            "化合物名称列",
-            columns,
-            index=_column_index(columns, default_mapping.compound_col),
-        )
-    with col_b:
-        formula_col = st.selectbox(
-            "分子式列",
-            columns,
-            index=_column_index(columns, default_mapping.formula_col),
-        )
-    with col_c:
-        peak_area_col = st.selectbox(
-            "默认峰面积列",
-            columns,
-            index=_column_index(columns, default_mapping.peak_area_col),
-        )
+upload_structure_summary, prepared_input_df = (
+    build_upload_structure_preparation_preview(samples, sample_mappings)
+)
+st.caption("多文件结构准备摘要")
+_show_dataframe(upload_structure_summary)
+if not prepared_input_df.empty:
+    _render_structure_preparation_summary(prepared_input_df)
 
-    group_area_cols = st.multiselect(
-        "参与化学类型图、DBE图、VK图、DF 和 ToxPi 的 Group Area 列",
-        columns,
-        default=[column for column in default_mapping.group_area_cols if column in columns],
-    )
-    optional_columns = ["", *columns]
-    opt_a, opt_b, opt_c = st.columns(3)
-    with opt_a:
-        mol_column = st.selectbox(
-            "可选：MOL 文本列",
-            optional_columns,
-            index=_optional_column_index(columns, default_mapping.mol_column),
-        ) or None
-    with opt_b:
-        smiles_col = st.selectbox(
-            "可选：已有 SMILES 列",
-            optional_columns,
-            index=_optional_column_index(columns, default_mapping.smiles_col),
-        ) or None
-    with opt_c:
-        cas_col = st.selectbox(
-            "可选：已有 CAS 列",
-            optional_columns,
-            index=_optional_column_index(columns, default_mapping.cas_col),
-        ) or None
-
+first_mapping = sample_mappings[samples[0].sample_id]
 mapping = AutoWorkflowMapping(
-    compound_col=compound_col,
-    formula_col=formula_col,
-    peak_area_col=peak_area_col,
-    group_area_cols=list(group_area_cols),
-    mol_column=mol_column,
-    smiles_col=smiles_col,
-    cas_col=cas_col,
+    compound_col=first_mapping.compound_col,
+    formula_col=first_mapping.formula_col,
+    peak_area_col=first_mapping.peak_area_col,
+    group_area_cols=list(first_mapping.group_area_cols),
+    mol_column=first_mapping.mol_column,
+    smiles_col=first_mapping.smiles_col,
+    cas_col=first_mapping.cas_col,
 )
 
-prepared_input_df = prepare_structure_dataframe(
-    input_df,
-    mol_column=mapping.mol_column,
-    smiles_column=mapping.smiles_col,
-)
-_render_structure_preparation_summary(prepared_input_df)
-
-with st.expander("查看前 20 行", expanded=False):
-    _show_dataframe(input_df.head(20))
+with st.expander("查看各文件前 20 行", expanded=False):
+    for sample in samples:
+        st.caption(sample.file_name)
+        _show_dataframe(sample.data.head(20))
 
 st.subheader("选择自动运行项目")
 col_left, col_right = st.columns(2)
@@ -631,6 +995,126 @@ with col_right:
 
 if run_pov_toxpi and not run_epi:
     st.info("Pov-LRTP / PBM / ToxPi 需要 EPI 结果；运行时会自动先执行 EPI Suite 环境归趋。")
+
+active_epi_supplements = cached_uploads(
+    st.session_state,
+    "auto_query_epi_supplement_files",
+)
+supplement_mappings = []
+parsed_supplements = pd.DataFrame()
+session_pool_results, _ = read_epi_pool(st.session_state)
+if run_epi or run_pov_toxpi:
+    st.subheader("EPI 补充结果")
+    epi_uploads = st.file_uploader(
+        "上传 EPI 补充 Excel",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="auto_query_epi_supplements",
+    )
+    if epi_uploads:
+        active_epi_supplements, epi_input_changed = store_uploads(
+            st.session_state,
+            "auto_query_epi_supplement_files",
+            "auto_query_epi_supplement_signature",
+            epi_uploads,
+        )
+        if epi_input_changed:
+            clear_uploads(
+                st.session_state,
+                (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+            )
+            st.query_params.pop("run", None)
+
+    if active_epi_supplements:
+        st.caption(
+            "逐个确认补充文件关联。自动建议只使用文件名，不会根据化学物重合自动关联。"
+        )
+        (
+            supplement_mappings,
+            parsed_supplements,
+            supplement_warnings,
+        ) = _render_epi_supplement_mappings(
+            active_epi_supplements,
+            primary_names,
+        )
+        if not supplement_warnings.empty:
+            with st.expander("EPI 补充文件解析警告", expanded=False):
+                _show_dataframe(supplement_warnings)
+    else:
+        st.caption("可选：上传已有 EPI 结果，减少网络查询。")
+
+    st.caption(f"同一会话 EPI 结果池：{len(session_pool_results)} 条。")
+    preview_resolution = resolve_epi_sources(
+        _primary_epi_universe(samples, sample_mappings),
+        parsed_supplements,
+        session_pool_results,
+        require_core=bool(run_pov_toxpi),
+    )
+    completeness = preview_resolution.completeness
+    match_audit = preview_resolution.match_audit
+    preview_columns = st.columns(4)
+    preview_columns[0].metric(
+        "完整",
+        (
+            int(completeness["complete"].sum())
+            if "complete" in completeness
+            else 0
+        ),
+    )
+    preview_columns[1].metric(
+        "匹配",
+        (
+            int(match_audit["match_status"].eq("matched").sum())
+            if "match_status" in match_audit
+            else 0
+        ),
+    )
+    preview_columns[2].metric(
+        "冲突",
+        len(preview_resolution.conflict_audit),
+    )
+    preview_columns[3].metric(
+        "溯源",
+        len(preview_resolution.provenance),
+    )
+    preview_tabs = st.tabs(["完整度", "匹配审计", "冲突审计", "来源溯源"])
+    for tab, frame in zip(
+        preview_tabs,
+        (
+            completeness,
+            match_audit,
+            preview_resolution.conflict_audit,
+            preview_resolution.provenance,
+        ),
+    ):
+        with tab:
+            if frame.empty:
+                st.caption("暂无记录。")
+            else:
+                _show_dataframe(frame)
+
+workflow_input_signature = settings_signature(
+    {
+        "primary": upload_signature(active_uploads),
+        "epi_supplements": (
+            upload_signature(active_epi_supplements)
+            if active_epi_supplements
+            else ""
+        ),
+    }
+)
+checkpoint_manifest = st.session_state.get("auto_query_checkpoint_manifest") or {}
+checkpoint_input_signature = checkpoint_manifest.get("input_signature")
+if (
+    workflow_input_signature
+    and checkpoint_input_signature
+    and workflow_input_signature != checkpoint_input_signature
+):
+    clear_uploads(
+        st.session_state,
+        (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+    )
+    st.query_params.pop("run", None)
 
 with st.expander("运行设置", expanded=False):
     col_threshold, col_cache = st.columns(2)
@@ -709,14 +1193,25 @@ with st.expander("运行设置", expanded=False):
 
 result_settings = {
     "mapping": {
-        "compound_col": compound_col,
-        "formula_col": formula_col,
-        "peak_area_col": peak_area_col,
-        "group_area_cols": list(group_area_cols),
-        "mol_column": mol_column,
-        "smiles_col": smiles_col,
-        "cas_col": cas_col,
+        "compound_col": mapping.compound_col,
+        "formula_col": mapping.formula_col,
+        "peak_area_col": mapping.peak_area_col,
+        "group_area_cols": list(mapping.group_area_cols),
+        "mol_column": mapping.mol_column,
+        "smiles_col": mapping.smiles_col,
+        "cas_col": mapping.cas_col,
     },
+    "primary_mappings": [
+        {
+            "sample_id": sample_id,
+            **asdict(sample_mapping),
+        }
+        for sample_id, sample_mapping in sample_mappings.items()
+    ],
+    "epi_supplements": [
+        asdict(supplement_mapping)
+        for supplement_mapping in supplement_mappings
+    ],
     "modules": {
         "run_r_replicate_df": bool(run_r_replicate_df),
         "run_identifier": bool(run_identifier),
@@ -821,6 +1316,22 @@ if start_run:
         st.error(f"ToxPi 设置无效：{exc}")
         st.stop()
 
+    try:
+        multi_file_result = prepare_multi_file_screening(
+            samples,
+            sample_mappings,
+            float(detection_threshold),
+            axis_ranges,
+        )
+    except Exception as exc:
+        st.error(f"多文件筛查准备失败：{exc}")
+        st.stop()
+    prepared_auto_input = auto_input_from_multi_file_result(
+        multi_file_result
+    )
+    mapping = prepared_auto_input.mapping
+    prepared_input_df = prepared_auto_input.prepared_input
+
     selected_steps = build_selected_steps(
         run_r_replicate_df=run_r_replicate_df,
         run_identifier=run_identifier,
@@ -850,7 +1361,7 @@ if start_run:
     partial_container = st.empty()
     checkpoint_context = AutoWorkflowCheckpointContext(
         run_id=run_id,
-        input_signature=st.session_state["auto_query_input_signature"],
+        input_signature=workflow_input_signature,
         settings_signature=settings_signature(result_settings),
         selected_steps=tuple(selected_steps),
     )
@@ -899,18 +1410,19 @@ if start_run:
             )
 
     initial_result = AutoWorkflowResult(
-        mapping=mapping,
-        representative_table=build_representative_table(
-            prepared_input_df,
-            mapping,
-        ),
-        tables=OrderedDict(
-            [("Structure_Preparation", prepared_input_df.copy())]
-        ),
+        mapping=prepared_auto_input.mapping,
+        representative_table=prepared_auto_input.representative_table,
+        tables=OrderedDict(prepared_auto_input.local_tables),
         step_status=pd.DataFrame(
             columns=["step", "status", "rows", "message"]
         ),
-        warnings=pd.DataFrame(columns=["stage", "message"]),
+        warnings=pd.DataFrame(
+            {
+                "stage": ["本地筛查"] * len(prepared_auto_input.local_warnings),
+                "message": prepared_auto_input.local_warnings,
+            }
+        ),
+        charts=OrderedDict(prepared_auto_input.local_charts),
     )
     handle_checkpoint(
         AutoWorkflowCheckpoint(
@@ -997,8 +1509,11 @@ if start_run:
     try:
         with st.spinner("正在按顺序运行已选项目..."):
             result = run_auto_query_workflow(
-                prepared_input_df,
+                prepared_auto_input.prepared_input,
                 config=config,
+                prepared_input=prepared_auto_input,
+                epi_uploaded_results=parsed_supplements,
+                epi_pool_results=session_pool_results,
                 progress_callback=update_progress,
                 activity_callback=update_activity,
                 checkpoint_context=checkpoint_context,

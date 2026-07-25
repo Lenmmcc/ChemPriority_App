@@ -261,6 +261,23 @@ class UploadStateTests(unittest.TestCase):
             for token in tokens:
                 self.assertIn(token, page_text, f"{page_path.name} is missing {token}")
 
+    def test_page_6_combines_primary_and_epi_upload_signatures(self):
+        page_text = next(Path("pages").glob("6_*.py")).read_text(encoding="utf-8")
+
+        self.assertIn("EPI_SUPPLEMENT_CACHE_KEYS", page_text)
+        self.assertIn('"auto_query_epi_supplement_files"', page_text)
+        self.assertIn('"auto_query_epi_supplement_signature"', page_text)
+        self.assertIn("workflow_input_signature = settings_signature(", page_text)
+        self.assertIn('"primary": upload_signature(active_uploads)', page_text)
+        self.assertIn(
+            '"epi_supplements":',
+            page_text,
+        )
+        checkpoint_block = page_text.split(
+            "checkpoint_context = AutoWorkflowCheckpointContext(", 1
+        )[1].split("def handle_checkpoint", 1)[0]
+        self.assertIn("input_signature=workflow_input_signature", checkpoint_block)
+
     def test_page_6_declares_all_checkpoint_session_keys_and_clears_the_current_token(self):
         page_text = next(Path("pages").glob("6_*.py")).read_text(encoding="utf-8")
         for key in (
