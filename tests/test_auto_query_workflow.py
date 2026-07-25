@@ -265,6 +265,70 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             result.tables["EPI_Completeness"]["needs_query"].eq(False).all()
         )
 
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_epi_batch_exception_preserves_attempt_audit_and_seed_resolution(
+        self,
+        run_identifier,
+        run_epi,
+    ):
+        compounds = ["Compound A", "Compound B"]
+        run_identifier.return_value = (
+            _completed_identifier_rows(compounds),
+            pd.DataFrame(),
+        )
+
+        def fail_after_activity(*args, **kwargs):
+            callback = kwargs["activity_callback"]
+            callback(
+                {
+                    "event": "started",
+                    "index": 0,
+                    "attempt": 1,
+                    "label": "Compound B",
+                    "evidence": "seed incomplete",
+                }
+            )
+            callback(
+                {
+                    "event": "failed",
+                    "index": 0,
+                    "attempt": 1,
+                    "label": "Compound B",
+                    "error": "EPI batch unavailable",
+                }
+            )
+            raise RuntimeError("EPI batch unavailable")
+
+        run_epi.side_effect = fail_after_activity
+        result = run_auto_query_workflow(
+            _workflow_input_rows(compounds),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                identifier_delay_seconds=0,
+                epi_delay_seconds=0,
+            ),
+            epi_uploaded_results=complete_epi_rows(["Compound A"]),
+        )
+
+        attempts = result.tables["EPI_Query_Attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts.loc[0, "attempt"], 1)
+        self.assertEqual(attempts.loc[0, "label"], "Compound B")
+        self.assertEqual(attempts.loc[0, "error"], "EPI batch unavailable")
+        self.assertEqual(attempts.loc[0, "evidence"], "seed incomplete")
+        seeded = result.tables["EPI_Results"].set_index("compound").loc[
+            "Compound A"
+        ]
+        self.assertEqual(seeded["log_kow"], 2.0)
+        completeness = result.tables["EPI_Completeness"].set_index("compound")
+        self.assertFalse(bool(completeness.loc["Compound A", "needs_query"]))
+        self.assertTrue(bool(completeness.loc["Compound B", "needs_query"]))
+        self.assertFalse(result.tables["EPI_Source_Provenance"].empty)
+        self.assertFalse(result.tables["EPI_Match_Audit"].empty)
+
     def test_multi_file_adapter_preserves_sample_representative_and_audit_exports(self):
         representative = pd.DataFrame(
             {
@@ -655,6 +719,49 @@ class AutoQueryWorkflowTests(unittest.TestCase):
 
         self.assertIs(result.charts["Local_DBE_Bubble_Plot"], chart)
         self.assertIn("Van Krevelen Plot: missing", result.warnings["message"].tolist())
+
+    @patch("src.auto_query_workflow._run_r_replicate_df")
+    def test_warning_only_prepared_input_falls_back_to_legacy_local_screening(
+        self,
+        mock_local,
+    ):
+        mock_local.return_value = LocalScreeningOutput(
+            tables=OrderedDict(
+                [("DF_Table", pd.DataFrame({"Name": ["Compound A"]}))]
+            ),
+            charts=OrderedDict(),
+            warnings=["legacy calculation warning"],
+        )
+        input_frame = _workflow_input_rows(["Compound A"])
+        mapping = AutoWorkflowMapping(
+            compound_col="Name",
+            formula_col="NIST Lib Hit Formula",
+            peak_area_col="Avg TIC",
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=mapping,
+            prepared_input=input_frame,
+            representative_table=build_representative_table(
+                input_frame,
+                mapping,
+            ),
+            local_warnings=["prepared mapping warning"],
+        )
+
+        result = run_auto_query_workflow(
+            input_frame,
+            AutoWorkflowConfig(
+                run_r_replicate_df=True,
+                run_identifier=False,
+            ),
+            prepared_input=prepared,
+        )
+
+        mock_local.assert_called_once()
+        self.assertIn("DF_Table", result.tables)
+        warning_messages = result.warnings["message"].tolist()
+        self.assertIn("legacy calculation warning", warning_messages)
+        self.assertIn("prepared mapping warning", warning_messages)
 
     @patch("src.auto_query_workflow.configure_plot_style", return_value=["font missing"])
     def test_batch_surfaces_plot_font_warning(self, configure_plot_style):

@@ -594,7 +594,6 @@ def run_auto_query_workflow(
         has_prepared_local_output = bool(
             prepared_input.local_tables
             or prepared_input.local_charts
-            or prepared_input.local_warnings
         )
         if has_prepared_local_output:
             local_runner = lambda: LocalScreeningOutput(
@@ -620,6 +619,9 @@ def run_auto_query_workflow(
             for message in local_value.warnings:
                 add_warning(R_DF_STEP_LABEL, message)
             record(R_DF_STEP_LABEL, "完成", len(local_value.tables.get("DF_Table", pd.DataFrame())))
+        if not has_prepared_local_output:
+            for message in prepared_input.local_warnings:
+                add_warning(R_DF_STEP_LABEL, message)
         emit_checkpoint(R_DF_STEP_LABEL)
 
     needs_identifier = any(
@@ -728,13 +730,17 @@ def run_auto_query_workflow(
             )
             if epi_value is not None:
                 network_results, network_raw, network_errors = epi_value
-                resolution = merge_network_epi(
-                    resolution,
-                    network_results,
-                    network_raw,
-                    network_errors,
-                    attempt_events,
-                )
+            else:
+                network_results = pd.DataFrame()
+                network_raw = pd.DataFrame()
+                network_errors = pd.DataFrame()
+            resolution = merge_network_epi(
+                resolution,
+                network_results,
+                network_raw,
+                network_errors,
+                attempt_events,
+            )
 
         epi_results = resolution.results
         epi_raw_results = resolution.raw_results
