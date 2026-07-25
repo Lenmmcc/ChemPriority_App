@@ -12,6 +12,7 @@ from src.auto_query_workflow import (
     AutoWorkflowCheckpoint,
     AutoWorkflowCheckpointContext,
     AutoWorkflowConfig,
+    AutoWorkflowEpiRetryError,
     AutoWorkflowMapping,
     AutoWorkflowResult,
     PUBLIC_TABLE_NAMES,
@@ -21,6 +22,7 @@ from src.auto_query_workflow import (
     build_auto_workflow_module_workbook,
     build_auto_workflow_partial_zip,
     build_auto_workflow_zip,
+    queryable_epi_retry_input,
     retry_auto_workflow_epi_failures,
     run_auto_query_workflow,
 )
@@ -1338,11 +1340,16 @@ live_render_generation = [0]
 partial_container = st.empty()
 
 
-def handle_checkpoint(checkpoint):
+def handle_checkpoint(checkpoint, *, strict_module_export=False):
     latest_checkpoint[0] = checkpoint
     st.session_state["auto_query_partial_result"] = checkpoint.result
     st.session_state["auto_query_workflow_result"] = checkpoint.result
     if checkpoint.current_step:
+        export = AUTO_WORKFLOW_CHECKPOINT_EXPORTS.get(
+            checkpoint.current_step
+        )
+        if export is not None:
+            module_workbooks.pop(export[0], None)
         try:
             module = build_auto_workflow_module_workbook(
                 checkpoint.result,
@@ -1352,6 +1359,11 @@ def handle_checkpoint(checkpoint):
             st.session_state["auto_query_checkpoint_warning"] = (
                 f"模块导出失败：{exc}"
             )
+            st.session_state["auto_query_module_workbooks"] = OrderedDict(
+                module_workbooks
+            )
+            if strict_module_export:
+                raise
         else:
             if module is not None:
                 module_workbooks[module.slug] = module
@@ -1631,14 +1643,17 @@ if result is not None:
     package = st.session_state.get("auto_query_workflow_zip")
     module_workbooks = st.session_state.get("auto_query_module_workbooks") or OrderedDict()
     retry_input = result.tables.get("EPI_Retry_Input", pd.DataFrame())
-    if (
-        isinstance(retry_input, pd.DataFrame)
-        and not retry_input.empty
-        and st.button(
-            "仅重试未完成的 EPI 行",
-            key="auto_query_retry_epi_failures",
-        )
-    ):
+    retry_requested = False
+    if isinstance(retry_input, pd.DataFrame) and not retry_input.empty:
+        retry_query_input = queryable_epi_retry_input(retry_input)
+        if retry_query_input.empty:
+            st.info("未完成的 EPI 行缺少可查询的 SMILES，请先补充结构信息。")
+        else:
+            retry_requested = st.button(
+                "仅重试未完成的 EPI 行",
+                key="auto_query_retry_epi_failures",
+            )
+    if retry_requested:
         if not run_token:
             run_token = generate_run_token()
             st.session_state["auto_query_run_token"] = run_token
@@ -1777,7 +1792,8 @@ if result is not None:
                         result=retried_result,
                         error_message="",
                         updated_at=datetime.now(timezone.utc).isoformat(),
-                    )
+                    ),
+                    strict_module_export=True,
                 )
             module_workbooks = OrderedDict(
                 st.session_state.get("auto_query_module_workbooks")
@@ -1800,10 +1816,20 @@ if result is not None:
             )
             handle_checkpoint(completed_checkpoint)
         except Exception as exc:
-            failed_result = st.session_state.get(
-                "auto_query_workflow_result",
-                result,
+            failed_result = (
+                exc.result
+                if isinstance(exc, AutoWorkflowEpiRetryError)
+                else st.session_state.get(
+                    "auto_query_workflow_result",
+                    result,
+                )
             )
+            failed_charts = OrderedDict(failed_result.charts)
+            failed_result.charts = failed_charts
+            st.session_state["auto_query_workflow_result"] = failed_result
+            st.session_state["auto_query_workflow_charts"] = failed_charts
+            st.session_state.pop("auto_query_workflow_zip", None)
+            package = None
             failed_checkpoint = AutoWorkflowCheckpoint(
                 **checkpoint_kwargs,
                 current_step="EPI Suite 环境归趋",

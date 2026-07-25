@@ -337,6 +337,12 @@ class AutoWorkflowResult:
     charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
 
 
+class AutoWorkflowEpiRetryError(RuntimeError):
+    def __init__(self, message: str, result: AutoWorkflowResult):
+        super().__init__(message)
+        self.result = result
+
+
 @dataclass(frozen=True)
 class AutoWorkflowModuleWorkbook:
     step: str
@@ -1034,6 +1040,9 @@ def retry_auto_workflow_epi_failures(
     retry_input = result.tables.get("EPI_Retry_Input", pd.DataFrame()).copy()
     if retry_input.empty:
         return result
+    query_input = queryable_epi_retry_input(retry_input)
+    if query_input.empty:
+        return result
 
     attempt_events = []
 
@@ -1042,25 +1051,32 @@ def retry_auto_workflow_epi_failures(
         if activity_callback is not None:
             activity_callback(event)
 
-    network_results, network_raw, network_errors = run_epi_web_batch(
-        retry_input,
-        api_url=config.epi_api_url,
-        timeout=int(config.epi_timeout),
-        delay_seconds=float(config.epi_delay_seconds),
-        max_workers=int(config.epi_max_workers),
-        cache_enabled=bool(config.cache_enabled),
-        progress_callback=(
-            None
-            if progress_callback is None
-            else lambda done, total, label: progress_callback(
-                "EPI Suite 环境归趋",
-                done,
-                total,
-                label,
-            )
-        ),
-        activity_callback=retry_activity,
-    )
+    batch_error = None
+    try:
+        network_results, network_raw, network_errors = run_epi_web_batch(
+            query_input,
+            api_url=config.epi_api_url,
+            timeout=int(config.epi_timeout),
+            delay_seconds=float(config.epi_delay_seconds),
+            max_workers=int(config.epi_max_workers),
+            cache_enabled=bool(config.cache_enabled),
+            progress_callback=(
+                None
+                if progress_callback is None
+                else lambda done, total, label: progress_callback(
+                    "EPI Suite 环境归趋",
+                    done,
+                    total,
+                    label,
+                )
+            ),
+            activity_callback=retry_activity,
+        )
+    except Exception as exc:
+        batch_error = exc
+        network_results = pd.DataFrame()
+        network_raw = pd.DataFrame()
+        network_errors = pd.DataFrame()
     resolution = merge_network_epi(
         EPIResolution(
             results=result.tables.get("EPI_Results", pd.DataFrame()),
@@ -1115,6 +1131,8 @@ def retry_auto_workflow_epi_failures(
         warnings=result.warnings.copy(),
         charts=OrderedDict(result.charts),
     )
+    if batch_error is not None:
+        raise AutoWorkflowEpiRetryError(str(batch_error), updated) from batch_error
     if not config.run_pov_lrtp_toxpi:
         return updated
 
@@ -1139,6 +1157,17 @@ def retry_auto_workflow_epi_failures(
     updated.tables.update(toxpi_value.tables)
     updated.charts.update(toxpi_value.charts)
     return updated
+
+
+def queryable_epi_retry_input(retry_input: pd.DataFrame) -> pd.DataFrame:
+    if (
+        not isinstance(retry_input, pd.DataFrame)
+        or retry_input.empty
+        or "smiles" not in retry_input.columns
+    ):
+        return pd.DataFrame(columns=getattr(retry_input, "columns", None))
+    queryable = retry_input["smiles"].map(_clean_text).ne("")
+    return retry_input.loc[queryable].copy().reset_index(drop=True)
 
 
 def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:

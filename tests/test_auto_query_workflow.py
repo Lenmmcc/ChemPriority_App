@@ -32,6 +32,7 @@ from src.auto_query_workflow import (
     AutoWorkflowCheckpointContext,
     AutoWorkflowConfig,
     AutoWorkflowChart,
+    AutoWorkflowEpiRetryError,
     AutoWorkflowMapping,
     AutoWorkflowModuleWorkbook,
     AutoWorkflowPreparedInput,
@@ -1019,6 +1020,100 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             retried.charts["EPA_Product_Use_Category_Distribution"],
             original.charts["EPA_Product_Use_Category_Distribution"],
         )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    def test_retry_epi_batch_exception_exposes_updated_attempt_audit(
+        self,
+        run_epi,
+    ):
+        original = _result_with_epi_retry_input(["Failed B"])
+        self.assertTrue(original.tables["EPI_Query_Attempts"].empty)
+
+        def fail_after_activity(*args, **kwargs):
+            kwargs["activity_callback"](
+                {
+                    "event": "started",
+                    "index": 0,
+                    "attempt": 1,
+                    "label": "Failed B",
+                    "evidence": "retry request started",
+                }
+            )
+            raise RuntimeError("simulated EPI retry failure")
+
+        run_epi.side_effect = fail_after_activity
+
+        with self.assertRaises(AutoWorkflowEpiRetryError) as caught:
+            retry_auto_workflow_epi_failures(
+                original,
+                AutoWorkflowConfig(run_epi=True, epi_delay_seconds=0),
+            )
+
+        updated = caught.exception.result
+        self.assertEqual(len(updated.tables["EPI_Query_Attempts"]), 1)
+        self.assertEqual(
+            updated.tables["EPI_Query_Attempts"]["label"].tolist(),
+            ["Failed B"],
+        )
+        self.assertEqual(
+            updated.tables["EPI_Retry_Input"]["compound"].tolist(),
+            ["Failed B"],
+        )
+        self.assertIn(
+            "simulated EPI retry failure",
+            str(caught.exception),
+        )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    def test_retry_epi_queries_only_rows_with_smiles_and_keeps_blank_rows(
+        self,
+        run_epi,
+    ):
+        original = _result_with_epi_retry_input(
+            ["Queryable B", "Missing SMILES C"]
+        )
+        for table_name in ("EPI_Results", "EPI_Retry_Input"):
+            table = original.tables[table_name].copy()
+            missing = table["compound"].eq("Missing SMILES C")
+            table.loc[missing, ["smiles", "cas"]] = ""
+            original.tables[table_name] = table
+        run_epi.return_value = (
+            complete_epi_rows(["Queryable B"]),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        retried = retry_auto_workflow_epi_failures(
+            original,
+            AutoWorkflowConfig(run_epi=True, epi_delay_seconds=0),
+        )
+
+        self.assertEqual(
+            run_epi.call_args.args[0]["compound"].tolist(),
+            ["Queryable B"],
+        )
+        self.assertEqual(
+            retried.tables["EPI_Retry_Input"]["compound"].tolist(),
+            ["Missing SMILES C"],
+        )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    def test_retry_epi_with_only_blank_smiles_does_not_call_batch(
+        self,
+        run_epi,
+    ):
+        original = _result_with_epi_retry_input(["Missing SMILES B"])
+        retry_input = original.tables["EPI_Retry_Input"].copy()
+        retry_input["smiles"] = " "
+        original.tables["EPI_Retry_Input"] = retry_input
+
+        retried = retry_auto_workflow_epi_failures(
+            original,
+            AutoWorkflowConfig(run_epi=True, epi_delay_seconds=0),
+        )
+
+        self.assertIs(retried, original)
+        run_epi.assert_not_called()
 
     @patch("src.auto_query_workflow.run_epi_web_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
@@ -2839,6 +2934,25 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             [button.label for button in app.button],
         )
 
+    def test_page_6_blank_smiles_retry_input_shows_hint_without_button(self):
+        app = _app_test_with_cached_workbook()
+        original = _result_with_epi_retry_input(["Missing SMILES B"])
+        retry_input = original.tables["EPI_Retry_Input"].copy()
+        retry_input["smiles"] = " "
+        original.tables["EPI_Retry_Input"] = retry_input
+        app.session_state["auto_query_workflow_result"] = original
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+
+        app = app.run(timeout=20)
+
+        self.assertNotIn(
+            "仅重试未完成的 EPI 行",
+            [button.label for button in app.button],
+        )
+        self.assertTrue(
+            any("SMILES" in message.value for message in app.info)
+        )
+
     def test_page_6_epi_retry_refreshes_exports_and_uses_checkpoint_handler(self):
         page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
 
@@ -2993,6 +3107,112 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             app.session_state["auto_query_checkpoint_warning"],
         )
         self.assertEqual(save.call_args.args[1].status, "failed")
+        self.assertEqual(list(app.exception), [])
+
+    def test_page_6_epi_retry_batch_failure_checkpoints_updated_audit(self):
+        app = _app_test_with_cached_workbook()
+        original = _result_with_epi_retry_input(["Failed B"])
+        updated = _result_with_epi_retry_input(["Failed B"])
+        updated.tables["EPI_Query_Attempts"] = pd.DataFrame(
+            [{"event": "started", "label": "Failed B", "attempt": 1}]
+        )
+        app.session_state["auto_query_workflow_result"] = original
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+        app = app.run(timeout=20)
+
+        retry_error = AutoWorkflowEpiRetryError(
+            "simulated EPI retry failure",
+            updated,
+        )
+        with (
+            patch(
+                "src.auto_query_workflow.retry_auto_workflow_epi_failures",
+                side_effect=retry_error,
+            ),
+            patch("src.auto_query_checkpoint.save_checkpoint") as save,
+        ):
+            app = next(
+                button
+                for button in app.button
+                if button.label == "仅重试未完成的 EPI 行"
+            ).click().run(timeout=20)
+
+        stored_checkpoint = save.call_args.args[1]
+        self.assertEqual(stored_checkpoint.status, "failed")
+        self.assertIs(stored_checkpoint.result, updated)
+        self.assertEqual(
+            len(stored_checkpoint.result.tables["EPI_Query_Attempts"]),
+            1,
+        )
+        self.assertEqual(
+            stored_checkpoint.result.tables["EPI_Retry_Input"][
+                "compound"
+            ].tolist(),
+            ["Failed B"],
+        )
+        self.assertIs(
+            app.session_state["auto_query_workflow_result"],
+            updated,
+        )
+        self.assertEqual(list(app.exception), [])
+
+    def test_page_6_epi_retry_module_export_failure_removes_stale_workbook(
+        self,
+    ):
+        app = _app_test_with_cached_workbook()
+        original = _result_with_epi_retry_input(["Failed B"])
+        retried = _result_with_epi_retry_input([])
+        stale_module = AutoWorkflowModuleWorkbook(
+            step="EPI Suite 环境归趋",
+            slug="epi_suite",
+            file_name="EPI_Suite_Results.xlsx",
+            data=b"stale-epi-book",
+        )
+        app.session_state["auto_query_workflow_result"] = original
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+        app.session_state["auto_query_module_workbooks"] = OrderedDict(
+            [("epi_suite", stale_module)]
+        )
+        app = app.run(timeout=20)
+
+        with (
+            patch(
+                "src.auto_query_workflow.retry_auto_workflow_epi_failures",
+                return_value=retried,
+            ),
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_module_workbook",
+                side_effect=RuntimeError("simulated module export failure"),
+            ),
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_partial_zip",
+            ) as build_partial,
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_zip",
+            ) as build_full,
+            patch("src.auto_query_checkpoint.save_checkpoint") as save,
+        ):
+            app = next(
+                button
+                for button in app.button
+                if button.label == "仅重试未完成的 EPI 行"
+            ).click().run(timeout=20)
+
+        self.assertNotIn(
+            "epi_suite",
+            app.session_state["auto_query_module_workbooks"],
+        )
+        self.assertGreaterEqual(build_partial.call_count, 1)
+        for partial_call in build_partial.call_args_list:
+            self.assertNotIn("epi_suite", partial_call.args[1])
+        build_full.assert_not_called()
+        stored_checkpoint = save.call_args.args[1]
+        self.assertEqual(stored_checkpoint.status, "failed")
+        self.assertIs(stored_checkpoint.result, retried)
+        self.assertIn(
+            "simulated module export failure",
+            stored_checkpoint.error_message,
+        )
         self.assertEqual(list(app.exception), [])
 
     def test_page_6_keeps_partial_artifacts_when_full_zip_build_fails(self):
