@@ -556,12 +556,15 @@ def build_representative_screening_table(
     sample_cols=None,
     smiles_col=None,
     cas_col=None,
+    primary_membership=None,
 ):
     frames = []
     sample_cols = sample_cols or []
     for sample in samples:
         frame = sample["data"].copy()
         frame["sample_id"] = sample["name"]
+        frame["_primary_file"] = sample.get("file_name", "")
+        frame["_source_row"] = range(len(frame))
         frame["Name"] = frame[compound_col].map(_clean_text)
         frame["formula"] = frame[formula_col] if formula_col in frame.columns else pd.NA
         peak_area_cols = sample_cols or [peak_area_col]
@@ -583,10 +586,48 @@ def build_representative_screening_table(
         output_cols.append("SMILES_input")
     if "CAS_input" in combined.columns:
         output_cols.append("CAS_input")
-    return (
-        combined.drop_duplicates("compound_key", keep="first")[output_cols]
-        .reset_index(drop=True)
-    )
+    selected = combined.drop_duplicates("compound_key", keep="first").copy()
+    if (
+        isinstance(primary_membership, pd.DataFrame)
+        and not primary_membership.empty
+        and "identity_key" in primary_membership.columns
+    ):
+        identity_by_source = _membership_identity_by_source(
+            primary_membership
+        )
+        selected["identity_key"] = [
+            identity_by_source.get(
+                (
+                    _clean_text(row.get("_primary_file")).casefold(),
+                    _clean_text(row.get("sample_id")).casefold(),
+                    _clean_text(row.get("_source_row")).casefold(),
+                ),
+                "",
+            )
+            for _, row in selected.iterrows()
+        ]
+        output_cols.append("identity_key")
+    return selected[output_cols].reset_index(drop=True)
+
+
+def _membership_identity_by_source(
+    primary_membership: pd.DataFrame,
+) -> dict[tuple[str, str, str], str]:
+    candidates = {}
+    for _, row in primary_membership.iterrows():
+        source_key = (
+            _clean_text(row.get("primary_file")).casefold(),
+            _clean_text(row.get("sample_id")).casefold(),
+            _clean_text(row.get("source_row")).casefold(),
+        )
+        identity_key = _clean_text(row.get("identity_key"))
+        if all(source_key) and identity_key:
+            candidates.setdefault(source_key, set()).add(identity_key)
+    return {
+        source_key: next(iter(identity_keys))
+        for source_key, identity_keys in candidates.items()
+        if len(identity_keys) == 1
+    }
 
 
 def prepare_multi_file_screening(
@@ -790,6 +831,7 @@ def prepare_multi_file_screening(
             sample_cols=["Group_Area_Mean"],
             smiles_col=STANDARD_SMILES_COL,
             cas_col=STANDARD_CAS_COL,
+            primary_membership=primary_membership,
         ),
         structure_preparation=structure_preparation,
         input_file_mappings=input_file_mappings,

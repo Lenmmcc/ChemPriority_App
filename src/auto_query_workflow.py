@@ -693,6 +693,11 @@ def run_auto_query_workflow(
         )
         if identifier_value is not None:
             completed_identifiers, identifier_warnings = identifier_value
+            if not epi_identity_universe.empty:
+                completed_identifiers = _restore_identity_keys(
+                    completed_identifiers,
+                    epi_identity_universe,
+                )
             tables["Identifier_Completion"] = completed_identifiers
             tables["Identifier_Warnings"] = identifier_warnings
             record("标识符补全", "完成", len(completed_identifiers))
@@ -989,10 +994,15 @@ def run_auto_query_workflow(
         emit_checkpoint("来源属性评估")
 
     if config.run_pov_lrtp_toxpi:
+        pov_representative = _annotate_representative_identity_keys(
+            representative,
+            prepared_input.primary_membership,
+            epi_identity_universe,
+        )
         toxpi_value = run_step(
             "Pov-LRTP / PBM / ToxPi",
             lambda: _run_pov_lrtp_toxpi(
-                representative,
+                pov_representative,
                 completed_identifiers,
                 epi_results,
                 tables,
@@ -1627,6 +1637,188 @@ def _build_identifier_input_from_epi_universe(
         else:
             output[column] = ""
     return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
+
+
+def _restore_identity_keys(
+    completed_identifiers: pd.DataFrame,
+    epi_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    completed = completed_identifiers.copy().reset_index(drop=True)
+    universe = epi_universe.copy().reset_index(drop=True)
+    if "identity_key" not in completed.columns:
+        completed["identity_key"] = ""
+    else:
+        completed["identity_key"] = completed["identity_key"].map(_clean_text)
+
+    if len(completed) == len(universe) and "identity_key" in universe.columns:
+        universe_keys = universe["identity_key"].map(_clean_text)
+        for position in completed.index:
+            if not _clean_text(completed.at[position, "identity_key"]):
+                completed.at[position, "identity_key"] = universe_keys.iloc[position]
+        return completed
+
+    for position, row in completed.iterrows():
+        if _clean_text(row.get("identity_key")):
+            continue
+        completed.at[position, "identity_key"] = _identity_key_for_row(
+            row,
+            universe,
+            cas_columns=("cas",),
+            smiles_columns=("smiles",),
+            name_columns=("compound",),
+        )
+    return completed
+
+
+def _annotate_representative_identity_keys(
+    representative: pd.DataFrame,
+    primary_membership: pd.DataFrame,
+    epi_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    membership = (
+        primary_membership.copy().reset_index(drop=True)
+        if isinstance(primary_membership, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    universe = (
+        epi_universe.copy().reset_index(drop=True)
+        if isinstance(epi_universe, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    candidates = universe if not universe.empty else membership
+    if candidates.empty and "identity_key" not in representative.columns:
+        return representative.copy()
+
+    annotated = representative.copy().reset_index(drop=True)
+    if "identity_key" not in annotated.columns:
+        annotated["identity_key"] = ""
+    else:
+        annotated["identity_key"] = annotated["identity_key"].map(_clean_text)
+
+    for position, row in annotated.iterrows():
+        if _clean_text(row.get("identity_key")):
+            continue
+        lineage_key = _identity_key_from_lineage(row, membership)
+        if lineage_key:
+            annotated.at[position, "identity_key"] = lineage_key
+            continue
+        annotated.at[position, "identity_key"] = _identity_key_for_row(
+            row,
+            candidates,
+            cas_columns=("CAS_input", "cas"),
+            smiles_columns=("SMILES_input", "smiles"),
+            name_columns=("Name", "compound"),
+        )
+    return annotated
+
+
+def _identity_key_from_lineage(
+    row: pd.Series,
+    membership: pd.DataFrame,
+) -> str:
+    if membership.empty or "identity_key" not in membership.columns:
+        return ""
+
+    scoped = membership.copy()
+    compared = False
+    lineage_columns = (
+        (("primary_file", "_primary_file", "source_primary_file"), "primary_file"),
+        (("sample_id", "_sample_id", "source_sample_id"), "sample_id"),
+        (("source_row", "_source_row"), "source_row"),
+    )
+    for source_columns, target_column in lineage_columns:
+        if target_column not in scoped.columns:
+            continue
+        source_value = _first_clean_value(row, source_columns)
+        if not source_value:
+            continue
+        compared = True
+        scoped = scoped.loc[
+            scoped[target_column].map(_clean_text).map(str.casefold).eq(
+                source_value.casefold()
+            )
+        ]
+    if not compared or scoped.empty:
+        return ""
+    keys = sorted(
+        {
+            _clean_text(value)
+            for value in scoped["identity_key"]
+            if _clean_text(value)
+        }
+    )
+    return keys[0] if len(keys) == 1 else ""
+
+
+def _identity_key_for_row(
+    row: pd.Series,
+    candidates: pd.DataFrame,
+    *,
+    cas_columns: tuple[str, ...],
+    smiles_columns: tuple[str, ...],
+    name_columns: tuple[str, ...],
+) -> str:
+    if candidates.empty or "identity_key" not in candidates.columns:
+        return ""
+
+    cas = _first_clean_value(row, cas_columns).replace(" ", "").casefold()
+    if cas:
+        return _unique_identity_key(
+            candidates,
+            "cas",
+            cas,
+            lambda value: _clean_text(value).replace(" ", "").casefold(),
+        )
+
+    smiles = _first_clean_value(row, smiles_columns)
+    if smiles:
+        return _unique_identity_key(
+            candidates,
+            "smiles",
+            smiles,
+            _clean_text,
+        )
+
+    name = " ".join(
+        _first_clean_value(row, name_columns).casefold().split()
+    )
+    if not name:
+        return ""
+    return _unique_identity_key(
+        candidates,
+        "compound",
+        name,
+        lambda value: " ".join(_clean_text(value).casefold().split()),
+    )
+
+
+def _unique_identity_key(
+    candidates: pd.DataFrame,
+    column: str,
+    expected: str,
+    normalizer,
+) -> str:
+    if column not in candidates.columns:
+        return ""
+    matched = candidates.loc[
+        candidates[column].map(normalizer).eq(expected)
+    ]
+    keys = sorted(
+        {
+            _clean_text(value)
+            for value in matched["identity_key"]
+            if _clean_text(value)
+        }
+    )
+    return keys[0] if len(keys) == 1 else ""
+
+
+def _first_clean_value(row: pd.Series, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = _clean_text(row.get(column))
+        if value:
+            return value
+    return ""
 
 
 def _query_input_from_identifiers(

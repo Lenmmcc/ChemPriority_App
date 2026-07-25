@@ -318,6 +318,59 @@ class MultiFileScreeningTests(unittest.TestCase):
             {"A": 2, "B": 2},
         )
 
+    def test_representative_identity_uses_selected_source_membership(self):
+        calculation_samples = [
+            {
+                "name": "Sample A",
+                "file_name": "A.xlsx",
+                "data": pd.DataFrame(
+                    {
+                        "Name": ["Shared"],
+                        "formula": ["C2H6"],
+                        "Group_Area": [100.0],
+                        "smiles": ["CC"],
+                        "cas": ["11-11-1"],
+                    }
+                ),
+            },
+            {
+                "name": "Sample B",
+                "file_name": "B.xlsx",
+                "data": pd.DataFrame(
+                    {
+                        "Name": ["Shared"],
+                        "formula": ["C3H8"],
+                        "Group_Area": [200.0],
+                        "smiles": ["CCC"],
+                        "cas": ["22-22-2"],
+                    }
+                ),
+            },
+        ]
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "sample_id": ["Sample A", "Sample B"],
+                "source_row": [0, 0],
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+            }
+        )
+
+        representative = multi_file_screening.build_representative_screening_table(
+            calculation_samples,
+            "Name",
+            "formula",
+            "Group_Area",
+            sample_cols=["Group_Area"],
+            smiles_col="smiles",
+            cas_col="cas",
+            primary_membership=membership,
+        )
+
+        self.assertEqual(len(representative), 1)
+        self.assertEqual(representative.loc[0, "CAS_input"], "22-22-2")
+        self.assertEqual(representative.loc[0, "identity_key"], "cas:22-22-2")
+
     def test_duplicate_case_insensitive_primary_file_names_are_rejected(self):
         samples = [
             PrimaryWorkbook(

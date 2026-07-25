@@ -601,6 +601,120 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             ["smiles:CCC"],
         )
 
+    @patch("src.auto_query_workflow._build_pbm_toxpi_output")
+    @patch("src.auto_query_workflow.build_pbm_toxpi_input")
+    @patch("src.auto_query_workflow.run_pov_lrtp_batch")
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_formal_workflow_routes_representative_to_matching_epi_identity_for_pov(
+        self,
+        run_identifier,
+        run_epi,
+        run_pov,
+        build_toxpi_input,
+        build_toxpi_output,
+    ):
+        representative = pd.DataFrame(
+            {
+                "Name": ["Shared"],
+                "formula": ["C3H8"],
+                "Group_Area": [200.0],
+                "SMILES_input": ["CCC"],
+                "CAS_input": ["22-22-2"],
+            }
+        )
+        epi_universe = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "identity_status": ["resolved", "resolved"],
+                "identity_candidates": ["[]", "[]"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", "22-22-2"],
+            }
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "sample_id": ["Sample A", "Sample B"],
+                "source_row": [0, 0],
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "identity_status": ["resolved", "resolved"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "cas": ["11-11-1", "22-22-2"],
+            }
+        )
+        sample_rows = pd.DataFrame(
+            {
+                "source_sample_id": ["Sample A", "Sample B"],
+                "sample_id": ["Sample A", "Sample B"],
+                "compound": ["Shared", "Shared"],
+                "peak_area": [100.0, 200.0],
+            }
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(),
+            prepared_input=pd.DataFrame(),
+            representative_table=representative,
+            primary_membership=membership,
+            epi_universe=epi_universe,
+            local_tables=OrderedDict(
+                [
+                    ("DF_Table", pd.DataFrame({"Name": ["Shared"]})),
+                    ("Group_Area_Mean_By_Sample", sample_rows),
+                ]
+            ),
+        )
+
+        def complete_both_identities(identifier_input, **kwargs):
+            completed = identifier_input.copy()
+            completed["pubchem_cid"] = ["11", "22"]
+            completed["pubchem_molecular_weight"] = [11.0, 22.0]
+            completed["pubchem_formula"] = ["C2H6", "C3H8"]
+            completed["pubchem_match_status"] = ["matched", "matched"]
+            return completed, pd.DataFrame()
+
+        run_identifier.side_effect = complete_both_identities
+        uploaded = complete_epi_rows(["Shared", "Shared"])
+        uploaded["smiles"] = ["CC", "CCC"]
+        uploaded["cas"] = ["11-11-1", "22-22-2"]
+        uploaded["molecular_weight"] = [111.0, 222.0]
+        uploaded["log_kow"] = [1.0, 2.0]
+        run_pov.side_effect = lambda frame: pd.DataFrame(
+            {"Name": frame["Name"], "Scores": [1.0] * len(frame)}
+        )
+        build_toxpi_input.return_value = pd.DataFrame()
+        build_toxpi_output.return_value = auto_query_workflow.PbmToxPiOutput(
+            tables=OrderedDict(),
+            charts=OrderedDict(),
+        )
+
+        result = run_auto_query_workflow(
+            pd.DataFrame(),
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_pov_lrtp_toxpi=True,
+                cache_enabled=False,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=uploaded,
+        )
+
+        run_epi.assert_not_called()
+        pov_input = result.tables["Pov_LRTP_Input"]
+        self.assertEqual(len(pov_input), 1)
+        self.assertEqual(pov_input.loc[0, "Compound_CID"], "22")
+        self.assertEqual(pov_input.loc[0, "SMILES"], "CCC")
+        self.assertEqual(pov_input.loc[0, "Molecular_Weight"], 222.0)
+        self.assertEqual(pov_input.loc[0, "Log_Kow_used"], 2.0)
+        downstream_input = run_pov.call_args.args[0]
+        self.assertEqual(downstream_input.loc[0, "Compound_CID"], "22")
+        self.assertEqual(downstream_input.loc[0, "Log_Kow_used"], 2.0)
+        sample_input = build_toxpi_input.call_args.kwargs["peak_area_long"]
+        self.assertEqual(len(sample_input), len(sample_rows))
+        pd.testing.assert_frame_equal(sample_input, sample_rows)
+
     def test_page_6_accepts_multiple_primary_files_and_keeps_both_in_settings(self):
         app = _app_test_with_cached_workbooks(
             [
