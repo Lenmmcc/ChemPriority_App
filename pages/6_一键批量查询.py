@@ -21,6 +21,7 @@ from src.auto_query_workflow import (
     build_auto_workflow_module_workbook,
     build_auto_workflow_partial_zip,
     build_auto_workflow_zip,
+    retry_auto_workflow_epi_failures,
     run_auto_query_workflow,
 )
 from src.auto_query_checkpoint import (
@@ -1325,6 +1326,63 @@ if settings_changed:
     clear_uploads(st.session_state, CHECKPOINT_STATE_KEYS)
     st.query_params.pop("run", None)
 
+run_token = (
+    st.session_state.get("auto_query_run_token")
+    or st.query_params.get("run")
+)
+module_workbooks = OrderedDict(
+    st.session_state.get("auto_query_module_workbooks") or OrderedDict()
+)
+latest_checkpoint = [None]
+live_render_generation = [0]
+partial_container = st.empty()
+
+
+def handle_checkpoint(checkpoint):
+    latest_checkpoint[0] = checkpoint
+    st.session_state["auto_query_partial_result"] = checkpoint.result
+    st.session_state["auto_query_workflow_result"] = checkpoint.result
+    if checkpoint.current_step:
+        try:
+            module = build_auto_workflow_module_workbook(
+                checkpoint.result,
+                checkpoint.current_step,
+            )
+        except Exception as exc:
+            st.session_state["auto_query_checkpoint_warning"] = (
+                f"模块导出失败：{exc}"
+            )
+        else:
+            if module is not None:
+                module_workbooks[module.slug] = module
+    st.session_state["auto_query_module_workbooks"] = OrderedDict(
+        module_workbooks
+    )
+    if run_token:
+        try:
+            save_checkpoint(
+                run_token,
+                checkpoint,
+                active_uploads[0]["name"],
+                module_workbooks,
+            )
+        except Exception as exc:
+            st.session_state["auto_query_checkpoint_warning"] = (
+                "临时恢复保存失败，本次结果仅保留在当前页面会话："
+                f"{exc}"
+            )
+    live_render_generation[0] += 1
+    render_scope = f"auto_query_live_{live_render_generation[0]}"
+    partial_container.empty()
+    with partial_container.container():
+        _render_module_downloads(
+            checkpoint.result,
+            module_workbooks,
+            checkpoint.result.charts,
+            key_prefix=render_scope,
+        )
+
+
 start_run = st.button("开始一键运行", type="primary")
 
 if start_run:
@@ -1404,56 +1462,12 @@ if start_run:
     module_workbooks = OrderedDict()
     latest_checkpoint = [None]
     live_render_generation = [0]
-    partial_container = st.empty()
     checkpoint_context = AutoWorkflowCheckpointContext(
         run_id=run_id,
         input_signature=workflow_input_signature,
         settings_signature=settings_signature(result_settings),
         selected_steps=tuple(selected_steps),
     )
-
-    def handle_checkpoint(checkpoint):
-        latest_checkpoint[0] = checkpoint
-        st.session_state["auto_query_partial_result"] = checkpoint.result
-        st.session_state["auto_query_workflow_result"] = checkpoint.result
-        if checkpoint.current_step:
-            try:
-                module = build_auto_workflow_module_workbook(
-                    checkpoint.result,
-                    checkpoint.current_step,
-                )
-            except Exception as exc:
-                st.session_state["auto_query_checkpoint_warning"] = (
-                    f"模块导出失败：{exc}"
-                )
-            else:
-                if module is not None:
-                    module_workbooks[module.slug] = module
-        st.session_state["auto_query_module_workbooks"] = OrderedDict(
-            module_workbooks
-        )
-        try:
-            save_checkpoint(
-                run_token,
-                checkpoint,
-                active_uploads[0]["name"],
-                module_workbooks,
-            )
-        except Exception as exc:
-            st.session_state["auto_query_checkpoint_warning"] = (
-                "临时恢复保存失败，本次结果仅保留在当前页面会话："
-                f"{exc}"
-            )
-        live_render_generation[0] += 1
-        render_scope = f"auto_query_live_{live_render_generation[0]}"
-        partial_container.empty()
-        with partial_container.container():
-            _render_module_downloads(
-                checkpoint.result,
-                module_workbooks,
-                checkpoint.result.charts,
-                key_prefix=render_scope,
-            )
 
     initial_result = AutoWorkflowResult(
         mapping=prepared_auto_input.mapping,
@@ -1616,6 +1630,195 @@ if result is not None:
     charts = st.session_state.get("auto_query_workflow_charts") or {}
     package = st.session_state.get("auto_query_workflow_zip")
     module_workbooks = st.session_state.get("auto_query_module_workbooks") or OrderedDict()
+    retry_input = result.tables.get("EPI_Retry_Input", pd.DataFrame())
+    if (
+        isinstance(retry_input, pd.DataFrame)
+        and not retry_input.empty
+        and st.button(
+            "仅重试未完成的 EPI 行",
+            key="auto_query_retry_epi_failures",
+        )
+    ):
+        if not run_token:
+            run_token = generate_run_token()
+            st.session_state["auto_query_run_token"] = run_token
+            st.query_params["run"] = run_token
+        selected_steps = build_selected_steps(
+            run_r_replicate_df=run_r_replicate_df,
+            run_identifier=run_identifier,
+            run_epi=True,
+            run_comptox=run_comptox,
+            run_echa_use=run_echa_use,
+            run_echa_ghs=run_echa_ghs,
+            run_source_origin=run_source_origin,
+            run_pov_lrtp_toxpi=run_pov_toxpi,
+        )
+        manifest = st.session_state.get("auto_query_checkpoint_manifest") or {}
+        retry_run_id = manifest.get("run_id") or generate_run_token()
+        retry_input_signature = (
+            manifest.get("input_signature") or workflow_input_signature
+        )
+        retry_settings_signature = (
+            manifest.get("settings_signature")
+            or settings_signature(result_settings)
+        )
+        finished_steps = list(
+            manifest.get("finished_steps") or selected_steps
+        )
+        for step in (
+            "EPI Suite 环境归趋",
+            *(
+                ("Pov-LRTP / PBM / ToxPi",)
+                if run_pov_toxpi
+                else ()
+            ),
+        ):
+            if step not in finished_steps:
+                finished_steps.append(step)
+        retry_status = st.empty()
+        retry_progress_bar = st.progress(0)
+
+        def update_retry_progress(step, done, total, label):
+            fraction = min(1.0, done / max(1, total))
+            retry_progress_bar.progress(fraction)
+            retry_status.info(
+                f"{step}：{done}/{total}，当前 {label or '处理中'}"
+            )
+
+        def update_retry_activity(event):
+            label = event.get("label") or ""
+            if label:
+                retry_status.info(f"EPI Suite 环境归趋：{label}")
+
+        checkpoint_kwargs = {
+            "run_id": retry_run_id,
+            "input_signature": retry_input_signature,
+            "settings_signature": retry_settings_signature,
+            "selected_steps": tuple(selected_steps),
+            "finished_steps": tuple(finished_steps),
+        }
+        try:
+            axis_ranges = ScreeningAxisRanges(
+                dbe_x_min=float(dbe_x_min),
+                dbe_x_max=float(dbe_x_max),
+                dbe_y_min=float(dbe_y_min),
+                dbe_y_max=float(dbe_y_max),
+                vk_x_min=float(vk_x_min),
+                vk_x_max=float(vk_x_max),
+                vk_y_min=float(vk_y_min),
+                vk_y_max=float(vk_y_max),
+            )
+            toxpi_config = PBMToxPiConfig(
+                candidate_top_n=int(candidate_top_n),
+                display_top_n=int(display_top_n),
+                evidence_per_compound_top_n=int(
+                    evidence_per_compound_top_n
+                ),
+                evidence_global_use_top_n=int(evidence_global_use_top_n),
+                weights={
+                    "peak_area": float(peak_area_weight) / 100.0,
+                    "pbm": float(pbm_weight) / 100.0,
+                    "df": float(df_weight) / 100.0,
+                },
+                robustness_enabled=bool(robustness_enabled),
+                perturbation_fraction=(
+                    float(perturbation_percent) / 100.0
+                ),
+                n_iter=int(robustness_iterations),
+                seed=int(robustness_seed),
+            )
+            retry_config = AutoWorkflowConfig(
+                mapping=mapping,
+                run_r_replicate_df=run_r_replicate_df,
+                run_identifier=run_identifier,
+                run_epi=True,
+                run_comptox=run_comptox,
+                run_echa_use=run_echa_use,
+                run_echa_ghs=run_echa_ghs,
+                run_source_origin=run_source_origin,
+                run_pov_lrtp_toxpi=run_pov_toxpi,
+                detection_threshold=float(detection_threshold),
+                axis_ranges=axis_ranges,
+                toxpi_config=toxpi_config,
+                cache_enabled=bool(cache_enabled),
+                identifier_max_workers=int(identifier_max_workers),
+                epi_max_workers=int(epi_max_workers),
+                comptox_max_workers=int(comptox_max_workers),
+                echa_max_workers=int(echa_max_workers),
+                echa_ghs_max_workers=int(echa_ghs_max_workers),
+                source_origin_max_workers=int(source_origin_max_workers),
+            )
+            with st.spinner("正在重试未完成的 EPI 行..."):
+                retried_result = retry_auto_workflow_epi_failures(
+                    result,
+                    retry_config,
+                    progress_callback=update_retry_progress,
+                    activity_callback=update_retry_activity,
+                )
+            charts = OrderedDict(retried_result.charts)
+            retried_result.charts = charts
+            st.session_state["auto_query_workflow_result"] = retried_result
+            st.session_state["auto_query_workflow_charts"] = charts
+            st.session_state.pop("auto_query_workflow_zip", None)
+            package = None
+            for current_step in (
+                "EPI Suite 环境归趋",
+                *(
+                    ("Pov-LRTP / PBM / ToxPi",)
+                    if retry_config.run_pov_lrtp_toxpi
+                    else ()
+                ),
+            ):
+                handle_checkpoint(
+                    AutoWorkflowCheckpoint(
+                        **checkpoint_kwargs,
+                        current_step=current_step,
+                        status="running",
+                        result=retried_result,
+                        error_message="",
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+            module_workbooks = OrderedDict(
+                st.session_state.get("auto_query_module_workbooks")
+                or OrderedDict()
+            )
+            build_auto_workflow_partial_zip(
+                retried_result,
+                module_workbooks,
+                charts=charts,
+            )
+            package = build_auto_workflow_zip(retried_result, charts)
+            st.session_state["auto_query_workflow_zip"] = package
+            completed_checkpoint = AutoWorkflowCheckpoint(
+                **checkpoint_kwargs,
+                current_step=None,
+                status="completed",
+                result=retried_result,
+                error_message="",
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            handle_checkpoint(completed_checkpoint)
+        except Exception as exc:
+            failed_result = st.session_state.get(
+                "auto_query_workflow_result",
+                result,
+            )
+            failed_checkpoint = AutoWorkflowCheckpoint(
+                **checkpoint_kwargs,
+                current_step="EPI Suite 环境归趋",
+                status="failed",
+                result=failed_result,
+                error_message=str(exc),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            handle_checkpoint(failed_checkpoint)
+            st.session_state["auto_query_checkpoint_warning"] = str(exc)
+            retry_status.error(f"EPI 重试未完成：{exc}")
+        else:
+            result = retried_result
+            retry_progress_bar.progress(1.0)
+            retry_status.success("EPI 重试完成。")
     checkpoint_warning = st.session_state.get("auto_query_checkpoint_warning")
     if checkpoint_warning:
         st.warning(checkpoint_warning)

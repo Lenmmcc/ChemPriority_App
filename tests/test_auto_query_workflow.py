@@ -33,6 +33,7 @@ from src.auto_query_workflow import (
     AutoWorkflowConfig,
     AutoWorkflowChart,
     AutoWorkflowMapping,
+    AutoWorkflowModuleWorkbook,
     AutoWorkflowPreparedInput,
     AutoWorkflowResult,
     LocalScreeningOutput,
@@ -46,6 +47,7 @@ from src.auto_query_workflow import (
     build_auto_workflow_zip,
     build_representative_table,
     detect_default_mapping,
+    retry_auto_workflow_epi_failures,
     run_auto_query_workflow,
 )
 from src.cp_screening_workflow import PBMToxPiConfig
@@ -885,6 +887,137 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(
             result.tables["EPI_Completeness"]["needs_query"].eq(False).all()
+        )
+
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    def test_retry_epi_failures_queries_only_retry_input_and_preserves_unrelated_tables(
+        self,
+        run_epi,
+    ):
+        original = _result_with_epi_retry_input(["Failed B"])
+        original.tables["CompTox_Summary"] = pd.DataFrame(
+            {"compound": ["Unrelated"], "status": ["ok"]}
+        )
+        original.charts["EPA_Product_Use_Category_Distribution"] = (
+            AutoWorkflowChart("Unrelated", b"epa-png", b"epa-pdf")
+        )
+        run_epi.return_value = (
+            complete_epi_rows(["Failed B"]),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+        with (
+            patch("src.auto_query_workflow.run_identifier_completion_batch") as run_identifier,
+            patch("src.auto_query_workflow.run_comptox_use_batch") as run_comptox,
+            patch("src.auto_query_workflow.run_echa_use_batch") as run_echa_use,
+            patch("src.auto_query_workflow.run_echa_ghs_batch") as run_echa_ghs,
+            patch("src.auto_query_workflow.run_source_origin_batch") as run_source_origin,
+        ):
+            retried = retry_auto_workflow_epi_failures(
+                original,
+                AutoWorkflowConfig(run_epi=True, epi_delay_seconds=0),
+            )
+
+        self.assertEqual(
+            run_epi.call_args.args[0]["compound"].tolist(),
+            ["Failed B"],
+        )
+        self.assertEqual(
+            retried.tables["EPI_Results"]["compound"].tolist(),
+            ["Seed A", "Failed B"],
+        )
+        pd.testing.assert_frame_equal(
+            retried.tables["CompTox_Summary"],
+            original.tables["CompTox_Summary"],
+        )
+        self.assertIs(
+            retried.charts["EPA_Product_Use_Category_Distribution"],
+            original.charts["EPA_Product_Use_Category_Distribution"],
+        )
+        self.assertTrue(retried.tables["EPI_Retry_Input"].empty)
+        run_identifier.assert_not_called()
+        run_comptox.assert_not_called()
+        run_echa_use.assert_not_called()
+        run_echa_ghs.assert_not_called()
+        run_source_origin.assert_not_called()
+
+    @patch("src.auto_query_workflow._run_pov_lrtp_toxpi")
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    def test_retry_epi_failures_rebuilds_only_epi_dependent_pov_outputs(
+        self,
+        run_epi,
+        run_pov,
+    ):
+        original = _result_with_epi_retry_input(["Failed B"])
+        original.tables["Pov_LRTP"] = pd.DataFrame({"version": ["old"]})
+        original.tables["ToxPi_Input"] = pd.DataFrame({"version": ["stale"]})
+        original.tables["CompTox_Summary"] = pd.DataFrame(
+            {"compound": ["Unrelated"], "status": ["ok"]}
+        )
+        original.charts["ToxPi_Radial_Plot"] = AutoWorkflowChart(
+            "Old radial",
+            b"old-png",
+            b"old-pdf",
+        )
+        original.charts["ToxPi_Ranking_Bar"] = AutoWorkflowChart(
+            "Stale bar",
+            b"stale-png",
+            b"stale-pdf",
+        )
+        original.charts["EPA_Product_Use_Category_Distribution"] = (
+            AutoWorkflowChart("Unrelated", b"epa-png", b"epa-pdf")
+        )
+        run_epi.return_value = (
+            complete_epi_rows(["Failed B"]),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+        replacement_table = pd.DataFrame({"version": ["new"]})
+        replacement_chart = AutoWorkflowChart(
+            "New radial",
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            ),
+            b"new-pdf",
+        )
+        run_pov.return_value = auto_query_workflow.PbmToxPiOutput(
+            tables=OrderedDict([("Pov_LRTP", replacement_table)]),
+            charts=OrderedDict([("ToxPi_Radial_Plot", replacement_chart)]),
+        )
+
+        retried = retry_auto_workflow_epi_failures(
+            original,
+            AutoWorkflowConfig(
+                run_epi=True,
+                run_pov_lrtp_toxpi=True,
+                epi_delay_seconds=0,
+            ),
+        )
+
+        run_pov.assert_called_once()
+        pd.testing.assert_frame_equal(
+            run_pov.call_args.args[2],
+            retried.tables["EPI_Results"],
+        )
+        pd.testing.assert_frame_equal(
+            retried.tables["Pov_LRTP"],
+            replacement_table,
+        )
+        self.assertNotIn("ToxPi_Input", retried.tables)
+        self.assertIs(
+            retried.charts["ToxPi_Radial_Plot"],
+            replacement_chart,
+        )
+        self.assertNotIn("ToxPi_Ranking_Bar", retried.charts)
+        pd.testing.assert_frame_equal(
+            retried.tables["CompTox_Summary"],
+            original.tables["CompTox_Summary"],
+        )
+        self.assertIs(
+            retried.charts["EPA_Product_Use_Category_Distribution"],
+            original.charts["EPA_Product_Use_Category_Distribution"],
         )
 
     @patch("src.auto_query_workflow.run_epi_web_batch")
@@ -2683,6 +2816,185 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(token, page_text)
 
+    def test_page_6_shows_epi_retry_button_only_for_nonempty_retry_input(self):
+        app = _app_test_with_cached_workbook()
+        app.session_state["auto_query_workflow_result"] = (
+            _result_with_epi_retry_input([])
+        )
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+        app = app.run(timeout=20)
+
+        self.assertNotIn(
+            "仅重试未完成的 EPI 行",
+            [button.label for button in app.button],
+        )
+
+        app.session_state["auto_query_workflow_result"] = (
+            _result_with_epi_retry_input(["Failed B"])
+        )
+        app = app.run(timeout=20)
+
+        self.assertIn(
+            "仅重试未完成的 EPI 行",
+            [button.label for button in app.button],
+        )
+
+    def test_page_6_epi_retry_refreshes_exports_and_uses_checkpoint_handler(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+
+        for token in (
+            "retry_auto_workflow_epi_failures(",
+            'result.tables.get("EPI_Retry_Input"',
+            '"仅重试未完成的 EPI 行"',
+            'build_auto_workflow_module_workbook(',
+            '"EPI Suite 环境归趋"',
+            '"Pov-LRTP / PBM / ToxPi"',
+            "build_auto_workflow_partial_zip(",
+            "build_auto_workflow_zip(",
+            "handle_checkpoint(",
+        ):
+            self.assertIn(token, page_text)
+
+    def test_page_6_epi_retry_click_updates_session_exports_and_checkpoint(self):
+        app = _app_test_with_cached_workbook()
+        next(
+            box
+            for box in app.checkbox
+            if box.label == "Pov-LRTP / PBM / ToxPi"
+        ).check().run()
+        original = _result_with_epi_retry_input(["Failed B"])
+        app.session_state["auto_query_workflow_result"] = original
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+        app = app.run(timeout=20)
+        retried = _result_with_epi_retry_input([])
+        replacement_chart = AutoWorkflowChart(
+            "New radial",
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            ),
+            b"new-pdf",
+        )
+        retried.charts = OrderedDict(
+            [("ToxPi_Radial_Plot", replacement_chart)]
+        )
+        epi_module = AutoWorkflowModuleWorkbook(
+            step="EPI Suite 环境归趋",
+            slug="epi_suite",
+            file_name="EPI_Suite_Results.xlsx",
+            data=b"epi-book",
+        )
+        pov_module = AutoWorkflowModuleWorkbook(
+            step="Pov-LRTP / PBM / ToxPi",
+            slug="pov_lrtp_pbm_toxpi",
+            file_name="Pov_LRTP_PBM_ToxPi_Results.xlsx",
+            data=b"pov-book",
+        )
+
+        with (
+            patch(
+                "src.auto_query_workflow.retry_auto_workflow_epi_failures",
+                return_value=retried,
+            ) as retry,
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_module_workbook",
+                side_effect=[epi_module, pov_module],
+            ),
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_partial_zip",
+                return_value=io.BytesIO(b"partial-zip"),
+            ) as build_partial,
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_zip",
+                return_value=io.BytesIO(b"full-zip"),
+            ) as build_full,
+            patch("src.auto_query_checkpoint.save_checkpoint") as save,
+        ):
+            app = next(
+                button
+                for button in app.button
+                if button.label == "仅重试未完成的 EPI 行"
+            ).click().run(timeout=20)
+
+        retry.assert_called_once()
+        build_partial.assert_called_once()
+        build_full.assert_called_once()
+        self.assertIs(
+            app.session_state["auto_query_workflow_result"],
+            retried,
+        )
+        self.assertIs(
+            app.session_state["auto_query_workflow_charts"][
+                "ToxPi_Radial_Plot"
+            ],
+            replacement_chart,
+        )
+        self.assertEqual(
+            set(app.session_state["auto_query_module_workbooks"]),
+            {"epi_suite", "pov_lrtp_pbm_toxpi"},
+        )
+        self.assertEqual(
+            app.session_state["auto_query_workflow_zip"].getvalue(),
+            b"full-zip",
+        )
+        self.assertGreaterEqual(save.call_count, 1)
+        self.assertEqual(save.call_args.args[1].status, "completed")
+        self.assertEqual(list(app.exception), [])
+
+    def test_page_6_epi_retry_zip_failure_removes_stale_full_zip_and_checkpoints_failure(
+        self,
+    ):
+        app = _app_test_with_cached_workbook()
+        original = _result_with_epi_retry_input(["Failed B"])
+        app.session_state["auto_query_workflow_result"] = original
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+        app.session_state["auto_query_workflow_zip"] = io.BytesIO(b"stale")
+        app = app.run(timeout=20)
+        retried = _result_with_epi_retry_input([])
+        epi_module = AutoWorkflowModuleWorkbook(
+            step="EPI Suite 环境归趋",
+            slug="epi_suite",
+            file_name="EPI_Suite_Results.xlsx",
+            data=b"epi-book",
+        )
+
+        with (
+            patch(
+                "src.auto_query_workflow.retry_auto_workflow_epi_failures",
+                return_value=retried,
+            ),
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_module_workbook",
+                return_value=epi_module,
+            ),
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_partial_zip",
+                return_value=io.BytesIO(b"partial-zip"),
+            ),
+            patch(
+                "src.auto_query_workflow.build_auto_workflow_zip",
+                side_effect=RuntimeError("simulated retry ZIP failure"),
+            ),
+            patch("src.auto_query_checkpoint.save_checkpoint") as save,
+        ):
+            app = next(
+                button
+                for button in app.button
+                if button.label == "仅重试未完成的 EPI 行"
+            ).click().run(timeout=20)
+
+        self.assertIs(
+            app.session_state["auto_query_workflow_result"],
+            retried,
+        )
+        self.assertNotIn("auto_query_workflow_zip", app.session_state)
+        self.assertIn(
+            "simulated retry ZIP failure",
+            app.session_state["auto_query_checkpoint_warning"],
+        )
+        self.assertEqual(save.call_args.args[1].status, "failed")
+        self.assertEqual(list(app.exception), [])
+
     def test_page_6_keeps_partial_artifacts_when_full_zip_build_fails(self):
         storage_stack = ExitStack()
         checkpoint_root = Path(
@@ -3428,6 +3740,55 @@ def complete_epi_rows(compounds):
             "level3_soil_half_life_hours": [30.0] * count,
             "log_baf": [1.0] * count,
         }
+    )
+
+
+def _result_with_epi_retry_input(failed_compounds):
+    failed_compounds = list(failed_compounds)
+    compounds = ["Seed A", *failed_compounds]
+    universe = pd.DataFrame(
+        {
+            "compound": compounds,
+            "smiles": ["CO", *["CC"] * len(failed_compounds)],
+            "cas": ["64-17-5", *["67-56-1"] * len(failed_compounds)],
+        }
+    )
+    seed_rows = complete_epi_rows(["Seed A"])
+    seed_rows["smiles"] = "CO"
+    resolution = auto_query_workflow.resolve_epi_sources(
+        universe,
+        seed_rows,
+        pd.DataFrame(),
+    )
+    tables = OrderedDict(
+        [
+            ("Identifier_Completion", _completed_identifier_rows(compounds)),
+            ("EPI_Identity_Universe", universe.copy()),
+            ("EPI_Results", resolution.results),
+            ("EPI_Raw_Results", resolution.raw_results),
+            ("EPI_Errors", resolution.errors),
+            ("EPI_Completeness", resolution.completeness),
+            ("EPI_Source_Provenance", resolution.provenance),
+            ("EPI_Match_Audit", resolution.match_audit),
+            ("EPI_Conflict_Audit", resolution.conflict_audit),
+            ("EPI_Query_Attempts", resolution.query_attempts),
+            ("EPI_Retry_Input", resolution.query_input),
+        ]
+    )
+    return AutoWorkflowResult(
+        mapping=AutoWorkflowMapping(),
+        representative_table=pd.DataFrame(
+            {
+                "Name": compounds,
+                "formula": ["C2H6O"] * len(compounds),
+                "Group_Area": [100.0] * len(compounds),
+            }
+        ),
+        tables=tables,
+        step_status=pd.DataFrame(
+            columns=["step", "status", "rows", "message"]
+        ),
+        warnings=pd.DataFrame(columns=["stage", "message"]),
     )
 
 

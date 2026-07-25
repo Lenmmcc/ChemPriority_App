@@ -31,6 +31,7 @@ from src.echa_ghs import run_echa_ghs_batch
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch
 from src.episuite_supplement import (
+    EPIResolution,
     merge_network_epi,
     prepare_universe,
     resolve_epi_sources,
@@ -1022,6 +1023,122 @@ def run_auto_query_workflow(
 
     emit_checkpoint(None, status="completed")
     return current_result()
+
+
+def retry_auto_workflow_epi_failures(
+    result: AutoWorkflowResult,
+    config: AutoWorkflowConfig,
+    progress_callback: ProgressCallback | None = None,
+    activity_callback: ActivityCallback | None = None,
+) -> AutoWorkflowResult:
+    retry_input = result.tables.get("EPI_Retry_Input", pd.DataFrame()).copy()
+    if retry_input.empty:
+        return result
+
+    attempt_events = []
+
+    def retry_activity(event):
+        attempt_events.append(dict(event))
+        if activity_callback is not None:
+            activity_callback(event)
+
+    network_results, network_raw, network_errors = run_epi_web_batch(
+        retry_input,
+        api_url=config.epi_api_url,
+        timeout=int(config.epi_timeout),
+        delay_seconds=float(config.epi_delay_seconds),
+        max_workers=int(config.epi_max_workers),
+        cache_enabled=bool(config.cache_enabled),
+        progress_callback=(
+            None
+            if progress_callback is None
+            else lambda done, total, label: progress_callback(
+                "EPI Suite 环境归趋",
+                done,
+                total,
+                label,
+            )
+        ),
+        activity_callback=retry_activity,
+    )
+    resolution = merge_network_epi(
+        EPIResolution(
+            results=result.tables.get("EPI_Results", pd.DataFrame()),
+            raw_results=result.tables.get("EPI_Raw_Results", pd.DataFrame()),
+            errors=result.tables.get("EPI_Errors", pd.DataFrame()),
+            completeness=result.tables.get(
+                "EPI_Completeness",
+                pd.DataFrame(),
+            ),
+            provenance=result.tables.get(
+                "EPI_Source_Provenance",
+                pd.DataFrame(),
+            ),
+            match_audit=result.tables.get(
+                "EPI_Match_Audit",
+                pd.DataFrame(),
+            ),
+            conflict_audit=result.tables.get(
+                "EPI_Conflict_Audit",
+                pd.DataFrame(),
+            ),
+            query_attempts=result.tables.get(
+                "EPI_Query_Attempts",
+                pd.DataFrame(),
+            ),
+            query_input=retry_input,
+        ),
+        network_results,
+        network_raw,
+        network_errors,
+        attempt_events,
+    )
+    updated_tables = OrderedDict(result.tables)
+    updated_tables.update(
+        {
+            "EPI_Results": resolution.results,
+            "EPI_Raw_Results": resolution.raw_results,
+            "EPI_Errors": resolution.errors,
+            "EPI_Completeness": resolution.completeness,
+            "EPI_Source_Provenance": resolution.provenance,
+            "EPI_Match_Audit": resolution.match_audit,
+            "EPI_Conflict_Audit": resolution.conflict_audit,
+            "EPI_Query_Attempts": resolution.query_attempts,
+            "EPI_Retry_Input": resolution.query_input.reset_index(drop=True),
+        }
+    )
+    updated = AutoWorkflowResult(
+        mapping=result.mapping,
+        representative_table=result.representative_table.copy(),
+        tables=updated_tables,
+        step_status=result.step_status.copy(),
+        warnings=result.warnings.copy(),
+        charts=OrderedDict(result.charts),
+    )
+    if not config.run_pov_lrtp_toxpi:
+        return updated
+
+    dependent_table_names = AUTO_WORKFLOW_EXPORT_MODULES[6][2]
+    dependent_chart_names = AUTO_WORKFLOW_EXPORT_MODULES[6][3]
+    for name in dependent_table_names:
+        updated.tables.pop(name, None)
+    for name in dependent_chart_names:
+        updated.charts.pop(name, None)
+    pov_representative = _annotate_representative_identity_keys(
+        updated.representative_table,
+        updated.tables.get("EPI_Primary_Membership", pd.DataFrame()),
+        updated.tables.get("EPI_Identity_Universe", pd.DataFrame()),
+    )
+    toxpi_value = _run_pov_lrtp_toxpi(
+        pov_representative,
+        updated.tables.get("Identifier_Completion", pd.DataFrame()),
+        resolution.results,
+        updated.tables,
+        config.toxpi_config,
+    )
+    updated.tables.update(toxpi_value.tables)
+    updated.charts.update(toxpi_value.charts)
+    return updated
 
 
 def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
