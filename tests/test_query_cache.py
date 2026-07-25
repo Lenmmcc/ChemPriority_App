@@ -1,4 +1,5 @@
 import contextlib
+import io
 import sqlite3
 import tempfile
 import time
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from streamlit.testing.v1 import AppTest
 
 from src import episuite_io
 from src.episuite_result_pool import (
@@ -190,6 +192,29 @@ class QueryCacheTests(unittest.TestCase):
         self.assertTrue(stats.readable)
         self.assertIsNone(stats.error_message)
 
+    def test_stats_and_prune_mark_existing_directory_as_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir)
+
+            stats = query_cache_stats(path)
+            after = prune_expired_cache(path)
+
+        self.assertFalse(stats.readable)
+        self.assertFalse(after.readable)
+        self.assertTrue(stats.error_message)
+        self.assertTrue(after.error_message)
+
+    def test_stats_and_prune_mark_path_inspection_error_as_unreadable(self):
+        path = Path("inspection-fails.sqlite3")
+        with patch.object(Path, "stat", side_effect=OSError("inspection denied")):
+            stats = query_cache_stats(path)
+            after = prune_expired_cache(path)
+
+        self.assertFalse(stats.readable)
+        self.assertFalse(after.readable)
+        self.assertIn("inspection denied", stats.error_message)
+        self.assertIn("inspection denied", after.error_message)
+
     def test_stats_and_prune_tolerate_missing_schema_and_corrupt_database(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             no_schema_path = Path(tmpdir) / "no_schema.sqlite3"
@@ -278,7 +303,7 @@ class QueryCacheTests(unittest.TestCase):
             )
 
     @patch("src.episuite_io._call_epi_web_api_uncached")
-    def test_page_3_and_page_6_epi_paths_reuse_epi_web_submit_cache(
+    def test_epi_web_submit_reuses_default_sqlite_cache_across_call_instances(
         self,
         uncached_submit,
     ):
@@ -359,6 +384,61 @@ class QueryCacheTests(unittest.TestCase):
             with self.subTest(page=page.name):
                 self.assertIn("render_query_cache_controls(", source)
                 self.assertNotIn('"清理本地查询缓存"', source)
+
+    def test_page_3_app_renders_cache_diagnostics_from_isolated_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "queries.sqlite3"
+            QueryCache(cache_path).set(
+                "epi_web_submit",
+                "page-3-smoke",
+                {"ok": True},
+            )
+            input_buffer = io.BytesIO()
+            pd.DataFrame(
+                {
+                    "compound": ["Ethanol"],
+                    "smiles": ["CCO"],
+                    "cas": ["64-17-5"],
+                }
+            ).to_excel(input_buffer, index=False)
+            app = AppTest.from_file(
+                "pages/3_EPISuite环境归趋.py",
+                default_timeout=20,
+            )
+            app.session_state["epi_input_bytes"] = input_buffer.getvalue()
+            app.session_state["epi_input_name"] = "epi-input.xlsx"
+            app.session_state["epi_input_signature"] = "page-3-app-test"
+
+            with patch("src.query_cache.DEFAULT_CACHE_PATH", cache_path):
+                app.run(timeout=20)
+
+        self.assertEqual(list(app.exception), [])
+        metrics = {metric.label: metric.value for metric in app.metric}
+        self.assertTrue(
+            {
+                "文件大小",
+                "总记录",
+                "EPI 记录",
+                "过期记录",
+                "最新写入",
+            }.issubset(metrics)
+        )
+        self.assertEqual(str(metrics["总记录"]), "1")
+        self.assertEqual(str(metrics["EPI 记录"]), "1")
+        self.assertIn(
+            "清理过期记录",
+            {button.label for button in app.button},
+        )
+        clear_button = next(
+            button
+            for button in app.button
+            if button.label == "清空全部查询缓存"
+        )
+        self.assertTrue(clear_button.disabled)
+        self.assertIn(
+            "我确认清空全部查询缓存",
+            {checkbox.label for checkbox in app.checkbox},
+        )
 
     def test_cache_renderer_requires_confirmation_before_full_clear(self):
         class FakeMetric:

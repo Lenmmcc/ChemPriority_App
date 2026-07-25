@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -117,8 +118,14 @@ def clear_query_cache(path=None):
 
 def query_cache_stats(path=None, ttl_seconds=DEFAULT_CACHE_TTL_SECONDS):
     cache_path = Path(path) if path is not None else current_cache_path()
-    if not _is_cache_file(cache_path):
-        return _empty_cache_stats(cache_path)
+    is_cache_file, size_bytes, inspection_error = _inspect_cache_file(cache_path)
+    if not is_cache_file:
+        return _empty_cache_stats(
+            cache_path,
+            size_bytes=size_bytes,
+            readable=inspection_error is None,
+            error_message=inspection_error,
+        )
 
     cutoff = time.time() - float(ttl_seconds)
     try:
@@ -138,14 +145,14 @@ def query_cache_stats(path=None, ttl_seconds=DEFAULT_CACHE_TTL_SECONDS):
     except (OSError, sqlite3.Error) as exc:
         return _empty_cache_stats(
             cache_path,
-            size_bytes=_cache_file_size(cache_path),
+            size_bytes=size_bytes,
             readable=False,
             error_message=str(exc),
         )
 
     return QueryCacheStats(
         path=cache_path,
-        size_bytes=_cache_file_size(cache_path),
+        size_bytes=size_bytes,
         total_rows=int(row[0] or 0),
         epi_rows=int(row[1] or 0),
         expired_rows=int(row[2] or 0),
@@ -160,8 +167,14 @@ def prune_expired_cache(
     compact=True,
 ):
     cache_path = Path(path) if path is not None else current_cache_path()
-    if not _is_cache_file(cache_path):
-        return _empty_cache_stats(cache_path)
+    is_cache_file, size_bytes, inspection_error = _inspect_cache_file(cache_path)
+    if not is_cache_file:
+        return _empty_cache_stats(
+            cache_path,
+            size_bytes=size_bytes,
+            readable=inspection_error is None,
+            error_message=inspection_error,
+        )
 
     cutoff = time.time() - float(ttl_seconds)
     try:
@@ -339,18 +352,19 @@ def _empty_cache_stats(
     )
 
 
-def _is_cache_file(path):
+def _inspect_cache_file(path):
+    cache_path = Path(path)
     try:
-        return Path(path).is_file()
-    except OSError:
-        return False
-
-
-def _cache_file_size(path):
-    try:
-        return Path(path).stat().st_size
-    except OSError:
-        return 0
+        path_stat = cache_path.stat()
+    except FileNotFoundError as exc:
+        if os.path.lexists(cache_path):
+            return False, 0, str(exc)
+        return False, 0, None
+    except OSError as exc:
+        return False, 0, str(exc)
+    if not stat.S_ISREG(path_stat.st_mode):
+        return False, 0, f"缓存路径不是普通文件：{cache_path}"
+    return True, int(path_stat.st_size), None
 
 
 def _format_cache_size(size_bytes):
