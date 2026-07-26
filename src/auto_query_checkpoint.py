@@ -25,12 +25,13 @@ from src.auto_query_workflow import (
     AutoWorkflowModuleWorkbook,
     AutoWorkflowResult,
 )
+from src.storage_paths import LEGACY_CHECKPOINT_ROOT, resolve_storage_paths
 
 
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 TTL = timedelta(hours=24)
-DEFAULT_CHECKPOINT_ROOT = Path(".cache/auto_query_runs")
+DEFAULT_CHECKPOINT_ROOT = LEGACY_CHECKPOINT_ROOT
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
@@ -65,11 +66,19 @@ def generate_run_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _run_directory(token, root=DEFAULT_CHECKPOINT_ROOT) -> Path:
+def current_checkpoint_root() -> Path:
+    return Path(resolve_storage_paths().checkpoint_root)
+
+
+def _resolved_root(root) -> Path:
+    return current_checkpoint_root() if root is None else Path(root)
+
+
+def _run_directory(token, root=None) -> Path:
     token = str(token)
     if not TOKEN_PATTERN.fullmatch(token):
         raise InvalidRunToken("恢复令牌格式无效")
-    root = Path(root).resolve()
+    root = _resolved_root(root).resolve()
     digest = hashlib.sha256(token.encode("ascii")).hexdigest()
     candidate = root / digest
     resolved = candidate.resolve()
@@ -190,7 +199,7 @@ def save_checkpoint(
     input_filenames: Iterable[str] | str,
     module_workbooks: Mapping[str, AutoWorkflowModuleWorkbook],
     *,
-    root=DEFAULT_CHECKPOINT_ROOT,
+    root=None,
     now=None,
 ) -> Path:
     now = now or _utc_now()
@@ -306,7 +315,7 @@ def _manifest_expiry(manifest: Mapping[str, Any]) -> datetime:
         raise CheckpointStorageError(f"检查点过期时间无效：{exc}") from exc
 
 
-def load_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT, now=None):
+def load_checkpoint(token, *, root=None, now=None):
     now = now or _utc_now()
     run_dir = _run_directory(token, root)
     manifest_path = _validated_run_path(run_dir, run_dir / "manifest.json")
@@ -386,7 +395,7 @@ def load_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT, now=None):
         raise CheckpointStorageError(f"检查点清单内容无效：{exc}") from exc
 
 
-def delete_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT) -> bool:
+def delete_checkpoint(token, *, root=None) -> bool:
     run_dir = _run_directory(token, root)
     if not run_dir.exists():
         return False
@@ -426,9 +435,9 @@ def _latest_trusted_mtime(run_dir: Path) -> datetime:
     return datetime.fromtimestamp(latest, tz=timezone.utc)
 
 
-def cleanup_expired_checkpoints(*, root=DEFAULT_CHECKPOINT_ROOT, now=None):
+def cleanup_expired_checkpoints(*, root=None, now=None):
     now = now or _utc_now()
-    root = Path(root).resolve()
+    root = _resolved_root(root).resolve()
     if not root.exists():
         return []
     removed = []

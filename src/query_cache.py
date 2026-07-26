@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from src.storage_paths import LEGACY_QUERY_CACHE_PATH, resolve_storage_paths
+
 
 DEFAULT_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-DEFAULT_CACHE_PATH = Path(
-    os.environ.get("CHEMPRIORITY_QUERY_CACHE_PATH", ".cache/chempriority_queries.sqlite3")
-)
+DEFAULT_CACHE_PATH = LEGACY_QUERY_CACHE_PATH
 SENSITIVE_KEY_NAMES = {
     "api_key",
     "apikey",
@@ -45,7 +45,10 @@ class QueryCacheStats:
 
 
 def current_cache_path():
-    return Path(_cache_path_var.get() or DEFAULT_CACHE_PATH)
+    override = _cache_path_var.get()
+    if override is not None:
+        return Path(override)
+    return Path(resolve_storage_paths().query_cache_path)
 
 
 @contextlib.contextmanager

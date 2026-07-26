@@ -3,6 +3,7 @@ import io
 import sqlite3
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +22,7 @@ from src.query_cache import (
     build_cache_key,
     cached_call,
     clear_query_cache,
+    current_cache_path,
     prune_expired_cache,
     query_cache_stats,
     render_query_cache_controls,
@@ -29,6 +31,19 @@ from src.query_cache import (
 
 
 class QueryCacheTests(unittest.TestCase):
+    def test_current_cache_path_uses_storage_resolver_at_call_time(self):
+        first = Path("first.sqlite3")
+        second = Path("second.sqlite3")
+        with patch(
+            "src.query_cache.resolve_storage_paths",
+            side_effect=[
+                SimpleNamespace(query_cache_path=first),
+                SimpleNamespace(query_cache_path=second),
+            ],
+        ):
+            self.assertEqual(current_cache_path(), first)
+            self.assertEqual(current_cache_path(), second)
+
     def test_cached_call_reuses_successful_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_path = Path(tmpdir) / "queries.sqlite3"
@@ -310,7 +325,7 @@ class QueryCacheTests(unittest.TestCase):
         uncached_submit.return_value = {"ok": True}
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "queries.sqlite3"
-            with patch("src.query_cache.DEFAULT_CACHE_PATH", path):
+            with use_cache_path(path):
                 page_3_result = episuite_io.call_epi_web_api(
                     "CCO",
                     cas="64-17-5",

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -127,6 +128,34 @@ def redirect_path_resolution(source, destination):
 
 
 class AutoQueryCheckpointTests(unittest.TestCase):
+    def test_checkpoint_default_root_is_resolved_at_each_call(self):
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            roots = [
+                SimpleNamespace(checkpoint_root=Path(first)),
+                SimpleNamespace(checkpoint_root=Path(second)),
+            ]
+            with patch(
+                "src.auto_query_checkpoint.resolve_storage_paths",
+                side_effect=roots,
+            ):
+                token_a = generate_run_token()
+                token_b = generate_run_token()
+                now = datetime(2026, 7, 26, tzinfo=timezone.utc)
+                save_checkpoint(
+                    token_a,
+                    example_checkpoint(now),
+                    ["A.xlsx"],
+                    OrderedDict(),
+                )
+                save_checkpoint(
+                    token_b,
+                    example_checkpoint(now),
+                    ["B.xlsx"],
+                    OrderedDict(),
+                )
+            self.assertTrue(any(Path(first).iterdir()))
+            self.assertTrue(any(Path(second).iterdir()))
+
     def test_repeated_saves_reuse_unchanged_content_addressed_artifacts(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
