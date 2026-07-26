@@ -14,8 +14,10 @@ layout.
   surrounding page behavior.
 - Do not change charts, download controls, scientific calculations, cache
   behavior, or workbook exports.
-- Do not introduce a compatibility wrapper because the installed Streamlit
-  version supports `width="stretch"` directly.
+- Require Streamlit 1.49 or newer because that release added string width
+  values such as `width="stretch"`.
+- Do not introduce a compatibility wrapper because the supported Streamlit
+  versions accept `width="stretch"` directly.
 
 ## Implementation
 
@@ -25,8 +27,9 @@ except for the renamed argument and value.
 
 ## Validation
 
-1. Add a source-contract regression test that fails while any
-   `use_container_width=True` dataframe call remains.
+1. Add source-contract regression tests that fail while any
+   `use_container_width=True` dataframe call remains or while the declared
+   Streamlit minimum version is below 1.49.
 2. Run the test before implementation to verify the deprecated calls are
    detected.
 3. Apply the minimal replacements.
@@ -35,7 +38,8 @@ except for the renamed argument and value.
 
 ## Success Criteria
 
-- No Python source file contains `use_container_width=True`.
+- No production page contains `use_container_width=True`.
 - Every migrated dataframe remains configured with `width="stretch"`.
+- The declared Streamlit dependency is `streamlit>=1.49,<2`.
 - Streamlit page tests and the full test suite pass.
 - No unrelated source or behavior changes are included.

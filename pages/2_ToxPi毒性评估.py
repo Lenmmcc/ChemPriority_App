@@ -184,13 +184,13 @@ if not toxic_cols:
 
 with st.sidebar.expander("查看可选毒性指标", expanded=False):
     st.write("系统从 Excel 中识别到下列可转为数字的候选指标列：")
-    st.dataframe(pd.DataFrame({"candidate_toxicity_indicator": candidate_toxic_cols}), use_container_width=True)
+    st.dataframe(pd.DataFrame({"candidate_toxicity_indicator": candidate_toxic_cols}), width="stretch")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**3. 毒性因子权重（{len(toxic_cols)} 个指标）**")
 with st.sidebar.expander("查看本次参与计算的毒性指标", expanded=False):
     st.write("系统会使用下列已选择的指标参与 ToxPi 计算：")
-    st.dataframe(pd.DataFrame({"toxicity_indicator": toxic_cols}), use_container_width=True)
+    st.dataframe(pd.DataFrame({"toxicity_indicator": toxic_cols}), width="stretch")
 
 user_weights = {}
 for col in toxic_cols:
@@ -300,17 +300,17 @@ with tab1:
                 "weight": [user_weights[col] for col in toxic_cols],
             }
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     st.subheader("原始数据")
-    st.dataframe(cleaned_df, use_container_width=True)
+    st.dataframe(cleaned_df, width="stretch")
 
     st.subheader("归一化数据")
-    st.dataframe(normalized_df, use_container_width=True)
+    st.dataframe(normalized_df, width="stretch")
 
     st.subheader("ToxPi 得分")
-    st.dataframe(final_agg[["compound", "toxpi"]], use_container_width=True)
+    st.dataframe(final_agg[["compound", "toxpi"]], width="stretch")
 
 with tab2:
     st.subheader("ToxPi 风玫瑰图")
@@ -403,7 +403,7 @@ with tab3:
 
         st.markdown("---")
         st.subheader(f"多 seed 汇总表 (Top {actual_top_k})")
-        st.dataframe(combined_summary, use_container_width=True)
+        st.dataframe(combined_summary, width="stretch")
 
         excel_buffer = build_excel_report(final_agg, seed_results, combined_summary, actual_top_k, toxic_cols)
         st.download_button(

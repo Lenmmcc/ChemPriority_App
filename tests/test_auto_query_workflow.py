@@ -4090,7 +4090,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             if re.match(r"^streamlit(?=[<>=!~\s]|$)", line, flags=re.IGNORECASE)
         ]
 
-        self.assertEqual(streamlit_requirements, ["streamlit>=1.43,<2"])
+        self.assertEqual(streamlit_requirements, ["streamlit>=1.49,<2"])
 
     def test_page_6_renders_recovered_results_before_stopping_for_missing_upload(self):
         page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")

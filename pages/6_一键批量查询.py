@@ -518,7 +518,7 @@ def _render_epi_supplement_mappings(
 
 
 def _show_dataframe(frame):
-    st.dataframe(frame, use_container_width=True, hide_index=True)
+    st.dataframe(frame, width="stretch", hide_index=True)
 
 
 def _render_structure_preparation_summary(prepared_df):

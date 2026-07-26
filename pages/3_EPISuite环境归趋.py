@@ -154,7 +154,7 @@ def render_epi_web_tables(epi_tables):
         table = epi_tables.get(sheet_name)
         with tab:
             if table is not None and not table.empty:
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
             else:
                 st.info("该类别没有可展示的结构化结果。")
 
@@ -162,7 +162,7 @@ def render_epi_web_tables(epi_tables):
     if raw_table is not None and not raw_table.empty:
         with st.expander("审计数据：Raw API JSON", expanded=False):
             preview_cols = [col for col in ["compound", "smiles", "cas", "epi_cas", "epi_smiles", "raw_json"] if col in raw_table.columns]
-            st.dataframe(raw_table[preview_cols], use_container_width=True)
+            st.dataframe(raw_table[preview_cols], width="stretch")
 
 
 def render_structure_preparation_summary(prepared_df):
@@ -181,7 +181,7 @@ def render_structure_preparation_summary(prepared_df):
     if summary["smiles_conflicts"] or summary["parse_failures"]:
         with st.expander("查看结构准备审计记录", expanded=False):
             mask = prepared_df["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | prepared_df["parse_status"].eq("解析失败")
-            st.dataframe(prepared_df.loc[mask], use_container_width=True)
+            st.dataframe(prepared_df.loc[mask], width="stretch")
 
 
 st.set_page_config(
@@ -217,7 +217,7 @@ with right_col:
     )
 
 st.subheader("目标环境归趋指标")
-st.dataframe(pd.DataFrame(FATE_ENDPOINTS), use_container_width=True)
+st.dataframe(pd.DataFrame(FATE_ENDPOINTS), width="stretch")
 
 if uploaded_file is not None:
     uploaded_bytes = uploaded_file.getvalue()
@@ -282,7 +282,7 @@ except Exception as exc:
 is_valid, message = validate_input(input_df)
 if not is_valid:
     st.error(message)
-    st.dataframe(input_df, use_container_width=True)
+    st.dataframe(input_df, width="stretch")
     st.stop()
 
 st.success(message)
@@ -293,7 +293,7 @@ tab_input, tab_predict, tab_fallback, tab_parse, tab_output = st.tabs(
 
 with tab_input:
     st.subheader("待预测化合物")
-    st.dataframe(input_df[input_columns_for_display(input_df)], use_container_width=True)
+    st.dataframe(input_df[input_columns_for_display(input_df)], width="stretch")
     st.metric("化合物数量", len(input_df))
 
 with tab_predict:
@@ -371,11 +371,11 @@ with tab_predict:
     web_tables = st.session_state.get("epi_web_tables")
     if web_results is not None:
         st.subheader("网页端预测结果")
-        st.dataframe(slim_epi_report_columns(web_results), use_container_width=True)
+        st.dataframe(slim_epi_report_columns(web_results), width="stretch")
         render_epi_web_tables(web_tables)
     if web_errors is not None and not web_errors.empty:
         st.subheader("失败记录")
-        st.dataframe(web_errors, use_container_width=True)
+        st.dataframe(web_errors, width="stretch")
 
 with tab_fallback:
     st.subheader("EPI Suite 输入文件")
@@ -479,14 +479,14 @@ with tab_parse:
 
         st.success("结果文件解析完成。")
         st.subheader("合并后的环境归趋结果")
-        st.dataframe(merged_results, use_container_width=True)
+        st.dataframe(merged_results, width="stretch")
 
         with st.expander("查看原始解析结果", expanded=False):
-            st.dataframe(parsed_results, use_container_width=True)
+            st.dataframe(parsed_results, width="stretch")
 
         if not parse_warnings.empty:
             st.warning("部分字段未完全识别，详情见解析警告。")
-            st.dataframe(parse_warnings, use_container_width=True)
+            st.dataframe(parse_warnings, width="stretch")
     else:
         st.info("上传 EPI Suite 结果文件后，会在这里显示结构化解析结果。")
 

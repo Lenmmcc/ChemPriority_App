@@ -95,7 +95,7 @@ def show_dataframe(df):
     try:
         st.dataframe(df, width="stretch")
     except TypeError:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
 
 
 def render_speedup_settings(key_prefix, default_workers):

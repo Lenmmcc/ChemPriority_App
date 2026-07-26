@@ -102,7 +102,7 @@ def show_dataframe(df):
     try:
         st.dataframe(df, width="stretch")
     except TypeError:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
 
 
 def read_file_bytes(path):

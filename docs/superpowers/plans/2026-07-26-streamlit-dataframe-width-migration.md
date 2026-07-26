@@ -6,11 +6,12 @@
 
 **Architecture:** This is a source-compatible mechanical migration limited to Streamlit dataframe calls under `pages/`. A source-contract test prevents the deprecated argument from returning, while existing AppTest and unit tests verify that page behavior and scientific workflows remain unchanged.
 
-**Tech Stack:** Python 3, Streamlit 1.58, `unittest`, Streamlit AppTest
+**Tech Stack:** Python 3, Streamlit 1.49–1.x (verified locally with 1.58), `unittest`, Streamlit AppTest
 
 ## Global Constraints
 
 - Preserve the current full-width dataframe layout.
+- Require Streamlit 1.49 or newer, the first release supporting `width="stretch"`.
 - Do not change dataframe inputs, column configuration, index visibility, scientific calculations, caching, or exports.
 - Do not introduce a compatibility wrapper.
 - Do not change non-dataframe Streamlit components.
@@ -21,6 +22,7 @@
 
 **Files:**
 - Create: `tests/test_streamlit_dataframe_width_contract.py`
+- Modify: `requirements.txt`
 - Modify: `pages/0_综合筛查流程.py`
 - Modify: `pages/1_ADMETlab毒性数据获取.py`
 - Modify: `pages/2_ToxPi毒性评估.py`
@@ -72,7 +74,12 @@ E:\pyproject\ToxPi_App\.venv\Scripts\python.exe -m unittest tests.test_streamlit
 
 Expected: FAIL with `Deprecated Streamlit dataframe width arguments remain` and references to the affected files under `pages/`.
 
-- [ ] **Step 3: Apply the minimal migration**
+- [ ] **Step 3: Lock the supported Streamlit version**
+
+Add a failing contract test that requires `streamlit>=1.49,<2`, confirm it
+fails against the old lower bound, then update `requirements.txt`.
+
+- [ ] **Step 4: Apply the minimal migration**
 
 In every affected `st.dataframe` call, replace:
 
@@ -88,7 +95,7 @@ width="stretch"
 
 Do not alter any other arguments or surrounding code.
 
-- [ ] **Step 4: Run the contract and targeted page tests**
+- [ ] **Step 5: Run the contract and targeted page tests**
 
 Run:
 
@@ -96,9 +103,9 @@ Run:
 E:\pyproject\ToxPi_App\.venv\Scripts\python.exe -m unittest tests.test_streamlit_dataframe_width_contract tests.test_query_cache.QueryCacheTests.test_page_3_app_renders_cache_diagnostics_from_isolated_cache tests.test_auto_query_workflow.AutoQueryWorkflowTests.test_page_6_accepts_multiple_primary_files_and_keeps_both_in_settings -v
 ```
 
-Expected: 3 tests run and `OK`, with no `Please replace use_container_width with width` warning.
+Expected: 4 tests run and `OK`, with no `Please replace use_container_width with width` warning.
 
-- [ ] **Step 5: Run complete verification**
+- [ ] **Step 6: Run complete verification**
 
 Run:
 
@@ -106,7 +113,7 @@ Run:
 E:\pyproject\ToxPi_App\.venv\Scripts\python.exe -m compileall app.py pages src
 E:\pyproject\ToxPi_App\.venv\Scripts\python.exe -m unittest discover -s tests -v
 git diff --check
-rg -n "use_container_width" --glob "*.py" .
+rg -n "use_container_width" --glob "*.py" pages
 ```
 
 Expected:
@@ -114,11 +121,11 @@ Expected:
 - Compilation exits with code 0.
 - The full test suite reports `OK`.
 - `git diff --check` produces no output.
-- The final search produces no matches.
+- The final production-page search produces no matches.
 
-- [ ] **Step 6: Commit the migration**
+- [ ] **Step 7: Commit the migration**
 
 ```powershell
-git add -- tests/test_streamlit_dataframe_width_contract.py pages/0_综合筛查流程.py pages/1_ADMETlab毒性数据获取.py pages/2_ToxPi毒性评估.py pages/3_EPISuite环境归趋.py pages/4_化合物用途查询.py pages/6_一键批量查询.py
+git add -- requirements.txt tests/test_streamlit_dataframe_width_contract.py pages/0_综合筛查流程.py pages/1_ADMETlab毒性数据获取.py pages/2_ToxPi毒性评估.py pages/3_EPISuite环境归趋.py pages/4_化合物用途查询.py pages/6_一键批量查询.py
 git commit -m "fix: migrate Streamlit dataframe width arguments"
 ```
