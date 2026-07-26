@@ -17,7 +17,11 @@ from src.comptox_use import (
     build_product_use_table,
     run_comptox_use_batch,
 )
-from src.auto_query_file_views import safe_export_names, scoped_chart_key
+from src.auto_query_file_views import (
+    build_file_module_views,
+    safe_export_names,
+    scoped_chart_key,
+)
 from src.cp_screening_workflow import (
     PBMToxPiConfig,
     build_detection_frequency,
@@ -627,6 +631,20 @@ def run_auto_query_workflow(
         )
 
     def emit_checkpoint(current_step, status="running", error_message=""):
+        partial = current_result()
+        updated_charts, chart_messages = update_auto_workflow_charts(
+            partial,
+            completed_step=current_step,
+        )
+        charts.clear()
+        charts.update(updated_charts)
+        for message in chart_messages:
+            warning = {
+                "stage": "Chart generation",
+                "message": str(message),
+            }
+            if warning not in warning_rows:
+                warning_rows.append(warning)
         if checkpoint_callback is None or checkpoint_context is None:
             return
         selected = set(checkpoint_context.selected_steps)
@@ -1335,28 +1353,93 @@ def _module_chart_file_name(chart_key: str) -> str:
     return chart_key.removeprefix("Local_")
 
 
-def build_auto_workflow_charts(result: AutoWorkflowResult) -> OrderedDict[str, AutoWorkflowChart]:
-    charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict(
+def build_auto_workflow_charts(
+    result: AutoWorkflowResult,
+) -> OrderedDict[str, AutoWorkflowChart]:
+    charts, _ = update_auto_workflow_charts(result)
+    return charts
+
+
+def update_auto_workflow_charts(result, completed_step=None):
+    charts = OrderedDict(
         (key, chart)
         for key, chart in result.charts.items()
-        if key in PUBLIC_CHART_NAMES
+        if (
+            key in PUBLIC_CHART_NAMES
+            or any(
+                key.endswith(f"__{public_name}")
+                for public_name in PUBLIC_CHART_NAMES
+            )
+        )
     )
-    for source_config in _auto_workflow_chart_sources(result):
-        chart_df = _build_chart_data(source_config)
-        if chart_df.empty:
+    warnings = []
+    for chart_key, source_config in available_chart_sources(
+        result,
+        completed_step=completed_step,
+    ):
+        if chart_key in charts:
             continue
         fig = None
         try:
+            chart_df = _build_chart_data(source_config)
+            if chart_df.empty:
+                continue
             fig = _build_chart_figure(chart_df, source_config)
-            charts[source_config["file_prefix"]] = AutoWorkflowChart(
+            charts[chart_key] = AutoWorkflowChart(
                 title=source_config["title"],
                 png=figure_to_png_bytes(fig).getvalue(),
                 pdf=figure_to_pdf_bytes(fig).getvalue(),
             )
+        except Exception as exc:
+            warnings.append(f"{source_config['title']}: {exc}")
         finally:
             if fig is not None:
                 plt.close(fig)
-    return charts
+    return charts, warnings
+
+
+def available_chart_sources(result, completed_step=None):
+    del completed_step
+    views = build_file_module_views(result)
+    configured = []
+    found_file_view = False
+    for module_slug in (
+        "comptox_use",
+        "echa_reach_use",
+        "source_origin",
+    ):
+        for view in views.get(module_slug, {}).values():
+            found_file_view = True
+            proxy_tables = OrderedDict(view.tables)
+            for name in ("ToxPi_Results", "ToxPi_Settings"):
+                table = result.tables.get(name)
+                if isinstance(table, pd.DataFrame):
+                    proxy_tables[name] = table
+            proxy = AutoWorkflowResult(
+                mapping=result.mapping,
+                representative_table=result.representative_table,
+                tables=proxy_tables,
+                step_status=result.step_status,
+                warnings=result.warnings,
+                charts=OrderedDict(),
+            )
+            for source_config in _auto_workflow_chart_sources(proxy):
+                configured.append(
+                    (
+                        scoped_chart_key(
+                            module_slug,
+                            view.safe_export_name,
+                            source_config["file_prefix"],
+                        ),
+                        source_config,
+                    )
+                )
+    if not found_file_view:
+        configured.extend(
+            (source["file_prefix"], source)
+            for source in _auto_workflow_chart_sources(result)
+        )
+    return configured
 
 
 def build_auto_workflow_zip(

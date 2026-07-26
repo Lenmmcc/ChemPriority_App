@@ -220,6 +220,121 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             ["cas:64-17-5"],
         )
 
+    @patch("src.auto_query_workflow.run_comptox_use_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_epa_checkpoint_contains_available_per_file_charts(
+        self,
+        identifier_batch,
+        comptox_batch,
+    ):
+        mappings = pd.DataFrame(
+            {
+                "file_name": ["A.xlsx", "B.xlsx"],
+                "sample_id": ["A", "B"],
+                "safe_export_name": ["A", "B"],
+            }
+        )
+        membership = pd.DataFrame(
+            {
+                "primary_file": ["A.xlsx", "B.xlsx"],
+                "sample_id": ["A", "B"],
+                "identity_key": ["cas:a", "cas:b"],
+                "compound": ["Only A", "Only B"],
+                "cas": ["1-00-0", "2-00-0"],
+                "smiles": ["A", "B"],
+            }
+        )
+        universe = pd.DataFrame(
+            {
+                "identity_key": ["cas:a", "cas:b"],
+                "compound": ["Only A", "Only B"],
+                "cas": ["1-00-0", "2-00-0"],
+                "smiles": ["A", "B"],
+            }
+        )
+        completed = pd.DataFrame(
+            {
+                "compound": ["Only A", "Only B"],
+                "smiles": ["A", "B"],
+                "cas": ["1-00-0", "2-00-0"],
+                "ec": ["", ""],
+                "dtxsid": ["", ""],
+                "echa_id": ["", ""],
+            }
+        )
+        identifier_batch.return_value = (completed, pd.DataFrame())
+        candidates = pd.DataFrame(
+            {
+                "input_identity_key": ["cas:a", "cas:b"],
+                "compound": ["Only A", "Only B"],
+                "source_type": ["product_category", "product_category"],
+                "raw_use": ["A use", "B use"],
+                "use_cn": ["A use", "B use"],
+            }
+        )
+        comptox_batch.return_value = (
+            pd.DataFrame(
+                {
+                    "input_identity_key": ["cas:a", "cas:b"],
+                    "compound": ["Only A", "Only B"],
+                }
+            ),
+            candidates,
+            pd.DataFrame(columns=["input_identity_key"]),
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(),
+            prepared_input=pd.DataFrame(),
+            representative_table=pd.DataFrame(
+                {
+                    "Name": ["Only A", "Only B"],
+                    "formula": ["A", "B"],
+                    "Group_Area": [2.0, 1.0],
+                }
+            ),
+            local_tables=OrderedDict(
+                [
+                    ("Input_File_Mappings", mappings),
+                    ("EPI_Primary_Membership", membership),
+                ]
+            ),
+            primary_membership=membership,
+            epi_universe=universe,
+        )
+        checkpoints = []
+
+        run_auto_query_workflow(
+            pd.DataFrame(),
+            AutoWorkflowConfig(
+                run_r_replicate_df=True,
+                run_identifier=False,
+                run_comptox=True,
+            ),
+            prepared_input=prepared,
+            checkpoint_context=AutoWorkflowCheckpointContext(
+                run_id="run",
+                input_signature="input",
+                settings_signature="settings",
+                selected_steps=("EPA CompTox 用途",),
+            ),
+            checkpoint_callback=checkpoints.append,
+        )
+
+        epa_checkpoint = next(
+            checkpoint
+            for checkpoint in checkpoints
+            if checkpoint.current_step
+            and "CompTox" in checkpoint.current_step
+        )
+        self.assertIn(
+            "comptox_use__A__EPA_Product_Use_Category_Distribution",
+            epa_checkpoint.result.charts,
+        )
+        self.assertIn(
+            "comptox_use__B__EPA_Product_Use_Category_Distribution",
+            epa_checkpoint.result.charts,
+        )
+
     def test_page_6_storage_switch_detaches_without_deleting_checkpoint(self):
         page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
         start = page_text.index(

@@ -3,9 +3,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
+import src.auto_query_workflow as auto_query_workflow
 from src.auto_query_file_views import (
     build_file_module_views,
     safe_export_names,
@@ -16,6 +18,7 @@ from src.auto_query_workflow import (
     AutoWorkflowMapping,
     AutoWorkflowResult,
     auto_input_from_multi_file_result,
+    update_auto_workflow_charts,
 )
 from src.multi_file_screening import MultiFileScreeningResult
 
@@ -162,6 +165,55 @@ class AutoQueryFileViewTests(unittest.TestCase):
             scoped_chart_key("comptox_use", "A", "EPA_PUC"),
             "comptox_use__A__EPA_PUC",
         )
+
+    def test_chart_updates_are_file_scoped_and_cumulative(self):
+        result = example_result()
+        result.charts[
+            "local_screening__A__Local_DBE_Bubble_Plot"
+        ] = AutoWorkflowChart("Local", b"\x89PNG\r\n\x1a\nold", b"%PDF-old")
+
+        charts, warnings = update_auto_workflow_charts(result)
+
+        self.assertEqual(warnings, [])
+        self.assertIn(
+            "local_screening__A__Local_DBE_Bubble_Plot",
+            charts,
+        )
+        self.assertIn(
+            "comptox_use__A__EPA_Product_Use_Category_Distribution",
+            charts,
+        )
+        self.assertIn(
+            "comptox_use__B__EPA_Product_Use_Category_Distribution",
+            charts,
+        )
+        self.assertTrue(
+            charts[
+                "comptox_use__A__EPA_Product_Use_Category_Distribution"
+            ].png.startswith(b"\x89PNG")
+        )
+        self.assertTrue(
+            charts[
+                "comptox_use__B__EPA_Product_Use_Category_Distribution"
+            ].pdf.startswith(b"%PDF")
+        )
+
+    def test_one_chart_failure_keeps_other_available_charts(self):
+        result = example_result()
+        original = auto_query_workflow._build_chart_figure
+        calls = iter(range(100))
+        with patch(
+            "src.auto_query_workflow._build_chart_figure",
+            side_effect=lambda data, config: (
+                (_ for _ in ()).throw(RuntimeError("one chart failed"))
+                if next(calls) == 0
+                else original(data, config)
+            ),
+        ) as figure_builder:
+            charts, warnings = update_auto_workflow_charts(result)
+
+        self.assertTrue(warnings)
+        self.assertTrue(charts)
 
     def test_multi_file_adapter_keeps_local_charts_scoped_by_file(self):
         with TemporaryDirectory() as tmp:
