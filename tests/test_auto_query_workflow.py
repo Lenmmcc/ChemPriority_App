@@ -892,6 +892,318 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             result.tables["EPI_Completeness"]["needs_query"].eq(False).all()
         )
 
+    @patch("src.auto_query_workflow._run_pov_lrtp_toxpi")
+    @patch("src.auto_query_workflow.run_epi_web_batch")
+    @patch("src.auto_query_workflow.run_identifier_completion_batch")
+    def test_multi_file_pool_failure_exports_and_checkpoint_round_trip(
+        self,
+        run_identifier,
+        run_epi,
+        run_pov,
+    ):
+        compounds = ["Uploaded A", "Pool B", "Network C"]
+        representative = pd.DataFrame(
+            {
+                "Name": compounds,
+                "formula": ["C2H6", "C3H8", "C4H10"],
+                "Group_Area": [100.0, 200.0, 300.0],
+            }
+        )
+        sample_rows = pd.DataFrame(
+            {
+                "source_sample_id": [
+                    "Lake-A",
+                    "Lake-A",
+                    "Lake-A",
+                    "Lake-B",
+                    "Lake-B",
+                    "Lake-B",
+                ],
+                "sample_id": [
+                    "Lake-A",
+                    "Lake-A",
+                    "Lake-A",
+                    "Lake-B",
+                    "Lake-B",
+                    "Lake-B",
+                ],
+                "compound": compounds * 2,
+                "peak_area": [10.0, 20.0, 30.0, 15.0, 25.0, 35.0],
+            }
+        )
+        mappings = pd.DataFrame(
+            {
+                "source_file": ["Lake-A.xlsx", "Lake-B.xlsx"],
+                "sample_id": ["Lake-A", "Lake-B"],
+                "compound_col": ["Name", "Name"],
+                "formula_col": ["formula", "formula"],
+            }
+        )
+        prepared = AutoWorkflowPreparedInput(
+            mapping=AutoWorkflowMapping(
+                compound_col="Name",
+                formula_col="formula",
+                peak_area_col="Group_Area",
+                group_area_cols=["Group_Area"],
+            ),
+            prepared_input=representative.copy(),
+            representative_table=representative,
+            local_tables=OrderedDict(
+                [
+                    ("Input_File_Mappings", mappings),
+                    (
+                        "DF_Table",
+                        pd.DataFrame(
+                            {
+                                "compound": compounds,
+                                "DF": [2, 2, 2],
+                            }
+                        ),
+                    ),
+                    ("Group_Area_Mean_By_Sample", sample_rows),
+                ]
+            ),
+        )
+        identifiers = pd.DataFrame(
+            {
+                "compound": compounds,
+                "smiles": ["CC", "CCC", "CCCC"],
+                "cas": ["11-11-1", "22-22-2", "33-33-3"],
+                "ec": ["", "", ""],
+                "dtxsid": ["", "", ""],
+                "echa_id": ["", "", ""],
+            }
+        )
+        run_identifier.return_value = (identifiers, pd.DataFrame())
+
+        uploaded = complete_epi_rows(["Uploaded A"])
+        uploaded.loc[:, "smiles"] = "CC"
+        uploaded.loc[:, "cas"] = "11-11-1"
+        pool = complete_epi_rows(["Pool B"])
+        pool.loc[:, "smiles"] = "CCC"
+        pool.loc[:, "cas"] = "22-22-2"
+        failed_network = complete_epi_rows(["Network C"])
+        failed_network.loc[:, "smiles"] = "CCCC"
+        failed_network.loc[:, "cas"] = "33-33-3"
+        failed_network.loc[:, "status"] = "failed"
+
+        def fail_network_c(query_input, **kwargs):
+            self.assertEqual(
+                query_input["compound"].tolist(),
+                ["Network C"],
+            )
+            kwargs["activity_callback"](
+                {
+                    "event": "failed",
+                    "index": 0,
+                    "attempt": 1,
+                    "label": "Network C",
+                    "error": "simulated transient exhaustion",
+                }
+            )
+            return (
+                failed_network,
+                pd.DataFrame(
+                    {
+                        "compound": ["Network C"],
+                        "status": ["failed"],
+                    }
+                ),
+                pd.DataFrame(
+                    {
+                        "compound": ["Network C"],
+                        "error": ["simulated transient exhaustion"],
+                    }
+                ),
+            )
+
+        run_epi.side_effect = fail_network_c
+        run_pov.return_value = auto_query_workflow.PbmToxPiOutput(
+            tables=OrderedDict(
+                [
+                    (
+                        "Pov_LRTP",
+                        pd.DataFrame(
+                            {
+                                "Name": ["Uploaded A", "Pool B"],
+                                "Scores": [1.0, 2.0],
+                            }
+                        ),
+                    )
+                ]
+            ),
+            charts=OrderedDict(),
+        )
+
+        result = run_auto_query_workflow(
+            representative,
+            AutoWorkflowConfig(
+                run_r_replicate_df=False,
+                run_identifier=True,
+                run_epi=True,
+                run_pov_lrtp_toxpi=True,
+                identifier_delay_seconds=0,
+                epi_delay_seconds=0,
+            ),
+            prepared_input=prepared,
+            epi_uploaded_results=uploaded,
+            epi_pool_results=pool,
+        )
+
+        run_epi.assert_called_once()
+        run_pov.assert_called_once()
+        pd.testing.assert_frame_equal(
+            run_pov.call_args.args[3]["Group_Area_Mean_By_Sample"],
+            sample_rows,
+        )
+        self.assertEqual(
+            result.tables["EPI_Retry_Input"]["compound"].tolist(),
+            ["Network C"],
+        )
+        provenance = result.tables["EPI_Source_Provenance"]
+        pool_provenance = provenance.loc[
+            provenance["compound"].eq("Pool B")
+        ]
+        self.assertFalse(pool_provenance.empty)
+        self.assertTrue(
+            pool_provenance["source_type"].eq("session_pool").all()
+        )
+        self.assertEqual(
+            result.tables["EPI_Query_Attempts"]["label"].tolist(),
+            ["Network C"],
+        )
+
+        required_epi_sheets = {
+            "EPI_Results",
+            "EPI_Raw_Results",
+            "EPI_Errors",
+            "EPI_Completeness",
+            "EPI_Source_Provenance",
+            "EPI_Match_Audit",
+            "EPI_Conflict_Audit",
+            "EPI_Query_Attempts",
+            "EPI_Retry_Input",
+        }
+        epi_module = build_auto_workflow_module_workbook(
+            result,
+            "EPI Suite 环境归趋",
+        )
+        local_module = build_auto_workflow_module_workbook(
+            result,
+            R_DF_STEP_LABEL,
+        )
+        pov_module = build_auto_workflow_module_workbook(
+            result,
+            "Pov-LRTP / PBM / ToxPi",
+        )
+        self.assertIsNotNone(epi_module)
+        self.assertIsNotNone(local_module)
+        self.assertIsNotNone(pov_module)
+        self.assertTrue(
+            required_epi_sheets.issubset(
+                set(pd.ExcelFile(io.BytesIO(epi_module.data)).sheet_names)
+            )
+        )
+        root_sheets = set(
+            pd.ExcelFile(build_auto_workflow_workbook(result)).sheet_names
+        )
+        self.assertTrue(
+            {
+                "Input_File_Mappings",
+                "Group_Area_Mean_By_Sample",
+                "DF_Table",
+                *required_epi_sheets,
+            }.issubset(root_sheets)
+        )
+        self.assertEqual(
+            set(result.tables["Input_File_Mappings"]["source_file"]),
+            {"Lake-A.xlsx", "Lake-B.xlsx"},
+        )
+        self.assertEqual(
+            set(result.tables["Group_Area_Mean_By_Sample"]["sample_id"]),
+            {"Lake-A", "Lake-B"},
+        )
+
+        with zipfile.ZipFile(build_auto_workflow_zip(result)) as archive:
+            full_epi_sheets = set(
+                pd.ExcelFile(
+                    io.BytesIO(
+                        archive.read(
+                            "03_EPI_Suite/EPI_Suite_Results.xlsx"
+                        )
+                    )
+                ).sheet_names
+            )
+            self.assertTrue(required_epi_sheets.issubset(full_epi_sheets))
+            full_root_sheets = set(
+                pd.ExcelFile(
+                    io.BytesIO(
+                        archive.read("Auto_Query_Workflow_Results.xlsx")
+                    )
+                ).sheet_names
+            )
+            self.assertIn("Input_File_Mappings", full_root_sheets)
+
+        modules = OrderedDict(
+            (
+                module.slug,
+                module,
+            )
+            for module in (local_module, epi_module, pov_module)
+        )
+        with zipfile.ZipFile(
+            build_auto_workflow_partial_zip(result, modules)
+        ) as archive:
+            partial_epi_sheets = set(
+                pd.ExcelFile(
+                    io.BytesIO(
+                        archive.read(
+                            f"modules/{epi_module.file_name}"
+                        )
+                    )
+                ).sheet_names
+            )
+            self.assertTrue(required_epi_sheets.issubset(partial_epi_sheets))
+
+        with TemporaryDirectory() as checkpoint_root:
+            token = generate_run_token()
+            save_checkpoint(
+                token,
+                _checkpoint_for(result),
+                ["Lake-A.xlsx", "Lake-B.xlsx"],
+                modules,
+                root=checkpoint_root,
+            )
+            loaded = load_checkpoint(token, root=checkpoint_root)
+
+        self.assertEqual(
+            loaded.input_filenames,
+            ("Lake-A.xlsx", "Lake-B.xlsx"),
+        )
+        self.assertEqual(
+            set(
+                loaded.checkpoint.result.tables[
+                    "Input_File_Mappings"
+                ]["source_file"]
+            ),
+            {"Lake-A.xlsx", "Lake-B.xlsx"},
+        )
+        self.assertEqual(
+            loaded.checkpoint.result.tables[
+                "EPI_Retry_Input"
+            ]["compound"].tolist(),
+            ["Network C"],
+        )
+        loaded_pool_provenance = loaded.checkpoint.result.tables[
+            "EPI_Source_Provenance"
+        ]
+        self.assertTrue(
+            loaded_pool_provenance.loc[
+                loaded_pool_provenance["compound"].eq("Pool B"),
+                "source_type",
+            ].eq("session_pool").all()
+        )
+
     @patch("src.auto_query_workflow.run_epi_web_batch")
     def test_retry_epi_failures_queries_only_retry_input_and_preserves_unrelated_tables(
         self,
