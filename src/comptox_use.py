@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.batch_runner import run_ordered_batch
 from src.query_retry import is_transient_query_error, warning_frame_has_transient_error
+from src.query_identity import attach_input_identity
 from src.query_cache import cached_call
 
 
@@ -516,47 +517,56 @@ def run_comptox_use_batch(
     candidate_frames = []
     error_frames = []
     for result in batch_results:
+        row = items[result.index][1]
         if result.error is not None:
-            row = items[result.index][1]
             compound = _display_compound(row)
             variant = build_use_query_variants(row)[0]
             summary_frames.append(
-                pd.DataFrame([
-                    _summary_row(
-                        row,
-                        {"dtxsid": pd.NA, "status": "失败"},
-                        [],
-                        "查询失败",
-                        query_note=query_note,
-                        query_source=variant["query_source"],
-                        query_value=variant["query_value"],
-                    )
-                ])
+                attach_input_identity(
+                    pd.DataFrame([
+                        _summary_row(
+                            row,
+                            {"dtxsid": pd.NA, "status": "失败"},
+                            [],
+                            "查询失败",
+                            query_note=query_note,
+                            query_source=variant["query_source"],
+                            query_value=variant["query_value"],
+                        )
+                    ]),
+                    row,
+                )
             )
             error_frames.append(
-                pd.DataFrame([
-                    {
-                        "compound": compound,
-                        "cas": _clean_cell(row.get("cas")),
-                        "smiles": _clean_cell(row.get("smiles")),
-                        "dtxsid": _clean_cell(row.get("dtxsid")),
-                        "query_source": variant["query_source"],
-                        "query_value": variant["query_value"],
-                        "stage": "batch_worker",
-                        "message": str(result.error),
-                    }
-                ])
+                attach_input_identity(
+                    pd.DataFrame([
+                        {
+                            "compound": compound,
+                            "cas": _clean_cell(row.get("cas")),
+                            "smiles": _clean_cell(row.get("smiles")),
+                            "dtxsid": _clean_cell(row.get("dtxsid")),
+                            "query_source": variant["query_source"],
+                            "query_value": variant["query_value"],
+                            "stage": "batch_worker",
+                            "message": str(result.error),
+                        }
+                    ]),
+                    row,
+                )
             )
             continue
         summary_df, candidates_df, errors_df = result.value
-        summary_frames.append(summary_df)
-        candidate_frames.append(candidates_df)
-        error_frames.append(errors_df)
+        summary_frames.append(attach_input_identity(summary_df, row))
+        candidate_frames.append(attach_input_identity(candidates_df, row))
+        error_frames.append(attach_input_identity(errors_df, row))
 
     summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
     candidates = pd.concat(candidate_frames, ignore_index=True) if candidate_frames else pd.DataFrame()
     errors = pd.concat(error_frames, ignore_index=True) if error_frames else pd.DataFrame()
-    return summary, candidates, errors
+    return tuple(
+        attach_input_identity(frame, {})
+        for frame in (summary, candidates, errors)
+    )
 
 
 def resolve_dtxsid(row, api_base=DEFAULT_API_BASE, api_key=None, timeout=45):

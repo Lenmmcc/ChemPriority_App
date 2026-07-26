@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.batch_runner import run_ordered_batch
 from src.query_retry import is_transient_query_error, warning_frame_has_transient_error
+from src.query_identity import INPUT_IDENTITY_KEY, attach_input_identity
 from src.query_cache import cache_control, cached_call
 
 
@@ -485,52 +486,58 @@ def run_echa_use_batch(
     dossier_frames = []
     warning_frames = []
     for result in batch_results:
+        row = items[result.index][1]
         if result.error is not None:
-            row = items[result.index][1]
             variant = build_use_query_variants(row)[0]
             summary_frames.append(
-                pd.DataFrame(
-                    [
-                        _summary_row(
-                            row,
-                            {"echa_id": pd.NA, "status": "失败"},
-                            "查询失败",
-                            query_source=variant["query_source"],
-                            query_value=variant["query_value"],
-                        )
-                    ]
+                attach_input_identity(
+                    pd.DataFrame(
+                        [
+                            _summary_row(
+                                row,
+                                {"echa_id": pd.NA, "status": "失败"},
+                                "查询失败",
+                                query_source=variant["query_source"],
+                                query_value=variant["query_value"],
+                            )
+                        ]
+                    ),
+                    row,
                 )
             )
             warning_frames.append(
-                pd.DataFrame(
-                    [
-                        _warning_row(
-                            row,
-                            row.get("echa_id"),
-                            "batch_worker",
-                            str(result.error),
-                            query_source=variant["query_source"],
-                            query_value=variant["query_value"],
-                        )
-                    ]
+                attach_input_identity(
+                    pd.DataFrame(
+                        [
+                            _warning_row(
+                                row,
+                                row.get("echa_id"),
+                                "batch_worker",
+                                str(result.error),
+                                query_source=variant["query_source"],
+                                query_value=variant["query_value"],
+                            )
+                        ]
+                    ),
+                    row,
                 )
             )
             continue
         summary_df, candidates_df, dossiers_df, warnings_df = result.value
-        summary_frames.append(summary_df)
-        candidate_frames.append(candidates_df)
-        dossier_frames.append(dossiers_df)
-        warning_frames.append(warnings_df)
+        summary_frames.append(attach_input_identity(summary_df, row))
+        candidate_frames.append(attach_input_identity(candidates_df, row))
+        dossier_frames.append(attach_input_identity(dossiers_df, row))
+        warning_frames.append(attach_input_identity(warnings_df, row))
 
     summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
     candidates = pd.concat(candidate_frames, ignore_index=True) if candidate_frames else pd.DataFrame()
     dossiers = pd.concat(dossier_frames, ignore_index=True) if dossier_frames else pd.DataFrame()
     warnings = pd.concat(warning_frames, ignore_index=True) if warning_frames else pd.DataFrame()
     return (
-        _ensure_columns(summary, _summary_columns()),
-        _ensure_columns(candidates, CANDIDATE_COLUMNS),
-        _ensure_columns(dossiers, DOSSIER_COLUMNS),
-        _ensure_columns(warnings, WARNING_COLUMNS),
+        _ensure_columns(summary, [INPUT_IDENTITY_KEY, *_summary_columns()]),
+        _ensure_columns(candidates, [INPUT_IDENTITY_KEY, *CANDIDATE_COLUMNS]),
+        _ensure_columns(dossiers, [INPUT_IDENTITY_KEY, *DOSSIER_COLUMNS]),
+        _ensure_columns(warnings, [INPUT_IDENTITY_KEY, *WARNING_COLUMNS]),
     )
 
 

@@ -41,7 +41,9 @@ from src.auto_query_workflow import (
     AutoWorkflowResult,
     LocalScreeningOutput,
     R_DF_STEP_LABEL,
+    _build_identifier_input_from_epi_universe,
     _load_local_screening_charts,
+    _query_input_from_identifiers,
     auto_input_from_multi_file_result,
     build_auto_workflow_charts,
     build_auto_workflow_module_workbook,
@@ -196,6 +198,28 @@ def _isolated_page_checkpoint_storage(root):
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_external_query_input_retains_prepared_identity_key(self):
+        universe = pd.DataFrame(
+            {
+                "compound": ["Shared"],
+                "cas": ["64-17-5"],
+                "identity_key": ["cas:64-17-5"],
+            }
+        )
+        identifier_input = _build_identifier_input_from_epi_universe(universe)
+        self.assertEqual(
+            identifier_input["input_identity_key"].tolist(),
+            ["cas:64-17-5"],
+        )
+
+        completed = identifier_input.copy()
+        completed["dtxsid"] = "DTXSID7020005"
+        query_input = _query_input_from_identifiers(identifier_input, completed)
+        self.assertEqual(
+            query_input["input_identity_key"].tolist(),
+            ["cas:64-17-5"],
+        )
+
     def test_page_6_storage_switch_detaches_without_deleting_checkpoint(self):
         page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
         start = page_text.index(

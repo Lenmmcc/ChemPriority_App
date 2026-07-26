@@ -51,6 +51,32 @@ def _candidate(source_type, raw_use="cleaning agent", use_cn="清洁用品", **e
 
 
 class CompToxDashboardModeTests(unittest.TestCase):
+    @patch("src.comptox_use.run_ordered_batch")
+    def test_batch_outputs_retain_input_identity_key(self, runner):
+        runner.return_value = [
+            BatchResult(
+                index=0,
+                value=(
+                    pd.DataFrame({"compound": ["Shared"]}),
+                    pd.DataFrame({"compound": ["Shared"]}),
+                    pd.DataFrame({"compound": ["Shared"]}),
+                ),
+            )
+        ]
+        frames = comptox_use.run_comptox_use_batch(
+            pd.DataFrame(
+                {
+                    "compound": ["Shared"],
+                    "cas": ["64-17-5"],
+                    "input_identity_key": ["cas:64-17-5"],
+                }
+            ),
+            delay_seconds=0,
+        )
+        for frame in frames:
+            self.assertIn("input_identity_key", frame.columns)
+            self.assertTrue(frame["input_identity_key"].eq("cas:64-17-5").all())
+
     @patch("src.comptox_use.run_ordered_batch", return_value=[])
     def test_comptox_batch_enables_three_transient_failure_rounds(self, runner):
         comptox_use.run_comptox_use_batch(

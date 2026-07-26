@@ -16,6 +16,7 @@ from src.echa_use import (
     validate_input,
 )
 from src.query_cache import cache_control
+from src.query_identity import INPUT_IDENTITY_KEY, attach_input_identity
 
 
 CNL_OVERVIEW_PATH = "api-cnl-inventory/prominent/overview/info/{echa_id}"
@@ -215,23 +216,38 @@ def run_echa_ghs_batch(
     classification_frames = []
     warning_frames = []
     for result in batch_results:
+        row = items[result.index][1]
         if result.error is not None:
-            row = items[result.index][1]
-            summary_frames.append(pd.DataFrame([_empty_summary_row(row, {"echa_id": pd.NA}, "查询失败", str(result.error))]))
-            warning_frames.append(pd.DataFrame([_warning_row(row, row.get("echa_id"), "batch_worker", str(result.error))]))
+            summary_frames.append(
+                attach_input_identity(
+                    pd.DataFrame([_empty_summary_row(row, {"echa_id": pd.NA}, "查询失败", str(result.error))]),
+                    row,
+                )
+            )
+            warning_frames.append(
+                attach_input_identity(
+                    pd.DataFrame([_warning_row(row, row.get("echa_id"), "batch_worker", str(result.error))]),
+                    row,
+                )
+            )
             continue
         summary_df, classifications_df, warnings_df = result.value
-        summary_frames.append(summary_df)
-        classification_frames.append(classifications_df)
-        warning_frames.append(warnings_df)
+        summary_frames.append(attach_input_identity(summary_df, row))
+        classification_frames.append(
+            attach_input_identity(classifications_df, row)
+        )
+        warning_frames.append(attach_input_identity(warnings_df, row))
 
     summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
     classifications = pd.concat(classification_frames, ignore_index=True) if classification_frames else pd.DataFrame()
     warnings = pd.concat(warning_frames, ignore_index=True) if warning_frames else pd.DataFrame()
     return (
-        _ensure_columns(summary, SUMMARY_COLUMNS),
-        _ensure_columns(classifications, CLASSIFICATION_COLUMNS),
-        _ensure_columns(warnings, WARNING_COLUMNS),
+        _ensure_columns(summary, [INPUT_IDENTITY_KEY, *SUMMARY_COLUMNS]),
+        _ensure_columns(
+            classifications,
+            [INPUT_IDENTITY_KEY, *CLASSIFICATION_COLUMNS],
+        ),
+        _ensure_columns(warnings, [INPUT_IDENTITY_KEY, *WARNING_COLUMNS]),
     )
 
 

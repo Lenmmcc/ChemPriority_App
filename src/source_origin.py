@@ -18,6 +18,7 @@ from src.comptox_use import (
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.identifier_resolver import normalize_input_columns
 from src.query_cache import cache_control, cached_call
+from src.query_identity import INPUT_IDENTITY_KEY, attach_input_identity
 
 
 REQUIRED_IDENTIFIER_COLUMNS = ["compound", "cas", "ec", "smiles", "dtxsid", "echa_id"]
@@ -107,7 +108,11 @@ def normalize_source_input_columns(df):
     for column in REQUIRED_IDENTIFIER_COLUMNS:
         if column not in normalized.columns:
             normalized[column] = pd.NA
-    return normalized[REQUIRED_IDENTIFIER_COLUMNS]
+    columns = list(REQUIRED_IDENTIFIER_COLUMNS)
+    if INPUT_IDENTITY_KEY in df.columns:
+        normalized[INPUT_IDENTITY_KEY] = df[INPUT_IDENTITY_KEY]
+        columns.append(INPUT_IDENTITY_KEY)
+    return normalized[columns]
 
 
 def run_source_origin_batch(
@@ -266,23 +271,33 @@ def run_source_origin_batch(
     evidence_frames = []
     warning_frames = []
     for result in batch_results:
+        row = items[result.index][1]
         if result.error is not None:
-            row = items[result.index][1]
-            summary_frames.append(pd.DataFrame([_summary_row(row, [])]))
-            warning_frames.append(pd.DataFrame([_warning_row(row, "Source origin", "batch_worker", str(result.error))]))
+            summary_frames.append(
+                attach_input_identity(
+                    pd.DataFrame([_summary_row(row, [])]),
+                    row,
+                )
+            )
+            warning_frames.append(
+                attach_input_identity(
+                    pd.DataFrame([_warning_row(row, "Source origin", "batch_worker", str(result.error))]),
+                    row,
+                )
+            )
             continue
         summary_df, evidence_df, warnings_df = result.value
-        summary_frames.append(summary_df)
-        evidence_frames.append(evidence_df)
-        warning_frames.append(warnings_df)
+        summary_frames.append(attach_input_identity(summary_df, row))
+        evidence_frames.append(attach_input_identity(evidence_df, row))
+        warning_frames.append(attach_input_identity(warnings_df, row))
 
     summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
     evidence = pd.concat(evidence_frames, ignore_index=True) if evidence_frames else pd.DataFrame()
     warnings = pd.concat(warning_frames, ignore_index=True) if warning_frames else pd.DataFrame()
     return (
-        _ensure_columns(summary, SUMMARY_COLUMNS),
-        _ensure_columns(evidence, EVIDENCE_COLUMNS),
-        _ensure_columns(warnings, WARNING_COLUMNS),
+        _ensure_columns(summary, [INPUT_IDENTITY_KEY, *SUMMARY_COLUMNS]),
+        _ensure_columns(evidence, [INPUT_IDENTITY_KEY, *EVIDENCE_COLUMNS]),
+        _ensure_columns(warnings, [INPUT_IDENTITY_KEY, *WARNING_COLUMNS]),
     )
 
 

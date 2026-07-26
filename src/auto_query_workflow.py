@@ -1782,7 +1782,24 @@ def _build_identifier_input_from_epi_universe(
             output[column] = epi_universe[column].map(_clean_text)
         else:
             output[column] = ""
-    return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
+    identity_source = (
+        "input_identity_key"
+        if "input_identity_key" in epi_universe.columns
+        else "identity_key"
+    )
+    if identity_source in epi_universe.columns:
+        output["input_identity_key"] = epi_universe[identity_source].map(
+            _clean_text
+        )
+    query_columns = [
+        *REQUIRED_IDENTIFIER_COLUMNS,
+        *(
+            ["input_identity_key"]
+            if "input_identity_key" in output.columns
+            else []
+        ),
+    ]
+    return output[query_columns].reset_index(drop=True)
 
 
 def _restore_identity_keys(
@@ -1977,8 +1994,16 @@ def _query_input_from_identifiers(
             output[column] = ""
         output[column] = output[column].map(_clean_text)
 
+    query_columns = [
+        *REQUIRED_IDENTIFIER_COLUMNS,
+        *(
+            ["input_identity_key"]
+            if "input_identity_key" in output.columns
+            else []
+        ),
+    ]
     if completed_identifiers is None or completed_identifiers.empty:
-        return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
+        return output[query_columns].reset_index(drop=True)
 
     completed = completed_identifiers.copy()
     for column in REQUIRED_IDENTIFIER_COLUMNS:
@@ -1998,7 +2023,16 @@ def _query_input_from_identifiers(
             enriched_value = _clean_text(completed_row[column])
             if enriched_value:
                 output.at[index, column] = enriched_value
-    return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
+        if "input_identity_key" in output.columns:
+            identity_value = _clean_text(
+                completed_row.get(
+                    "input_identity_key",
+                    completed_row.get("identity_key"),
+                )
+            )
+            if identity_value:
+                output.at[index, "input_identity_key"] = identity_value
+    return output[query_columns].reset_index(drop=True)
 
 
 def _normalize_input(input_df: pd.DataFrame, mapping: AutoWorkflowMapping) -> pd.DataFrame:

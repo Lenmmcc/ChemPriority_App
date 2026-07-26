@@ -64,6 +64,30 @@ def _natural_evidence(source_name="ChEBI", confidence="strong"):
 
 
 class SourceOriginBatchTests(unittest.TestCase):
+    @patch("src.source_origin.run_ordered_batch")
+    def test_batch_outputs_retain_input_identity_key(self, runner):
+        runner.return_value = [
+            BatchResult(
+                index=0,
+                value=tuple(
+                    pd.DataFrame({"compound": ["Shared"]}) for _ in range(3)
+                ),
+            )
+        ]
+        frames = run_source_origin_batch(
+            pd.DataFrame(
+                {
+                    "compound": ["Shared"],
+                    "cas": ["64-17-5"],
+                    "input_identity_key": ["cas:64-17-5"],
+                }
+            ),
+            delay_seconds=0,
+        )
+        for frame in frames:
+            self.assertIn("input_identity_key", frame.columns)
+            self.assertTrue(frame["input_identity_key"].eq("cas:64-17-5").all())
+
     @patch("src.source_origin.run_ordered_batch", return_value=[])
     def test_source_origin_batch_enables_three_transient_failure_rounds(self, runner):
         run_source_origin_batch(pd.DataFrame([_input_row()]), delay_seconds=0)
