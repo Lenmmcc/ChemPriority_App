@@ -122,7 +122,7 @@ except Exception as exc:
 is_valid, message = validate_input(input_df)
 if not is_valid:
     st.error(message)
-    st.dataframe(input_df, use_container_width=True)
+    st.dataframe(input_df, width="stretch")
     st.stop()
 
 st.success(message)
@@ -131,7 +131,7 @@ tab_input, tab_connector, tab_output = st.tabs(["输入数据", "ADMETlab 连接
 
 with tab_input:
     st.subheader("待提交化合物")
-    st.dataframe(input_df[REQUIRED_COLUMNS], use_container_width=True)
+    st.dataframe(input_df[REQUIRED_COLUMNS], width="stretch")
     st.metric("化合物数量", len(input_df))
 
 with tab_connector:

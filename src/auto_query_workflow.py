@@ -30,8 +30,15 @@ from src.cp_screening_workflow import (
 from src.echa_ghs import run_echa_ghs_batch
 from src.echa_use import DEFAULT_ECHA_BASE, run_echa_use_batch
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch
+from src.episuite_supplement import (
+    EPIResolution,
+    merge_network_epi,
+    prepare_universe,
+    resolve_epi_sources,
+)
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, REQUIRED_IDENTIFIER_COLUMNS, run_identifier_completion_batch
 from src.mol_structure_parser import find_mol_text_column, prepare_structure_dataframe
+from src.multi_file_screening import MultiFileScreeningResult
 from src.pov_lrtp_replica import run_pov_lrtp_batch
 from src.plot_style import configure_plot_style
 from src.r_screening_replica.pipeline import run_screening_pipeline
@@ -65,6 +72,7 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
         "Local_Screening_Results.xlsx",
         (
             "Structure_Preparation",
+            "Input_File_Mappings",
             "Input_Check",
             "Elemental_Ratios_DBE",
             "Category_Summary",
@@ -89,7 +97,19 @@ AUTO_WORKFLOW_EXPORT_MODULES = (
     (
         "03_EPI_Suite",
         "EPI_Suite_Results.xlsx",
-        ("EPI_Results", "EPI_Raw_Results", "EPI_Errors"),
+        (
+            "EPI_Identity_Universe",
+            "EPI_Primary_Membership",
+            "EPI_Results",
+            "EPI_Raw_Results",
+            "EPI_Errors",
+            "EPI_Completeness",
+            "EPI_Source_Provenance",
+            "EPI_Match_Audit",
+            "EPI_Conflict_Audit",
+            "EPI_Query_Attempts",
+            "EPI_Retry_Input",
+        ),
         (),
     ),
     (
@@ -296,6 +316,18 @@ class AutoWorkflowChart:
 
 
 @dataclass
+class AutoWorkflowPreparedInput:
+    mapping: AutoWorkflowMapping
+    prepared_input: pd.DataFrame
+    representative_table: pd.DataFrame
+    local_tables: OrderedDict[str, pd.DataFrame] = field(default_factory=OrderedDict)
+    local_charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
+    local_warnings: list[str] = field(default_factory=list)
+    primary_membership: pd.DataFrame = field(default_factory=pd.DataFrame)
+    epi_universe: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+@dataclass
 class AutoWorkflowResult:
     mapping: AutoWorkflowMapping
     representative_table: pd.DataFrame
@@ -303,6 +335,12 @@ class AutoWorkflowResult:
     step_status: pd.DataFrame
     warnings: pd.DataFrame
     charts: OrderedDict[str, AutoWorkflowChart] = field(default_factory=OrderedDict)
+
+
+class AutoWorkflowEpiRetryError(RuntimeError):
+    def __init__(self, message: str, result: AutoWorkflowResult):
+        super().__init__(message)
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -393,6 +431,60 @@ def detect_default_mapping(columns) -> AutoWorkflowMapping:
     )
 
 
+def prepare_legacy_auto_input(
+    input_df: pd.DataFrame,
+    config: AutoWorkflowConfig,
+) -> AutoWorkflowPreparedInput:
+    mapping = config.mapping or detect_default_mapping(input_df.columns)
+    audit_columns = {"parse_status", "smiles_source", "smiles_decision_warning"}
+    if audit_columns.issubset(input_df.columns):
+        prepared_frame = input_df.copy()
+    else:
+        prepared_frame = prepare_structure_dataframe(
+            input_df,
+            mol_column=mapping.mol_column,
+            smiles_column=mapping.smiles_col,
+        )
+    normalized = _normalize_input(prepared_frame, mapping)
+    return AutoWorkflowPreparedInput(
+        mapping=mapping,
+        prepared_input=prepared_frame,
+        representative_table=build_representative_table(normalized, mapping),
+    )
+
+
+def auto_input_from_multi_file_result(
+    result: MultiFileScreeningResult,
+) -> AutoWorkflowPreparedInput:
+    local_tables = OrderedDict(result.tables)
+    local_tables["Input_File_Mappings"] = result.input_file_mappings
+    local_tables["Structure_Preparation"] = result.structure_preparation
+    local_tables["DF_Table"] = result.df_table
+    local_tables["Sample_Peak_Area"] = result.sample_peak_area
+    local_tables["Group_Area_Raw_Long"] = result.group_area_raw_long
+    local_tables["Group_Area_Mean_By_Sample"] = result.group_area_mean_by_sample
+    return AutoWorkflowPreparedInput(
+        mapping=AutoWorkflowMapping(
+            compound_col="Name",
+            formula_col="formula",
+            peak_area_col="Group_Area",
+            group_area_cols=["Group_Area"],
+            smiles_col="SMILES_input",
+            cas_col="CAS_input",
+        ),
+        prepared_input=result.structure_preparation,
+        representative_table=result.representative_table,
+        local_tables=local_tables,
+        local_charts=OrderedDict(result.charts),
+        local_warnings=result.warnings.get(
+            "message",
+            pd.Series(dtype=str),
+        ).tolist(),
+        primary_membership=result.primary_membership,
+        epi_universe=result.epi_universe,
+    )
+
+
 def run_auto_query_workflow(
     input_df: pd.DataFrame,
     config: AutoWorkflowConfig | None = None,
@@ -400,23 +492,32 @@ def run_auto_query_workflow(
     activity_callback: ActivityCallback | None = None,
     checkpoint_context: AutoWorkflowCheckpointContext | None = None,
     checkpoint_callback: CheckpointCallback | None = None,
+    prepared_input: AutoWorkflowPreparedInput | None = None,
+    epi_uploaded_results: pd.DataFrame | None = None,
+    epi_pool_results: pd.DataFrame | None = None,
 ) -> AutoWorkflowResult:
     config = config or AutoWorkflowConfig()
-    mapping = config.mapping or detect_default_mapping(input_df.columns)
-    audit_columns = {"parse_status", "smiles_source", "smiles_decision_warning"}
-    if audit_columns.issubset(input_df.columns):
-        prepared_input = input_df.copy()
-    else:
-        prepared_input = prepare_structure_dataframe(
-            input_df,
-            mol_column=mapping.mol_column,
-            smiles_column=mapping.smiles_col,
+    if prepared_input is None:
+        prepared_input = prepare_legacy_auto_input(input_df, config)
+    mapping = prepared_input.mapping
+    prepared_frame = prepared_input.prepared_input
+    representative = prepared_input.representative_table
+    epi_identity_universe = (
+        prepared_input.epi_universe.copy().reset_index(drop=True)
+        if (
+            isinstance(prepared_input.epi_universe, pd.DataFrame)
+            and not prepared_input.epi_universe.empty
         )
-    normalized = _normalize_input(prepared_input, mapping)
-    representative = build_representative_table(normalized, mapping)
+        else pd.DataFrame()
+    )
     tables: OrderedDict[str, pd.DataFrame] = OrderedDict()
     charts: OrderedDict[str, AutoWorkflowChart] = OrderedDict()
-    tables["Structure_Preparation"] = prepared_input
+    tables["Structure_Preparation"] = prepared_frame
+    if not epi_identity_universe.empty:
+        tables["EPI_Identity_Universe"] = epi_identity_universe.copy()
+        tables["EPI_Primary_Membership"] = (
+            prepared_input.primary_membership.copy()
+        )
     status_rows = []
     warning_rows = []
     plot_warnings = configure_plot_style()
@@ -520,14 +621,26 @@ def run_auto_query_workflow(
 
     run_local_r_df = config.run_r_replicate_df or config.run_pov_lrtp_toxpi
     if run_local_r_df:
-        local_value = run_step(
-            R_DF_STEP_LABEL,
-            lambda: _run_r_replicate_df(
-                normalized,
+        has_prepared_local_output = bool(
+            prepared_input.local_tables
+            or prepared_input.local_charts
+        )
+        if has_prepared_local_output:
+            local_runner = lambda: LocalScreeningOutput(
+                tables=OrderedDict(prepared_input.local_tables),
+                charts=OrderedDict(prepared_input.local_charts),
+                warnings=list(prepared_input.local_warnings),
+            )
+        else:
+            local_runner = lambda: _run_r_replicate_df(
+                _normalize_input(prepared_frame, mapping),
                 mapping,
                 config.detection_threshold,
                 config.axis_ranges,
-            ),
+            )
+        local_value = run_step(
+            R_DF_STEP_LABEL,
+            local_runner,
         )
         if local_value is not None:
             for key, table in local_value.tables.items():
@@ -536,6 +649,9 @@ def run_auto_query_workflow(
             for message in local_value.warnings:
                 add_warning(R_DF_STEP_LABEL, message)
             record(R_DF_STEP_LABEL, "完成", len(local_value.tables.get("DF_Table", pd.DataFrame())))
+        if not has_prepared_local_output:
+            for message in prepared_input.local_warnings:
+                add_warning(R_DF_STEP_LABEL, message)
         emit_checkpoint(R_DF_STEP_LABEL)
 
     needs_identifier = any(
@@ -550,7 +666,13 @@ def run_auto_query_workflow(
         ]
     )
     if needs_identifier:
-        identifier_input = _build_identifier_input(representative)
+        identifier_input = (
+            _build_identifier_input_from_epi_universe(
+                epi_identity_universe
+            )
+            if not epi_identity_universe.empty
+            else _build_identifier_input(representative)
+        )
         tables["Identifier_Input"] = identifier_input
 
         def identifier_progress(done, total, label):
@@ -578,45 +700,133 @@ def run_auto_query_workflow(
         )
         if identifier_value is not None:
             completed_identifiers, identifier_warnings = identifier_value
+            if not epi_identity_universe.empty:
+                completed_identifiers = _restore_identity_keys(
+                    completed_identifiers,
+                    epi_identity_universe,
+                )
             tables["Identifier_Completion"] = completed_identifiers
             tables["Identifier_Warnings"] = identifier_warnings
             record("标识符补全", "完成", len(completed_identifiers))
         emit_checkpoint("标识符补全")
 
-    query_input = _query_input_from_identifiers(identifier_input, completed_identifiers)
+    prepared_epi_universe = pd.DataFrame()
+    if not epi_identity_universe.empty:
+        prepared_epi_universe = prepare_universe(
+            epi_identity_universe,
+            completed_identifiers,
+        )
+        query_input = _build_identifier_input_from_epi_universe(
+            prepared_epi_universe
+        )
+    else:
+        query_input = _query_input_from_identifiers(
+            identifier_input,
+            completed_identifiers,
+        )
     compound_universe = build_compound_universe(identifier_input)
 
     run_epi_step = config.run_epi or config.run_pov_lrtp_toxpi
     if run_epi_step:
-        if query_input.empty or query_input["smiles"].eq("").all():
-            record("EPI Suite 环境归趋", "跳过", 0, "缺少可用于 EPI 的 SMILES。")
+        if not prepared_epi_universe.empty:
+            epi_input = prepared_epi_universe.loc[
+                :,
+                [
+                    column
+                    for column in prepared_epi_universe.columns
+                    if not column.startswith("_")
+                ],
+            ].reset_index(drop=True)
         else:
-            epi_input = query_input.loc[query_input["smiles"].ne(""), ["compound", "smiles", "cas"]].reset_index(drop=True)
-            tables["EPI_Input"] = epi_input
+            epi_input = query_input.loc[
+                :,
+                ["compound", "smiles", "cas"],
+            ].reset_index(drop=True)
+        tables["EPI_Input"] = epi_input
+        resolution = resolve_epi_sources(
+            epi_input,
+            pd.DataFrame()
+            if epi_uploaded_results is None
+            else epi_uploaded_results,
+            pd.DataFrame()
+            if epi_pool_results is None
+            else epi_pool_results,
+            completed_identifiers=completed_identifiers,
+            require_core=bool(config.run_pov_lrtp_toxpi),
+            primary_membership=prepared_input.primary_membership,
+        )
+        attempt_events = []
+        epi_value = None
 
-            def epi_progress(done, total, label):
-                if progress_callback:
-                    progress_callback("EPI Suite 环境归趋", done, total, label)
+        def epi_progress(done, total, label):
+            if progress_callback:
+                progress_callback(
+                    "EPI Suite 环境归趋",
+                    done,
+                    total,
+                    label,
+                )
+
+        if (
+            not resolution.query_input.empty
+            and not resolution.query_input["smiles"].eq("").all()
+        ):
+            forward_epi_activity = activity_for(
+                "EPI Suite 环境归趋",
+                config.epi_timeout,
+            )
+
+            def record_epi_activity(event):
+                attempt_events.append(dict(event))
+                forward_epi_activity(event)
 
             epi_value = run_step(
                 "EPI Suite 环境归趋",
                 lambda: run_epi_web_batch(
-                    epi_input,
+                    resolution.query_input,
                     api_url=config.epi_api_url,
                     timeout=int(config.epi_timeout),
                     delay_seconds=float(config.epi_delay_seconds),
                     max_workers=int(config.epi_max_workers),
                     cache_enabled=bool(config.cache_enabled),
                     progress_callback=epi_progress,
-                    activity_callback=activity_for("EPI Suite 环境归趋", config.epi_timeout),
+                    activity_callback=record_epi_activity,
                 ),
             )
             if epi_value is not None:
-                epi_results, epi_raw_results, epi_errors = epi_value
-                tables["EPI_Results"] = epi_results
-                tables["EPI_Raw_Results"] = epi_raw_results
-                tables["EPI_Errors"] = epi_errors
-                record("EPI Suite 环境归趋", "完成", len(epi_results))
+                network_results, network_raw, network_errors = epi_value
+            else:
+                network_results = pd.DataFrame()
+                network_raw = pd.DataFrame()
+                network_errors = pd.DataFrame()
+            resolution = merge_network_epi(
+                resolution,
+                network_results,
+                network_raw,
+                network_errors,
+                attempt_events,
+            )
+
+        epi_results = resolution.results
+        epi_raw_results = resolution.raw_results
+        epi_errors = resolution.errors
+        tables["EPI_Results"] = resolution.results
+        tables["EPI_Raw_Results"] = resolution.raw_results
+        tables["EPI_Errors"] = resolution.errors
+        tables["EPI_Completeness"] = resolution.completeness
+        tables["EPI_Source_Provenance"] = resolution.provenance
+        tables["EPI_Match_Audit"] = resolution.match_audit
+        tables["EPI_Conflict_Audit"] = resolution.conflict_audit
+        tables["EPI_Query_Attempts"] = resolution.query_attempts
+        tables["EPI_Retry_Input"] = resolution.query_input.reset_index(
+            drop=True
+        )
+        if resolution.query_input.empty:
+            record("EPI Suite 环境归趋", "完成", len(epi_results))
+        elif resolution.query_input["smiles"].eq("").all():
+            record("EPI Suite 环境归趋", "跳过", 0, "缺少可用于 EPI 的 SMILES。")
+        elif epi_value is not None:
+            record("EPI Suite 环境归趋", "完成", len(epi_results))
         emit_checkpoint("EPI Suite 环境归趋")
 
     if config.run_comptox:
@@ -791,10 +1001,15 @@ def run_auto_query_workflow(
         emit_checkpoint("来源属性评估")
 
     if config.run_pov_lrtp_toxpi:
+        pov_representative = _annotate_representative_identity_keys(
+            representative,
+            prepared_input.primary_membership,
+            epi_identity_universe,
+        )
         toxpi_value = run_step(
             "Pov-LRTP / PBM / ToxPi",
             lambda: _run_pov_lrtp_toxpi(
-                representative,
+                pov_representative,
                 completed_identifiers,
                 epi_results,
                 tables,
@@ -814,6 +1029,145 @@ def run_auto_query_workflow(
 
     emit_checkpoint(None, status="completed")
     return current_result()
+
+
+def retry_auto_workflow_epi_failures(
+    result: AutoWorkflowResult,
+    config: AutoWorkflowConfig,
+    progress_callback: ProgressCallback | None = None,
+    activity_callback: ActivityCallback | None = None,
+) -> AutoWorkflowResult:
+    retry_input = result.tables.get("EPI_Retry_Input", pd.DataFrame()).copy()
+    if retry_input.empty:
+        return result
+    query_input = queryable_epi_retry_input(retry_input)
+    if query_input.empty:
+        return result
+
+    attempt_events = []
+
+    def retry_activity(event):
+        attempt_events.append(dict(event))
+        if activity_callback is not None:
+            activity_callback(event)
+
+    batch_error = None
+    try:
+        network_results, network_raw, network_errors = run_epi_web_batch(
+            query_input,
+            api_url=config.epi_api_url,
+            timeout=int(config.epi_timeout),
+            delay_seconds=float(config.epi_delay_seconds),
+            max_workers=int(config.epi_max_workers),
+            cache_enabled=bool(config.cache_enabled),
+            progress_callback=(
+                None
+                if progress_callback is None
+                else lambda done, total, label: progress_callback(
+                    "EPI Suite 环境归趋",
+                    done,
+                    total,
+                    label,
+                )
+            ),
+            activity_callback=retry_activity,
+        )
+    except Exception as exc:
+        batch_error = exc
+        network_results = pd.DataFrame()
+        network_raw = pd.DataFrame()
+        network_errors = pd.DataFrame()
+    resolution = merge_network_epi(
+        EPIResolution(
+            results=result.tables.get("EPI_Results", pd.DataFrame()),
+            raw_results=result.tables.get("EPI_Raw_Results", pd.DataFrame()),
+            errors=result.tables.get("EPI_Errors", pd.DataFrame()),
+            completeness=result.tables.get(
+                "EPI_Completeness",
+                pd.DataFrame(),
+            ),
+            provenance=result.tables.get(
+                "EPI_Source_Provenance",
+                pd.DataFrame(),
+            ),
+            match_audit=result.tables.get(
+                "EPI_Match_Audit",
+                pd.DataFrame(),
+            ),
+            conflict_audit=result.tables.get(
+                "EPI_Conflict_Audit",
+                pd.DataFrame(),
+            ),
+            query_attempts=result.tables.get(
+                "EPI_Query_Attempts",
+                pd.DataFrame(),
+            ),
+            query_input=retry_input,
+        ),
+        network_results,
+        network_raw,
+        network_errors,
+        attempt_events,
+    )
+    updated_tables = OrderedDict(result.tables)
+    updated_tables.update(
+        {
+            "EPI_Results": resolution.results,
+            "EPI_Raw_Results": resolution.raw_results,
+            "EPI_Errors": resolution.errors,
+            "EPI_Completeness": resolution.completeness,
+            "EPI_Source_Provenance": resolution.provenance,
+            "EPI_Match_Audit": resolution.match_audit,
+            "EPI_Conflict_Audit": resolution.conflict_audit,
+            "EPI_Query_Attempts": resolution.query_attempts,
+            "EPI_Retry_Input": resolution.query_input.reset_index(drop=True),
+        }
+    )
+    updated = AutoWorkflowResult(
+        mapping=result.mapping,
+        representative_table=result.representative_table.copy(),
+        tables=updated_tables,
+        step_status=result.step_status.copy(),
+        warnings=result.warnings.copy(),
+        charts=OrderedDict(result.charts),
+    )
+    if batch_error is not None:
+        raise AutoWorkflowEpiRetryError(str(batch_error), updated) from batch_error
+    if not config.run_pov_lrtp_toxpi:
+        return updated
+
+    dependent_table_names = AUTO_WORKFLOW_EXPORT_MODULES[6][2]
+    dependent_chart_names = AUTO_WORKFLOW_EXPORT_MODULES[6][3]
+    for name in dependent_table_names:
+        updated.tables.pop(name, None)
+    for name in dependent_chart_names:
+        updated.charts.pop(name, None)
+    pov_representative = _annotate_representative_identity_keys(
+        updated.representative_table,
+        updated.tables.get("EPI_Primary_Membership", pd.DataFrame()),
+        updated.tables.get("EPI_Identity_Universe", pd.DataFrame()),
+    )
+    toxpi_value = _run_pov_lrtp_toxpi(
+        pov_representative,
+        updated.tables.get("Identifier_Completion", pd.DataFrame()),
+        resolution.results,
+        updated.tables,
+        config.toxpi_config,
+    )
+    updated.tables.update(toxpi_value.tables)
+    updated.charts.update(toxpi_value.charts)
+    return updated
+
+
+def queryable_epi_retry_input(retry_input: pd.DataFrame) -> pd.DataFrame:
+    if (
+        not isinstance(retry_input, pd.DataFrame)
+        or retry_input.empty
+        or "smiles" not in retry_input.columns
+    ):
+        return pd.DataFrame(columns=getattr(retry_input, "columns", None))
+    queryable = retry_input["smiles"].map(_clean_text).ne("")
+    return retry_input.loc[queryable].copy().reset_index(drop=True)
 
 
 def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
@@ -1417,6 +1771,200 @@ def _build_identifier_input(representative: pd.DataFrame) -> pd.DataFrame:
     output["dtxsid"] = ""
     output["echa_id"] = ""
     return output[REQUIRED_IDENTIFIER_COLUMNS]
+
+
+def _build_identifier_input_from_epi_universe(
+    epi_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    output = pd.DataFrame(index=epi_universe.index)
+    for column in REQUIRED_IDENTIFIER_COLUMNS:
+        if column in epi_universe.columns:
+            output[column] = epi_universe[column].map(_clean_text)
+        else:
+            output[column] = ""
+    return output[REQUIRED_IDENTIFIER_COLUMNS].reset_index(drop=True)
+
+
+def _restore_identity_keys(
+    completed_identifiers: pd.DataFrame,
+    epi_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    completed = completed_identifiers.copy().reset_index(drop=True)
+    universe = epi_universe.copy().reset_index(drop=True)
+    if "identity_key" not in completed.columns:
+        completed["identity_key"] = ""
+    else:
+        completed["identity_key"] = completed["identity_key"].map(_clean_text)
+
+    if len(completed) == len(universe) and "identity_key" in universe.columns:
+        universe_keys = universe["identity_key"].map(_clean_text)
+        for position in completed.index:
+            if not _clean_text(completed.at[position, "identity_key"]):
+                completed.at[position, "identity_key"] = universe_keys.iloc[position]
+        return completed
+
+    for position, row in completed.iterrows():
+        if _clean_text(row.get("identity_key")):
+            continue
+        completed.at[position, "identity_key"] = _identity_key_for_row(
+            row,
+            universe,
+            cas_columns=("cas",),
+            smiles_columns=("smiles",),
+            name_columns=("compound",),
+        )
+    return completed
+
+
+def _annotate_representative_identity_keys(
+    representative: pd.DataFrame,
+    primary_membership: pd.DataFrame,
+    epi_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    membership = (
+        primary_membership.copy().reset_index(drop=True)
+        if isinstance(primary_membership, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    universe = (
+        epi_universe.copy().reset_index(drop=True)
+        if isinstance(epi_universe, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    candidates = universe if not universe.empty else membership
+    if candidates.empty and "identity_key" not in representative.columns:
+        return representative.copy()
+
+    annotated = representative.copy().reset_index(drop=True)
+    if "identity_key" not in annotated.columns:
+        annotated["identity_key"] = ""
+    else:
+        annotated["identity_key"] = annotated["identity_key"].map(_clean_text)
+
+    for position, row in annotated.iterrows():
+        if _clean_text(row.get("identity_key")):
+            continue
+        lineage_key = _identity_key_from_lineage(row, membership)
+        if lineage_key:
+            annotated.at[position, "identity_key"] = lineage_key
+            continue
+        annotated.at[position, "identity_key"] = _identity_key_for_row(
+            row,
+            candidates,
+            cas_columns=("CAS_input", "cas"),
+            smiles_columns=("SMILES_input", "smiles"),
+            name_columns=("Name", "compound"),
+        )
+    return annotated
+
+
+def _identity_key_from_lineage(
+    row: pd.Series,
+    membership: pd.DataFrame,
+) -> str:
+    if membership.empty or "identity_key" not in membership.columns:
+        return ""
+
+    scoped = membership.copy()
+    compared = False
+    lineage_columns = (
+        (("primary_file", "_primary_file", "source_primary_file"), "primary_file"),
+        (("sample_id", "_sample_id", "source_sample_id"), "sample_id"),
+        (("source_row", "_source_row"), "source_row"),
+    )
+    for source_columns, target_column in lineage_columns:
+        if target_column not in scoped.columns:
+            continue
+        source_value = _first_clean_value(row, source_columns)
+        if not source_value:
+            continue
+        compared = True
+        scoped = scoped.loc[
+            scoped[target_column].map(_clean_text).map(str.casefold).eq(
+                source_value.casefold()
+            )
+        ]
+    if not compared or scoped.empty:
+        return ""
+    keys = sorted(
+        {
+            _clean_text(value)
+            for value in scoped["identity_key"]
+            if _clean_text(value)
+        }
+    )
+    return keys[0] if len(keys) == 1 else ""
+
+
+def _identity_key_for_row(
+    row: pd.Series,
+    candidates: pd.DataFrame,
+    *,
+    cas_columns: tuple[str, ...],
+    smiles_columns: tuple[str, ...],
+    name_columns: tuple[str, ...],
+) -> str:
+    if candidates.empty or "identity_key" not in candidates.columns:
+        return ""
+
+    cas = _first_clean_value(row, cas_columns).replace(" ", "").casefold()
+    if cas:
+        return _unique_identity_key(
+            candidates,
+            "cas",
+            cas,
+            lambda value: _clean_text(value).replace(" ", "").casefold(),
+        )
+
+    smiles = _first_clean_value(row, smiles_columns)
+    if smiles:
+        return _unique_identity_key(
+            candidates,
+            "smiles",
+            smiles,
+            _clean_text,
+        )
+
+    name = " ".join(
+        _first_clean_value(row, name_columns).casefold().split()
+    )
+    if not name:
+        return ""
+    return _unique_identity_key(
+        candidates,
+        "compound",
+        name,
+        lambda value: " ".join(_clean_text(value).casefold().split()),
+    )
+
+
+def _unique_identity_key(
+    candidates: pd.DataFrame,
+    column: str,
+    expected: str,
+    normalizer,
+) -> str:
+    if column not in candidates.columns:
+        return ""
+    matched = candidates.loc[
+        candidates[column].map(normalizer).eq(expected)
+    ]
+    keys = sorted(
+        {
+            _clean_text(value)
+            for value in matched["identity_key"]
+            if _clean_text(value)
+        }
+    )
+    return keys[0] if len(keys) == 1 else ""
+
+
+def _first_clean_value(row: pd.Series, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = _clean_text(row.get(column))
+        if value:
+            return value
+    return ""
 
 
 def _query_input_from_identifiers(

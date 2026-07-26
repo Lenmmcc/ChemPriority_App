@@ -12,7 +12,11 @@ from pathlib import Path
 import pandas as pd
 
 from src.batch_runner import run_ordered_batch
-from src.query_retry import is_transient_query_error, warning_frame_has_transient_error
+from src.query_retry import (
+    is_transient_query_error,
+    transient_retry_delay,
+    warning_frame_has_transient_error,
+)
 from src.query_cache import cache_control, cached_call
 
 
@@ -452,7 +456,10 @@ def run_epi_web_batch(
             label_func=display_compound,
             event_callback=activity_callback,
             max_attempts=3,
-            retry_delay_seconds=max(1.0, float(delay_seconds or 0)),
+            retry_delay_seconds=lambda completed_attempt: transient_retry_delay(
+                completed_attempt,
+                base_seconds=max(1.0, float(delay_seconds or 0)),
+            ),
             should_retry=lambda result: (
                 is_transient_query_error(result.error)
                 if result.error is not None
@@ -614,13 +621,17 @@ def extract_epi_web_summary(compound, smiles, data, cas=None, query_note=""):
     }
 
 
-def parse_uploaded_result(uploaded_file):
+def parse_uploaded_result(uploaded_file, sheet_name: str | int | None = None):
     name = uploaded_file.name
     suffix = Path(name).suffix.lower()
     raw = uploaded_file.getvalue()
 
     if suffix in {".xlsx", ".xls"}:
-        return parse_table_result(pd.read_excel(io.BytesIO(raw)), source_name=name)
+        selected_sheet = 0 if sheet_name is None else sheet_name
+        return parse_table_result(
+            pd.read_excel(io.BytesIO(raw), sheet_name=selected_sheet),
+            source_name=name,
+        )
     if suffix == ".csv":
         return parse_table_result(pd.read_csv(io.BytesIO(raw)), source_name=name)
 

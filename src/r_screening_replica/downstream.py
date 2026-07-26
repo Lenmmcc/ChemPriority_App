@@ -111,17 +111,15 @@ def build_pov_lrtp_input(
     identifiers = _with_key(completed_identifiers, "compound")
     epi = _with_key(epi_results, "compound")
 
-    merged = base.merge(
-        _dedupe_by_key(identifiers),
-        on="_compound_key",
-        how="left",
-        suffixes=("", "_identifier"),
+    merged = _merge_identity_aware_lookup(
+        base,
+        identifiers,
+        suffix="_identifier",
     )
-    merged = merged.merge(
-        _dedupe_by_key(epi),
-        on="_compound_key",
-        how="left",
-        suffixes=("", "_epi"),
+    merged = _merge_identity_aware_lookup(
+        merged,
+        epi,
+        suffix="_epi",
     )
 
     henry = pd.to_numeric(merged.get("henry_atm_m3_mol"), errors="coerce")
@@ -248,6 +246,39 @@ def _dedupe_by_key(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     return df.loc[df["_compound_key"].ne("")].drop_duplicates("_compound_key", keep="first")
+
+
+def _merge_identity_aware_lookup(
+    base: pd.DataFrame,
+    lookup: pd.DataFrame,
+    *,
+    suffix: str,
+) -> pd.DataFrame:
+    identity_join = (
+        "identity_key" in base.columns
+        and "identity_key" in lookup.columns
+    )
+    if not identity_join:
+        return base.merge(
+            _dedupe_by_key(lookup),
+            on="_compound_key",
+            how="left",
+            suffixes=("", suffix),
+        )
+
+    working_base = base.copy()
+    working_lookup = lookup.copy()
+    working_base["_identity_key"] = working_base["identity_key"].map(_key)
+    working_lookup["_identity_key"] = working_lookup["identity_key"].map(_key)
+    working_lookup = working_lookup.loc[
+        working_lookup["_identity_key"].ne("")
+    ].drop_duplicates("_identity_key", keep="first")
+    return working_base.merge(
+        working_lookup,
+        on="_identity_key",
+        how="left",
+        suffixes=("", suffix),
+    )
 
 
 def _formulas_match(source_formula: Any, pubchem_formula: Any) -> bool:

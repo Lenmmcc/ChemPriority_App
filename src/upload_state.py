@@ -3,6 +3,7 @@
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import date, datetime, time
 
 
 def upload_name(upload):
@@ -64,6 +65,21 @@ def settings_signature(settings):
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def typed_settings_value(value):
+    """Return a stable JSON-safe representation of a typed UI selection."""
+    value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+    if isinstance(value, (datetime, date, time)):
+        value_text = value.isoformat()
+    elif isinstance(value, bytes):
+        value_text = value.hex()
+    else:
+        value_text = str(value)
+    return {
+        "value_type": value_type,
+        "value_text": value_text,
+    }
 
 
 def invalidate_recovered_results_on_settings_mismatch(

@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import time
+from typing import Callable
 
 
 @dataclass
@@ -20,7 +21,7 @@ def run_ordered_batch(
     event_callback=None,
     max_attempts=1,
     should_retry=None,
-    retry_delay_seconds=0,
+    retry_delay_seconds: float | Callable[[int], float] = 0,
 ):
     items = list(items)
     total = len(items)
@@ -28,7 +29,11 @@ def run_ordered_batch(
     worker_count = max(1, int(max_workers or 1))
     delay = max(0.0, float(delay_seconds or 0))
     attempt_limit = max(1, int(max_attempts or 1))
-    retry_delay = max(0.0, float(retry_delay_seconds or 0))
+    retry_delay = (
+        retry_delay_seconds
+        if callable(retry_delay_seconds)
+        else max(0.0, float(retry_delay_seconds or 0))
+    )
     finalized = set()
     finalized_count = 0
 
@@ -143,7 +148,13 @@ def run_ordered_batch(
     while pending:
         pending = run_indices(pending, attempt)
         if pending and retry_delay:
-            time.sleep(retry_delay * attempt)
+            wait_seconds = (
+                retry_delay(attempt)
+                if callable(retry_delay)
+                else retry_delay * attempt
+            )
+            if wait_seconds:
+                time.sleep(wait_seconds)
         attempt += 1
 
     return results

@@ -1,6 +1,7 @@
 """Short-lived, non-pickle persistence for page-6 auto-query checkpoints."""
 
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import gzip
@@ -26,7 +27,8 @@ from src.auto_query_workflow import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 TTL = timedelta(hours=24)
 DEFAULT_CHECKPOINT_ROOT = Path(".cache/auto_query_runs")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -50,7 +52,7 @@ class ExpiredCheckpoint(CheckpointStorageError):
 @dataclass(frozen=True)
 class LoadedAutoQueryCheckpoint:
     checkpoint: AutoWorkflowCheckpoint
-    input_filename: str
+    input_filenames: tuple[str, ...]
     module_workbooks: OrderedDict[str, AutoWorkflowModuleWorkbook]
     manifest: dict[str, Any]
 
@@ -96,11 +98,28 @@ def _safe_file_name(value) -> str:
 
 
 def _input_basename(value) -> str:
+    if not isinstance(value, (str, Path)):
+        raise CheckpointStorageError("输入文件名类型无效")
     value = str(value)
     basename = PureWindowsPath(PurePosixPath(value).name).name
     if basename in {"", ".", ".."}:
         raise CheckpointStorageError("输入文件名无效")
     return basename
+
+
+def _normalize_input_filenames(
+    input_filenames: Iterable[str] | str,
+) -> tuple[str, ...]:
+    if isinstance(input_filenames, (str, Path)):
+        values = (input_filenames,)
+    else:
+        try:
+            values = tuple(input_filenames)
+        except TypeError as exc:
+            raise CheckpointStorageError("输入文件名列表类型无效") from exc
+    if not values:
+        raise CheckpointStorageError("输入文件名列表不能为空")
+    return tuple(_input_basename(name) for name in values)
 
 
 def _validated_run_path(run_dir: Path, path: Path) -> Path:
@@ -168,13 +187,14 @@ def _read_frame(path: Path) -> pd.DataFrame:
 def save_checkpoint(
     token,
     checkpoint: AutoWorkflowCheckpoint,
-    input_filename,
+    input_filenames: Iterable[str] | str,
     module_workbooks: Mapping[str, AutoWorkflowModuleWorkbook],
     *,
     root=DEFAULT_CHECKPOINT_ROOT,
     now=None,
 ) -> Path:
     now = now or _utc_now()
+    input_filenames = _normalize_input_filenames(input_filenames)
     run_dir = _run_directory(token, root)
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = _validated_run_path(run_dir, run_dir / "manifest.json")
@@ -231,7 +251,7 @@ def save_checkpoint(
         "schema_version": SCHEMA_VERSION,
         "token_hash": run_dir.name,
         "run_id": checkpoint.run_id,
-        "input_filename": _input_basename(input_filename),
+        "input_filenames": list(input_filenames),
         "input_signature": checkpoint.input_signature,
         "settings_signature": checkpoint.settings_signature,
         "selected_steps": list(checkpoint.selected_steps),
@@ -293,8 +313,9 @@ def load_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT, now=None):
     if not manifest_path.is_file():
         raise CheckpointStorageError("找不到可恢复的检查点")
     manifest = _read_manifest(manifest_path)
+    schema_version = manifest.get("schema_version")
     if (
-        manifest.get("schema_version") != SCHEMA_VERSION
+        schema_version not in SUPPORTED_SCHEMA_VERSIONS
         or manifest.get("token_hash") != run_dir.name
     ):
         raise CheckpointStorageError("检查点版本或令牌摘要不匹配")
@@ -302,6 +323,11 @@ def load_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT, now=None):
         raise ExpiredCheckpoint("检查点已超过 24 小时")
 
     try:
+        input_filenames = _normalize_input_filenames(
+            manifest["input_filenames"]
+            if schema_version >= 2
+            else (manifest["input_filename"],)
+        )
         frames = OrderedDict(
             (
                 _safe_name(name),
@@ -352,7 +378,7 @@ def load_checkpoint(token, *, root=DEFAULT_CHECKPOINT_ROOT, now=None):
             updated_at=manifest["updated_at"],
         )
         return LoadedAutoQueryCheckpoint(
-            checkpoint, manifest["input_filename"], modules, manifest
+            checkpoint, input_filenames, modules, manifest
         )
     except CheckpointStorageError:
         raise
@@ -419,7 +445,8 @@ def cleanup_expired_checkpoints(*, root=DEFAULT_CHECKPOINT_ROOT, now=None):
             manifest_path = _validated_run_path(child, child / "manifest.json")
             manifest = _read_manifest(manifest_path)
             if (
-                manifest.get("schema_version") != SCHEMA_VERSION
+                manifest.get("schema_version")
+                not in SUPPORTED_SCHEMA_VERSIONS
                 or manifest.get("token_hash") != child.name
             ):
                 raise CheckpointStorageError("检查点版本或令牌摘要不匹配")

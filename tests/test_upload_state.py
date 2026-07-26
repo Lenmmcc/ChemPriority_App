@@ -32,6 +32,33 @@ class FakeUpload:
 
 
 class UploadStateTests(unittest.TestCase):
+    def test_typed_settings_value_serializes_datetime_without_string_collision(self):
+        self.assertTrue(
+            hasattr(upload_state, "typed_settings_value")
+        )
+        encoder = upload_state.typed_settings_value
+        header = datetime(2026, 7, 25, 12, 30, 0)
+
+        encoded_datetime = encoder(header)
+        encoded_string = encoder(header.isoformat())
+
+        self.assertNotEqual(encoded_datetime, encoded_string)
+        self.assertEqual(
+            encoded_datetime,
+            {
+                "value_type": "datetime.datetime",
+                "value_text": "2026-07-25T12:30:00",
+            },
+        )
+        self.assertEqual(
+            upload_state.settings_signature(
+                {"endpoint_column": encoded_datetime}
+            ),
+            upload_state.settings_signature(
+                {"endpoint_column": encoder(header)}
+            ),
+        )
+
     def test_store_uploads_restores_multiple_files_without_streamlit_objects(self):
         state = {}
 
@@ -260,6 +287,36 @@ class UploadStateTests(unittest.TestCase):
             page_text = page_path.read_text(encoding="utf-8")
             for token in tokens:
                 self.assertIn(token, page_text, f"{page_path.name} is missing {token}")
+
+    def test_page_6_combines_primary_and_epi_upload_signatures(self):
+        page_text = next(Path("pages").glob("6_*.py")).read_text(encoding="utf-8")
+
+        self.assertIn("EPI_SUPPLEMENT_CACHE_KEYS", page_text)
+        self.assertIn('"auto_query_epi_supplement_files"', page_text)
+        self.assertIn('"auto_query_epi_supplement_signature"', page_text)
+        self.assertIn("workflow_input_signature = settings_signature(", page_text)
+        self.assertIn('"primary": upload_signature(active_uploads)', page_text)
+        self.assertIn(
+            '"epi_supplements":',
+            page_text,
+        )
+        checkpoint_block = page_text.split(
+            "checkpoint_context = AutoWorkflowCheckpointContext(", 1
+        )[1].split("def handle_checkpoint", 1)[0]
+        self.assertIn("input_signature=workflow_input_signature", checkpoint_block)
+
+    def test_page_6_checkpoints_all_primary_filenames_and_restores_them(self):
+        page_text = next(Path("pages").glob("6_*.py")).read_text(encoding="utf-8")
+        callback_block = page_text.split(
+            "def handle_checkpoint", 1
+        )[1].split("start_run =", 1)[0]
+        recovery_block = page_text.split(
+            "loaded = load_checkpoint(recovery_token)", 1
+        )[1].split("uploaded_files = st.file_uploader", 1)[0]
+
+        self.assertIn("primary_names", callback_block)
+        self.assertNotIn('active_uploads[0]["name"]', callback_block)
+        self.assertIn("loaded.input_filenames", recovery_block)
 
     def test_page_6_declares_all_checkpoint_session_keys_and_clears_the_current_token(self):
         page_text = next(Path("pages").glob("6_*.py")).read_text(encoding="utf-8")

@@ -95,6 +95,83 @@ class RScreeningDownstreamTests(unittest.TestCase):
         self.assertTrue(bool(result.loc[0, "formula_match"]))
         self.assertTrue(bool(result.loc[0, "model_input_complete"]))
 
+    def test_build_pov_lrtp_input_prefers_exact_identity_key_over_same_name(self):
+        screening = pd.DataFrame(
+            {
+                "Name": ["Shared"],
+                "formula": ["C3H8"],
+                "Group_Area": [123.0],
+                "identity_key": ["cas:22-22-2"],
+            }
+        )
+        identifiers = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "compound": ["Shared", "Shared"],
+                "smiles": ["CC", "CCC"],
+                "pubchem_cid": ["11", "22"],
+                "pubchem_molecular_weight": [11.0, 22.0],
+            }
+        )
+        epi = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "compound": ["Shared", "Shared"],
+                "molecular_weight": [111.0, 222.0],
+                "log_kow": [1.0, 2.0],
+                "henry_atm_m3_mol": [1.0e-6, 2.0e-6],
+                "log_baf": [0.1, 0.2],
+                "level3_air_half_life_hours": [11.0, 22.0],
+                "level3_water_half_life_hours": [111.0, 222.0],
+                "level3_soil_half_life_hours": [1111.0, 2222.0],
+            }
+        )
+
+        result = build_pov_lrtp_input(screening, identifiers, epi)
+
+        self.assertEqual(result.loc[0, "Compound_CID"], "22")
+        self.assertEqual(result.loc[0, "SMILES"], "CCC")
+        self.assertEqual(result.loc[0, "Molecular_Weight"], 222.0)
+        self.assertEqual(result.loc[0, "Log_Kow_used"], 2.0)
+
+    def test_build_pov_lrtp_input_does_not_name_fallback_when_identity_key_is_missing(self):
+        screening = pd.DataFrame(
+            {
+                "Name": ["Shared"],
+                "formula": ["C3H8"],
+                "Group_Area": [123.0],
+                "identity_key": ["cas:22-22-2"],
+            }
+        )
+        identifiers = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1"],
+                "compound": ["Shared"],
+                "smiles": ["CC"],
+                "pubchem_cid": ["11"],
+                "pubchem_molecular_weight": [11.0],
+            }
+        )
+        epi = pd.DataFrame(
+            {
+                "identity_key": ["cas:11-11-1"],
+                "compound": ["Shared"],
+                "molecular_weight": [111.0],
+                "log_kow": [1.0],
+                "henry_atm_m3_mol": [1.0e-6],
+                "log_baf": [0.1],
+                "level3_air_half_life_hours": [11.0],
+                "level3_water_half_life_hours": [111.0],
+                "level3_soil_half_life_hours": [1111.0],
+            }
+        )
+
+        result = build_pov_lrtp_input(screening, identifiers, epi)
+
+        self.assertTrue(pd.isna(result.loc[0, "Compound_CID"]))
+        self.assertTrue(pd.isna(result.loc[0, "Molecular_Weight"]))
+        self.assertTrue(pd.isna(result.loc[0, "Log_Kow_used"]))
+
     @patch("src.r_screening_replica.downstream.run_pov_lrtp_batch")
     @patch("src.r_screening_replica.downstream.run_epi_web_batch")
     @patch("src.r_screening_replica.downstream.run_identifier_completion_batch")

@@ -1,10 +1,34 @@
 import time
 import unittest
+from unittest.mock import patch
 
 from src.batch_runner import run_ordered_batch
 
 
 class BatchRunnerTests(unittest.TestCase):
+    @patch("src.batch_runner.time.sleep")
+    def test_callable_retry_delay_receives_completed_attempt(self, sleep):
+        attempts = 0
+
+        def worker(_item):
+            nonlocal attempts
+            attempts += 1
+            return "retry" if attempts < 3 else "done"
+
+        run_ordered_batch(
+            ["a"],
+            worker,
+            max_attempts=3,
+            should_retry=lambda result: result.value == "retry",
+            retry_delay_seconds=lambda completed_attempt: float(
+                2 ** (completed_attempt - 1)
+            ),
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list], [1.0, 2.0]
+        )
+
     def test_parallel_results_keep_input_order(self):
         items = [0, 1, 2, 3, 4]
 

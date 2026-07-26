@@ -3,7 +3,6 @@ import importlib
 import io
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -20,9 +19,6 @@ if PROJECT_ROOT not in sys.path:
 
 from src.cp_screening_workflow import (  # noqa: E402
     PBMToxPiConfig,
-    build_detection_frequency,
-    build_group_area_mean_by_sample,
-    build_peak_area_long,
     build_pbm_toxpi_input,
     build_screening_workbook,
     calculate_pbm_toxpi,
@@ -32,22 +28,23 @@ from src.cp_screening_workflow import (  # noqa: E402
 )
 from src.episuite_io import DEFAULT_EPI_WEB_API, run_epi_web_batch  # noqa: E402
 from src.identifier_resolver import DEFAULT_PUBCHEM_BASE, run_identifier_completion_batch  # noqa: E402
-from src.mol_structure_parser import (  # noqa: E402
-    find_mol_text_column,
-    prepare_structure_dataframe,
-    summarize_structure_preparation,
+from src.multi_file_screening import (  # noqa: E402
+    PrimaryWorkbook,
+    SampleColumnMapping,
+    build_upload_structure_preparation_preview,
+    default_sample_mapping,
+    prepare_multi_file_screening,
+    read_primary_workbooks,
 )
 from src.pov_lrtp_replica import run_pov_lrtp_batch  # noqa: E402
 from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
-from src.r_screening_replica import ScreeningConfig, run_screening_pipeline  # noqa: E402
 from src.r_screening_replica.schema import ScreeningAxisRanges  # noqa: E402
 from src.r_screening_replica.downstream import (  # noqa: E402
     build_epi_input_from_identifiers,
     build_identifier_input,
     build_pov_lrtp_input,
 )
-from src.r_screening_replica.plots import save_boxplot_log_transformed, save_compound_bubble_plot  # noqa: E402
-from src.upload_state import cached_uploads, clear_uploads, store_uploads, upload_bytes, upload_name  # noqa: E402
+from src.upload_state import cached_uploads, clear_uploads, store_uploads  # noqa: E402
 import src.toxpi_calc as toxpi_calc  # noqa: E402
 
 if not hasattr(toxpi_calc, "generate_r_style_toxpi_plot"):
@@ -90,12 +87,6 @@ SUMMARY_FRONT_HALF_FIGURES = [
 
 TOXPI_RADIAL_PLOT_VERSION = "r_style_single_canvas_v2"
 
-STANDARD_COMPOUND_COL = "Name"
-STANDARD_FORMULA_COL = "formula"
-STANDARD_SMILES_COL = "SMILES_input"
-STANDARD_CAS_COL = "CAS_input"
-
-
 def clear_workflow_state():
     for key in STATE_KEYS:
         st.session_state.pop(key, None)
@@ -111,7 +102,7 @@ def show_dataframe(df):
     try:
         st.dataframe(df, width="stretch")
     except TypeError:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
 
 
 def read_file_bytes(path):
@@ -181,64 +172,6 @@ def render_figure_paths(owner_id, figure_paths, figure_specs):
                     )
 
 
-def parse_uploaded_workbooks(uploaded_files):
-    samples = []
-    for uploaded in uploaded_files:
-        data = upload_bytes(uploaded)
-        file_name = upload_name(uploaded)
-        frame = pd.read_excel(io.BytesIO(data))
-        frame.columns = [str(column).strip() for column in frame.columns]
-        samples.append({"name": Path(file_name).stem, "file_name": file_name, "bytes": data, "data": frame})
-    return samples
-
-
-def guess_column(columns, candidates, fallback_index=0):
-    for candidate in candidates:
-        if candidate in columns:
-            return candidate
-    return columns[fallback_index] if columns else None
-
-
-def ordered_workbook_columns(samples):
-    columns = []
-    seen = set()
-    for sample in samples:
-        for column in sample["data"].columns:
-            if column not in seen:
-                seen.add(column)
-                columns.append(column)
-    return columns
-
-
-def is_group_area_column(column):
-    text = str(column).strip().lower().replace("_", " ")
-    return text.startswith("group area")
-
-
-def guess_peak_area_column(columns):
-    for candidate in ["Group_Area", "Peak_Area", "Peak area", "Area"]:
-        if candidate in columns:
-            return candidate
-    group_area_columns = [column for column in columns if is_group_area_column(column)]
-    if group_area_columns:
-        return group_area_columns[0]
-    return columns[0] if columns else None
-
-
-def guess_sample_columns(columns, compound_col, formula_col, peak_area_col):
-    preferred = [column for column in ["HH_alk", "WH_alk"] if column in columns]
-    if preferred:
-        return preferred
-    group_columns = [
-        column
-        for column in columns
-        if is_group_area_column(column) and column not in {compound_col, formula_col}
-    ]
-    if group_columns:
-        return group_columns
-    return [peak_area_col] if peak_area_col else []
-
-
 def column_index(columns, value):
     return columns.index(value) if value in columns else 0
 
@@ -253,69 +186,46 @@ def widget_key(prefix, sample_name, index):
     return f"{prefix}_{digest}"
 
 
-def group_area_columns(columns):
-    return [column for column in columns if is_group_area_column(column)]
-
-
-def sample_mapping_defaults(sample):
-    columns = list(sample["data"].columns)
-    compound_col = guess_column(columns, ["Name", "compound", "Compound", "Chemical name"])
-    formula_col = guess_column(
-        columns,
-        ["formula", "Formula", "Molecular Formula", "NIST Lib Hit Formula"],
-        fallback_index=0,
-    )
-    peak_area_col = guess_peak_area_column(columns)
-    default_sample_cols = group_area_columns(columns) or ([peak_area_col] if peak_area_col else [])
-    return {
-        "compound_col": compound_col,
-        "formula_col": formula_col,
-        "peak_area_col": peak_area_col,
-        "sample_cols": default_sample_cols,
-        "mol_column": find_mol_text_column(columns),
-        "smiles_col": None,
-        "cas_col": None,
-    }
-
-
 def render_sample_mapping_tabs(samples):
     sample_mappings = {}
-    mapping_tabs = st.tabs([sample["name"] for sample in samples])
+    mapping_tabs = st.tabs([sample.sample_id for sample in samples])
     for index, (tab, sample) in enumerate(zip(mapping_tabs, samples)):
         with tab:
-            columns = list(sample["data"].columns)
-            defaults = sample_mapping_defaults(sample)
-            st.caption(f"{sample['file_name']} | {len(sample['data'])} rows | {len(columns)} columns")
+            columns = list(sample.data.columns)
+            defaults = default_sample_mapping(sample)
+            st.caption(f"{sample.file_name} | {len(sample.data)} rows | {len(columns)} columns")
             col_a, col_b, col_c = st.columns(3)
             with col_a:
                 compound_col = st.selectbox(
                     "化合物名称列",
                     columns,
-                    index=column_index(columns, defaults["compound_col"]),
-                    key=widget_key("cp_compound_col", sample["name"], index),
+                    index=column_index(columns, defaults.compound_col),
+                    key=widget_key("cp_compound_col", sample.sample_id, index),
                 )
             with col_b:
                 formula_col = st.selectbox(
                     "分子式列",
                     columns,
-                    index=column_index(columns, defaults["formula_col"]),
-                    key=widget_key("cp_formula_col", sample["name"], index),
+                    index=column_index(columns, defaults.formula_col),
+                    key=widget_key("cp_formula_col", sample.sample_id, index),
                 )
             with col_c:
                 peak_area_col = st.selectbox(
                     "默认峰面积列",
                     columns,
-                    index=column_index(columns, defaults["peak_area_col"]),
-                    key=widget_key("cp_peak_area_col", sample["name"], index),
+                    index=column_index(columns, defaults.peak_area_col),
+                    key=widget_key("cp_peak_area_col", sample.sample_id, index),
                 )
 
-            default_sample_cols = [column for column in defaults["sample_cols"] if column in columns]
+            default_sample_cols = [
+                column for column in defaults.group_area_cols if column in columns
+            ]
             sample_cols = st.multiselect(
                 "参与绘图、DF 和 PA/ToxPi 的 Group Area 列",
                 columns,
                 default=default_sample_cols,
                 help="单个 Excel 内选择多个 Group Area 时，会先按文件内均值进入 DF 和 ToxPi；箱线图仍保留原始点位长表。",
-                key=widget_key("cp_sample_cols", sample["name"], index),
+                key=widget_key("cp_sample_cols", sample.sample_id, index),
             )
             if not sample_cols and peak_area_col:
                 st.info("未选择 Group Area 列；本文件不会参与化学类型图、DBE图、VK图、DF 和 PA/ToxPi。")
@@ -326,342 +236,40 @@ def render_sample_mapping_tabs(samples):
                 mol_column = st.selectbox(
                     "可选：MOL 文本列",
                     optional_columns,
-                    index=optional_column_index(columns, defaults["mol_column"]),
-                    key=widget_key("cp_mol_col", sample["name"], index),
+                    index=optional_column_index(columns, defaults.mol_column),
+                    key=widget_key("cp_mol_col", sample.sample_id, index),
                 ) or None
             with opt_b:
                 smiles_col = st.selectbox(
                     "可选：已有 SMILES 列",
                     optional_columns,
-                    index=optional_column_index(columns, defaults["smiles_col"]),
-                    key=widget_key("cp_smiles_col", sample["name"], index),
+                    index=optional_column_index(columns, defaults.smiles_col),
+                    key=widget_key("cp_smiles_col", sample.sample_id, index),
                 ) or None
             with opt_c:
                 cas_col = st.selectbox(
                     "可选：已有 CAS 列",
                     optional_columns,
-                    index=optional_column_index(columns, defaults["cas_col"]),
-                    key=widget_key("cp_cas_col", sample["name"], index),
+                    index=optional_column_index(columns, defaults.cas_col),
+                    key=widget_key("cp_cas_col", sample.sample_id, index),
                 ) or None
 
-            sample_mappings[sample["name"]] = {
-                "compound_col": compound_col,
-                "formula_col": formula_col,
-                "peak_area_col": peak_area_col,
-                "sample_cols": sample_cols,
-                "mol_column": mol_column,
-                "smiles_col": smiles_col,
-                "cas_col": cas_col,
-            }
+            sample_mappings[sample.sample_id] = SampleColumnMapping(
+                compound_col=compound_col,
+                formula_col=formula_col,
+                peak_area_col=peak_area_col,
+                group_area_cols=tuple(sample_cols),
+                mol_column=mol_column,
+                smiles_col=smiles_col,
+                cas_col=cas_col,
+            )
     return sample_mappings
-
-
-def build_upload_structure_preparation_preview(samples, sample_mappings):
-    summaries = []
-    audits = []
-    for sample in samples:
-        mapping = sample_mappings.get(sample["name"]) or sample_mapping_defaults(sample)
-        prepared = prepare_structure_dataframe(
-            sample["data"],
-            mol_column=mapping.get("mol_column"),
-            smiles_column=mapping.get("smiles_col"),
-        )
-        summaries.append({"sample_id": sample["name"], **summarize_structure_preparation(prepared)})
-        audit = prepared.copy()
-        audit.insert(0, "sample_id", sample["name"])
-        audits.append(audit)
-    return (
-        pd.DataFrame(summaries),
-        pd.concat(audits, ignore_index=True) if audits else pd.DataFrame(),
-    )
-
-
-def normalize_samples_for_mappings(samples, sample_mappings):
-    normalized_samples = []
-    selected_peak_cols = []
-    seen_peak_cols = set()
-    warnings = []
-
-    for sample in samples:
-        mapping = sample_mappings.get(sample["name"]) or sample_mapping_defaults(sample)
-        frame = sample["data"]
-        prepared = prepare_structure_dataframe(
-            frame,
-            mol_column=mapping.get("mol_column"),
-            smiles_column=mapping.get("smiles_col"),
-        )
-        normalized = frame.copy()
-
-        compound_col = mapping.get("compound_col")
-        if compound_col in frame.columns:
-            normalized[STANDARD_COMPOUND_COL] = frame[compound_col].map(clean_text)
-        else:
-            normalized[STANDARD_COMPOUND_COL] = ""
-            warnings.append(
-                {
-                    "stage": "column_mapping",
-                    "sample_id": sample["name"],
-                    "message": f"Compound column is missing: {compound_col}",
-                }
-            )
-
-        formula_col = mapping.get("formula_col")
-        normalized[STANDARD_FORMULA_COL] = frame[formula_col] if formula_col in frame.columns else pd.NA
-
-        available_peak_cols = [column for column in mapping.get("sample_cols", []) if column in frame.columns]
-        for column in available_peak_cols:
-            normalized[column] = frame[column]
-            if column not in seen_peak_cols:
-                selected_peak_cols.append(column)
-                seen_peak_cols.add(column)
-
-        peak_area_col = mapping.get("peak_area_col")
-        if peak_area_col and peak_area_col in frame.columns and peak_area_col not in normalized.columns:
-            normalized[peak_area_col] = frame[peak_area_col]
-
-        normalized[STANDARD_SMILES_COL] = prepared["smiles"]
-        cas_col = mapping.get("cas_col")
-        if cas_col and cas_col in frame.columns:
-            normalized[STANDARD_CAS_COL] = frame[cas_col]
-
-        if not available_peak_cols:
-            warnings.append(
-                {
-                    "stage": "column_mapping",
-                    "sample_id": sample["name"],
-                    "message": "No Group Area columns were selected for this file.",
-                }
-            )
-
-        normalized_samples.append(
-            {
-                **sample,
-                "data": normalized,
-                "column_mapping": mapping,
-                "structure_preparation": prepared,
-            }
-        )
-
-    warning_table = pd.DataFrame(warnings, columns=["stage", "sample_id", "message"])
-    return normalized_samples, selected_peak_cols, warning_table
-
-
-def row_peak_area(frame, peak_area_cols):
-    available_cols = [column for column in peak_area_cols if column in frame.columns]
-    if not available_cols:
-        return pd.Series(pd.NA, index=frame.index, dtype="float64")
-    return frame[available_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
-
-
-def dataframe_to_excel_bytes(frame):
-    buffer = io.BytesIO()
-    frame.to_excel(buffer, index=False)
-    buffer.seek(0)
-    return buffer
-
-
-def safe_path_name(value):
-    text = clean_text(value) or "sample"
-    return "".join(char if char.isalnum() or char in "._- " else "_" for char in text).strip() or "sample"
-
-
-def build_representative_screening_table(samples, compound_col, formula_col, peak_area_col, sample_cols=None, smiles_col=None, cas_col=None):
-    frames = []
-    sample_cols = sample_cols or []
-    for sample in samples:
-        frame = sample["data"].copy()
-        frame["sample_id"] = sample["name"]
-        frame["Name"] = frame[compound_col].map(clean_text)
-        frame["formula"] = frame[formula_col] if formula_col in frame.columns else pd.NA
-        peak_area_cols = sample_cols or [peak_area_col]
-        frame["Group_Area"] = row_peak_area(frame, peak_area_cols)
-        if smiles_col and smiles_col in frame.columns:
-            frame["SMILES_input"] = frame[smiles_col]
-        if cas_col and cas_col in frame.columns:
-            frame["CAS_input"] = frame[cas_col]
-        frames.append(frame)
-
-    combined = pd.concat(frames, ignore_index=True)
-    combined["compound_key"] = combined["Name"].map(compound_key)
-    combined = combined[combined["compound_key"].ne("")].copy()
-    combined = combined.sort_values("Group_Area", ascending=False, na_position="last")
-    output_cols = ["Name", "formula", "Group_Area", "compound_key"]
-    if "SMILES_input" in combined.columns:
-        output_cols.append("SMILES_input")
-    if "CAS_input" in combined.columns:
-        output_cols.append("CAS_input")
-    return combined.drop_duplicates("compound_key", keep="first")[output_cols].reset_index(drop=True)
-
-
-def replace_dbe_bubble_with_thresholded_plot(result, detection_threshold, axis_ranges):
-    dbe_table = result.dbe_table.copy()
-    peak_area = pd.to_numeric(dbe_table["peak_area"], errors="coerce")
-    thresholded_dbe = dbe_table.loc[peak_area > detection_threshold].copy()
-    figures_dir = result.config.output_path / "figures"
-    result.figure_paths["compound_bubble_plot"] = save_compound_bubble_plot(
-        thresholded_dbe,
-        result.compound_categories,
-        figures_dir,
-        axis_ranges,
-    )
-    result.metadata["dbe_plot_threshold"] = detection_threshold
-
-
-def build_summary_figure_paths(screening_results, group_area_mean, output_root):
-    if group_area_mean.empty or not screening_results:
-        return {}
-
-    category_frames = []
-    for _sample_id, result in screening_results:
-        if isinstance(result.compound_categories, pd.DataFrame) and not result.compound_categories.empty:
-            category_frames.append(result.compound_categories)
-    if not category_frames:
-        return {}
-
-    compound_categories = (
-        pd.concat(category_frames, ignore_index=True)
-        .drop_duplicates("Formula")
-        .reset_index(drop=True)
-    )
-    summary_figures_dir = output_root / "summary" / "figures"
-    summary_figures_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "boxplot_log_transformed": save_boxplot_log_transformed(
-            group_area_mean,
-            compound_categories,
-            summary_figures_dir,
-        )
-    }
-
-
-def collect_front_half(samples, sample_mappings, detection_threshold, axis_ranges):
-    output_root = Path(tempfile.mkdtemp(prefix="cp_screening_"))
-    screening_results = []
-    warnings = []
-    normalized_samples, selected_peak_cols, mapping_warnings = normalize_samples_for_mappings(samples, sample_mappings)
-    if not mapping_warnings.empty:
-        warnings.extend(mapping_warnings.to_dict("records"))
-
-    for sample in normalized_samples:
-        file_sample_cols = [column for column in selected_peak_cols if column in sample["data"].columns]
-        if not file_sample_cols:
-            warnings.append(
-                {
-                    "stage": "R_front_half",
-                    "sample_id": sample["name"],
-                    "message": "No selected peak-area columns are present in this file.",
-                }
-            )
-            continue
-        mean_frame = sample["data"].copy()
-        mean_frame["Group_Area_Mean"] = row_peak_area(mean_frame, file_sample_cols)
-        config = ScreeningConfig(
-            compound_col=STANDARD_COMPOUND_COL,
-            formula_col=STANDARD_FORMULA_COL,
-            group_area_col="Group_Area_Mean",
-            sample_cols=["Group_Area_Mean"],
-            output_dir=output_root / safe_path_name(sample["name"]) / "workbook",
-            axis_ranges=axis_ranges,
-        )
-        try:
-            result = run_screening_pipeline(dataframe_to_excel_bytes(mean_frame), config=config)
-            replace_dbe_bubble_with_thresholded_plot(result, detection_threshold, axis_ranges)
-        except Exception as exc:
-            warnings.append(
-                {
-                    "stage": "R_front_half",
-                    "sample_id": sample["name"],
-                    "message": str(exc),
-                }
-            )
-        else:
-            screening_results.append((sample["name"], result))
-            for warning in result.warnings:
-                warnings.append(
-                    {
-                        "stage": "R_front_half",
-                        "sample_id": sample["name"],
-                        "message": warning,
-                    }
-                )
-
-    df_table, sample_peak_area = build_detection_frequency(
-        [(sample["name"], sample["data"]) for sample in normalized_samples],
-        compound_col=STANDARD_COMPOUND_COL,
-        peak_area_col=selected_peak_cols,
-        detection_threshold=detection_threshold,
-    )
-    group_area_raw_long = build_peak_area_long(
-        [(sample["name"], sample["data"]) for sample in normalized_samples],
-        compound_col=STANDARD_COMPOUND_COL,
-        formula_col=STANDARD_FORMULA_COL,
-        peak_area_cols=selected_peak_cols,
-    )
-    group_area_mean = build_group_area_mean_by_sample(
-        [(sample["name"], sample["data"]) for sample in normalized_samples],
-        compound_col=STANDARD_COMPOUND_COL,
-        formula_col=STANDARD_FORMULA_COL,
-        peak_area_cols=selected_peak_cols,
-    )
-    summary_figure_paths = build_summary_figure_paths(screening_results, group_area_mean, output_root)
-    representative_peak_col = selected_peak_cols[0] if selected_peak_cols else ""
-    structure_summaries = pd.DataFrame(
-        [
-            {"sample_id": sample["name"], **summarize_structure_preparation(sample["structure_preparation"])}
-            for sample in normalized_samples
-        ]
-    )
-    structure_audits = []
-    for sample in normalized_samples:
-        audit = sample["structure_preparation"].copy()
-        audit.insert(0, "sample_id", sample["name"])
-        structure_audits.append(audit)
-
-    return {
-        "output_root": str(output_root),
-        "screening_results": screening_results,
-        "summary_figure_paths": summary_figure_paths,
-        "df_table": df_table,
-        "df_detection_table": sample_peak_area,
-        "group_area_raw_long": group_area_raw_long,
-        "group_area_mean_by_sample": group_area_mean,
-        "sample_peak_area": group_area_mean,
-        "representative_table": build_representative_screening_table(
-            normalized_samples,
-            STANDARD_COMPOUND_COL,
-            STANDARD_FORMULA_COL,
-            representative_peak_col,
-            sample_cols=selected_peak_cols,
-            smiles_col=STANDARD_SMILES_COL,
-            cas_col=STANDARD_CAS_COL,
-        ),
-        "selected_peak_cols": selected_peak_cols,
-        "sample_mappings": sample_mappings,
-        "structure_preparation_summary": structure_summaries,
-        "structure_preparation_audit": pd.concat(structure_audits, ignore_index=True) if structure_audits else pd.DataFrame(),
-        "warnings": pd.DataFrame(warnings, columns=["stage", "sample_id", "message"]),
-    }
-
-
-def dataframe_with_sample(screening_results, attr_name):
-    frames = []
-    for sample_id, result in screening_results:
-        table = getattr(result, attr_name)
-        if isinstance(table, pd.DataFrame) and not table.empty:
-            frame = table.copy()
-            frame.insert(0, "sample_id", sample_id)
-            frames.append(frame)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def clean_text(value):
     if value is None or pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def compound_key(value):
-    return " ".join(clean_text(value).lower().split())
 
 
 def with_warning_stage(table, fallback_stage):
@@ -680,7 +288,7 @@ def with_warning_stage(table, fallback_stage):
 
 def workflow_tables(front_state, downstream_state=None):
     downstream_state = downstream_state or {}
-    screening_results = front_state.get("screening_results", [])
+    front_tables = front_state.get("tables", {})
     warnings = []
     if isinstance(front_state.get("warnings"), pd.DataFrame):
         warnings.append(front_state["warnings"])
@@ -697,9 +305,12 @@ def workflow_tables(front_state, downstream_state=None):
         excluded = pov_results[failed_mask | incomplete_mask].copy()
 
     return {
-        "Input_Check": dataframe_with_sample(screening_results, "input_check"),
-        "Elemental_Ratios_DBE": dataframe_with_sample(screening_results, "all_formulas"),
-        "Category_Summary": dataframe_with_sample(screening_results, "category_summary"),
+        "Input_Check": front_tables.get("Input_Check", pd.DataFrame()),
+        "Elemental_Ratios_DBE": front_tables.get(
+            "Elemental_Ratios_DBE",
+            pd.DataFrame(),
+        ),
+        "Category_Summary": front_tables.get("Category_Summary", pd.DataFrame()),
         "Sample_Peak_Area": front_state.get("sample_peak_area", pd.DataFrame()),
         "Group_Area_Raw_Long": front_state.get("group_area_raw_long", pd.DataFrame()),
         "Group_Area_Mean_By_Sample": front_state.get("group_area_mean_by_sample", pd.DataFrame()),
@@ -785,7 +396,7 @@ if st.button("清空当前数据", key="cp_screening_clear_cached_input"):
     st.rerun()
 
 try:
-    samples = parse_uploaded_workbooks(active_uploads)
+    samples = read_primary_workbooks(active_uploads)
 except Exception as exc:
     st.error(f"Excel 读取失败：{exc}")
     st.stop()
@@ -798,7 +409,12 @@ with tab_upload:
     st.subheader("1. 文件与列映射")
     st.metric("上传 Excel 数", len(samples))
     preview_rows = [
-        {"sample_id": sample["name"], "file_name": sample["file_name"], "rows": len(sample["data"]), "columns": len(sample["data"].columns)}
+        {
+            "sample_id": sample.sample_id,
+            "file_name": sample.file_name,
+            "rows": len(sample.data),
+            "columns": len(sample.data.columns),
+        }
         for sample in samples
     ]
     show_dataframe(pd.DataFrame(preview_rows))
@@ -951,12 +567,33 @@ with tab_front:
     )
     if st.button("运行化学类型图、DBE图、VK图和 DF", type="primary"):
         with st.spinner("正在处理多文件、生成化学类型图、DBE图、VK图和 DF..."):
-            front_state = collect_front_half(
+            front_result = prepare_multi_file_screening(
                 samples,
                 sample_mappings,
                 detection_threshold,
                 axis_ranges,
             )
+            front_state = {
+                "output_root": front_result.output_root,
+                "screening_results": front_result.screening_results,
+                "summary_figure_paths": front_result.summary_figure_paths,
+                "df_table": front_result.df_table,
+                "df_detection_table": front_result.df_detection_table,
+                "group_area_raw_long": front_result.group_area_raw_long,
+                "group_area_mean_by_sample": front_result.group_area_mean_by_sample,
+                "sample_peak_area": front_result.sample_peak_area,
+                "representative_table": front_result.representative_table,
+                "selected_peak_cols": front_result.selected_peak_cols,
+                "sample_mappings": sample_mappings,
+                "structure_preparation_summary": (
+                    front_result.structure_preparation_summary
+                ),
+                "structure_preparation_audit": front_result.structure_preparation,
+                "input_file_mappings": front_result.input_file_mappings,
+                "tables": front_result.tables,
+                "charts": front_result.charts,
+                "warnings": front_result.warnings,
+            }
         st.session_state["cp_screening_front"] = front_state
         for key in STATE_KEYS:
             if key not in {"cp_screening_front", "cp_screening_settings_signature"}:

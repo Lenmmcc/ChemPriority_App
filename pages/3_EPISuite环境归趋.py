@@ -30,7 +30,21 @@ from src.episuite_io import (  # noqa: E402
     slim_epi_report_columns,
     validate_input,
 )
-from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
+from src.episuite_result_pool import (  # noqa: E402
+    build_api_epi_pool_payload,
+    build_uploaded_epi_pool_payload,
+    advance_epi_uploader_epoch,
+    clear_epi_pool,
+    clear_tracked_epi_pool_contributor,
+    make_epi_pool_contributor_id,
+    make_uploaded_result_source_signature,
+    remove_epi_pool_contributor,
+    remove_stale_epi_pool_contributor,
+    replace_epi_pool_source_contributor,
+    upsert_epi_pool,
+)
+from src.episuite_supplement import inspect_epi_workbook  # noqa: E402
+from src.query_cache import render_query_cache_controls  # noqa: E402
 from src.mol_structure_parser import (  # noqa: E402
     prepare_structure_dataframe,
     summarize_structure_preparation,
@@ -51,6 +65,13 @@ RESULT_CACHE_KEYS = (
     "epi_parsed_results",
     "epi_parse_warnings",
 )
+POOL_CONTRIBUTOR_STATE_KEYS = {
+    "api": "epi_api_pool_contributor_id",
+    "uploaded": "epi_uploaded_pool_contributor_id",
+}
+UPLOAD_POOL_SOURCE_SIGNATURE_KEY = "epi_uploaded_pool_source_signature"
+INPUT_UPLOADER_EPOCH_KEY = "epi_input_uploader_epoch"
+RESULT_UPLOADER_EPOCH_KEY = "epi_result_uploader_epoch"
 
 DETAIL_RESULT_SHEETS = [
     ("Properties", "理化性质"),
@@ -68,9 +89,44 @@ def clear_result_cache():
 
 
 def clear_cached_input():
+    for source_type in POOL_CONTRIBUTOR_STATE_KEYS:
+        remove_epi_pool_source_contributor(source_type)
     for key in INPUT_CACHE_KEYS:
         st.session_state.pop(key, None)
     clear_result_cache()
+    advance_epi_uploader_epoch(st.session_state, INPUT_UPLOADER_EPOCH_KEY)
+    advance_epi_uploader_epoch(st.session_state, RESULT_UPLOADER_EPOCH_KEY)
+
+
+def remove_epi_pool_source_contributor(source_type):
+    contributor_state_key = POOL_CONTRIBUTOR_STATE_KEYS[source_type]
+    if source_type == "uploaded":
+        clear_tracked_epi_pool_contributor(
+            st.session_state,
+            contributor_state_key,
+            UPLOAD_POOL_SOURCE_SIGNATURE_KEY,
+        )
+        return
+    contributor_id = st.session_state.pop(contributor_state_key, None)
+    if contributor_id:
+        remove_epi_pool_contributor(st.session_state, contributor_id)
+
+
+def publish_epi_results_to_pool(results, provenance=None, source_type="api"):
+    contributor_state_key = POOL_CONTRIBUTOR_STATE_KEYS[source_type]
+    contributor_id = make_epi_pool_contributor_id(
+        st.session_state["epi_input_signature"], source_type
+    )
+    previous = st.session_state.get(contributor_state_key)
+    if previous and previous != contributor_id:
+        remove_epi_pool_contributor(st.session_state, previous)
+    upsert_epi_pool(
+        st.session_state,
+        contributor_id,
+        results,
+        pd.DataFrame() if provenance is None else provenance,
+    )
+    st.session_state[contributor_state_key] = contributor_id
 
 
 def append_structure_preparation_sheet(workbook_buffer, prepared_df):
@@ -98,7 +154,7 @@ def render_epi_web_tables(epi_tables):
         table = epi_tables.get(sheet_name)
         with tab:
             if table is not None and not table.empty:
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
             else:
                 st.info("该类别没有可展示的结构化结果。")
 
@@ -106,7 +162,7 @@ def render_epi_web_tables(epi_tables):
     if raw_table is not None and not raw_table.empty:
         with st.expander("审计数据：Raw API JSON", expanded=False):
             preview_cols = [col for col in ["compound", "smiles", "cas", "epi_cas", "epi_smiles", "raw_json"] if col in raw_table.columns]
-            st.dataframe(raw_table[preview_cols], use_container_width=True)
+            st.dataframe(raw_table[preview_cols], width="stretch")
 
 
 def render_structure_preparation_summary(prepared_df):
@@ -125,7 +181,7 @@ def render_structure_preparation_summary(prepared_df):
     if summary["smiles_conflicts"] or summary["parse_failures"]:
         with st.expander("查看结构准备审计记录", expanded=False):
             mask = prepared_df["smiles_source"].eq("原始 SMILES（与 MOL 冲突）") | prepared_df["parse_status"].eq("解析失败")
-            st.dataframe(prepared_df.loc[mask], use_container_width=True)
+            st.dataframe(prepared_df.loc[mask], width="stretch")
 
 
 st.set_page_config(
@@ -143,9 +199,11 @@ left_col, right_col = st.columns([2, 1])
 
 with left_col:
     st.subheader("1. 上传 EPI Suite 输入表")
+    input_uploader_epoch = st.session_state.get(INPUT_UPLOADER_EPOCH_KEY, 0)
     uploaded_file = st.file_uploader(
         "上传 Excel 文件",
         type=["xlsx", "xls"],
+        key=f"epi_input_file_{input_uploader_epoch}",
         help="文件至少需要包含 compound 和 smiles 两列；cas 可选。有 cas 时会与 smiles 一起提交，并同时保留估算值与实验/库值。",
     )
 
@@ -159,12 +217,19 @@ with right_col:
     )
 
 st.subheader("目标环境归趋指标")
-st.dataframe(pd.DataFrame(FATE_ENDPOINTS), use_container_width=True)
+st.dataframe(pd.DataFrame(FATE_ENDPOINTS), width="stretch")
 
 if uploaded_file is not None:
     uploaded_bytes = uploaded_file.getvalue()
     input_signature = hashlib.sha256(uploaded_bytes).hexdigest()
     if st.session_state.get("epi_input_signature") != input_signature:
+        for source_type, state_key in POOL_CONTRIBUTOR_STATE_KEYS.items():
+            remove_stale_epi_pool_contributor(
+                st.session_state,
+                state_key,
+                make_epi_pool_contributor_id(input_signature, source_type),
+            )
+        st.session_state.pop(UPLOAD_POOL_SOURCE_SIGNATURE_KEY, None)
         clear_result_cache()
     st.session_state["epi_input_bytes"] = uploaded_bytes
     st.session_state["epi_input_name"] = uploaded_file.name
@@ -181,6 +246,23 @@ st.success(f"已加载输入文件：{cached_input_name}")
 if st.button("清空当前数据", key="epi_clear_cached_input"):
     clear_cached_input()
     st.rerun()
+
+if st.button("清空当前会话 EPI 结果", key="epi_clear_shared_pool_request"):
+    st.session_state["epi_clear_shared_pool_confirm"] = True
+if st.session_state.get("epi_clear_shared_pool_confirm"):
+    st.warning("这将清空当前会话中所有页面贡献的 EPI 结果。")
+    confirm_col, cancel_col = st.columns(2)
+    if confirm_col.button("确认清空会话 EPI 结果", key="epi_clear_shared_pool_confirm_button"):
+        clear_epi_pool(st.session_state)
+        for source_type in POOL_CONTRIBUTOR_STATE_KEYS:
+            remove_epi_pool_source_contributor(source_type)
+        clear_result_cache()
+        advance_epi_uploader_epoch(st.session_state, RESULT_UPLOADER_EPOCH_KEY)
+        st.session_state.pop("epi_clear_shared_pool_confirm", None)
+        st.rerun()
+    if cancel_col.button("取消", key="epi_clear_shared_pool_cancel"):
+        st.session_state.pop("epi_clear_shared_pool_confirm", None)
+        st.rerun()
 
 try:
     raw_input_df = pd.read_excel(io.BytesIO(cached_input_bytes))
@@ -200,7 +282,7 @@ except Exception as exc:
 is_valid, message = validate_input(input_df)
 if not is_valid:
     st.error(message)
-    st.dataframe(input_df, use_container_width=True)
+    st.dataframe(input_df, width="stretch")
     st.stop()
 
 st.success(message)
@@ -211,7 +293,7 @@ tab_input, tab_predict, tab_fallback, tab_parse, tab_output = st.tabs(
 
 with tab_input:
     st.subheader("待预测化合物")
-    st.dataframe(input_df[input_columns_for_display(input_df)], use_container_width=True)
+    st.dataframe(input_df[input_columns_for_display(input_df)], width="stretch")
     st.metric("化合物数量", len(input_df))
 
 with tab_predict:
@@ -243,10 +325,7 @@ with tab_predict:
             key="epi_query_max_workers",
             help="默认 3 个并发请求；遇到外部服务限流时可调低。",
         )
-        st.caption(f"缓存文件：{current_cache_path()}")
-        if st.button("清理本地查询缓存", key="epi_clear_query_cache"):
-            clear_query_cache()
-            st.success("本地查询缓存已清理。")
+        render_query_cache_controls(st, "epi")
 
     if st.button("开始网页端预测", type="primary"):
         progress_bar = st.progress(0)
@@ -275,6 +354,12 @@ with tab_predict:
         st.session_state["epi_merged_results"] = web_results
         st.session_state["epi_parsed_results"] = web_results
         st.session_state["epi_parse_warnings"] = web_errors.rename(columns={"error": "warning"})
+        successful_web_results = web_results.loc[web_results["status"].eq("success")]
+        api_pool_payload = build_api_epi_pool_payload(
+            successful_web_results, source_file=api_url
+        )
+        if not api_pool_payload[0].empty:
+            publish_epi_results_to_pool(*api_pool_payload, source_type="api")
 
         if web_errors.empty:
             st.success("EPI Web Suite 预测完成。")
@@ -286,11 +371,11 @@ with tab_predict:
     web_tables = st.session_state.get("epi_web_tables")
     if web_results is not None:
         st.subheader("网页端预测结果")
-        st.dataframe(slim_epi_report_columns(web_results), use_container_width=True)
+        st.dataframe(slim_epi_report_columns(web_results), width="stretch")
         render_epi_web_tables(web_tables)
     if web_errors is not None and not web_errors.empty:
         st.subheader("失败记录")
-        st.dataframe(web_errors, use_container_width=True)
+        st.dataframe(web_errors, width="stretch")
 
 with tab_fallback:
     st.subheader("EPI Suite 输入文件")
@@ -319,19 +404,39 @@ with tab_fallback:
 
 with tab_parse:
     st.subheader("上传 EPI Suite / EPI Web Suite 结果")
+    result_uploader_epoch = st.session_state.get(RESULT_UPLOADER_EPOCH_KEY, 0)
     result_files = st.file_uploader(
         "上传 EPI Suite / EPI Web Suite 结果文件",
         type=["csv", "xlsx", "xls", "txt", "doc"],
         accept_multiple_files=True,
+        key=f"epi_result_files_{result_uploader_epoch}",
         help="优先推荐 CSV 或 Excel；也支持复制保存的 TXT，以及老版 EPI Suite 的 DOC 文本提取。",
     )
 
     parsed_frames = []
     warning_frames = []
     if result_files:
-        for result_file in result_files:
+        upload_source_parts = []
+        for file_index, result_file in enumerate(result_files):
+            result_bytes = result_file.getvalue()
+            selected_sheet = None
             try:
-                parsed_df, warnings_df = parse_uploaded_result(result_file)
+                if result_file.name.lower().endswith((".xlsx", ".xls")):
+                    inspection = inspect_epi_workbook(
+                        result_bytes, result_file.name
+                    )
+                    selected_sheet = inspection.default_result_sheet
+                    if selected_sheet is None:
+                        selected_sheet = st.selectbox(
+                            f"为 {result_file.name} 选择结果工作表",
+                            inspection.sheet_names,
+                            key=f"epi_result_sheet_{file_index}",
+                        )
+                parsed_df, warnings_df = parse_uploaded_result(
+                    result_file, sheet_name=selected_sheet
+                )
+                if selected_sheet is not None:
+                    parsed_df["source_sheet"] = selected_sheet
                 parsed_frames.append(parsed_df)
                 if not warnings_df.empty:
                     warning_frames.append(warnings_df)
@@ -341,6 +446,18 @@ with tab_parse:
                         [{"source_file": result_file.name, "warning": f"解析失败：{exc}"}]
                     )
                 )
+            finally:
+                upload_source_parts.append(
+                    (result_file.name, result_bytes, selected_sheet)
+                )
+        replace_epi_pool_source_contributor(
+            st.session_state,
+            POOL_CONTRIBUTOR_STATE_KEYS["uploaded"],
+            UPLOAD_POOL_SOURCE_SIGNATURE_KEY,
+            make_uploaded_result_source_signature(upload_source_parts),
+        )
+    else:
+        remove_epi_pool_source_contributor("uploaded")
 
     if parsed_frames:
         parsed_results = pd.concat(parsed_frames, ignore_index=True)
@@ -356,17 +473,20 @@ with tab_parse:
         st.session_state["epi_parse_warnings"] = parse_warnings
         st.session_state.pop("epi_raw_results", None)
         st.session_state.pop("epi_web_tables", None)
+        uploaded_pool_payload = build_uploaded_epi_pool_payload(merged_results)
+        if not uploaded_pool_payload[0].empty:
+            publish_epi_results_to_pool(*uploaded_pool_payload, source_type="uploaded")
 
         st.success("结果文件解析完成。")
         st.subheader("合并后的环境归趋结果")
-        st.dataframe(merged_results, use_container_width=True)
+        st.dataframe(merged_results, width="stretch")
 
         with st.expander("查看原始解析结果", expanded=False):
-            st.dataframe(parsed_results, use_container_width=True)
+            st.dataframe(parsed_results, width="stretch")
 
         if not parse_warnings.empty:
             st.warning("部分字段未完全识别，详情见解析警告。")
-            st.dataframe(parse_warnings, use_container_width=True)
+            st.dataframe(parse_warnings, width="stretch")
     else:
         st.info("上传 EPI Suite 结果文件后，会在这里显示结构化解析结果。")
 
