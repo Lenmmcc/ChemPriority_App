@@ -1601,8 +1601,12 @@ class AutoQueryWorkflowTests(unittest.TestCase):
 
         pd.testing.assert_frame_equal(result.representative_table, representative)
         pd.testing.assert_frame_equal(
-            result.tables["Input_File_Mappings"],
+            result.tables["Input_File_Mappings"][mappings.columns],
             mappings,
+        )
+        self.assertEqual(
+            result.tables["Input_File_Mappings"]["safe_export_name"].tolist(),
+            ["sample_1", "sample_2"],
         )
         pd.testing.assert_frame_equal(
             result.tables["Sample_Peak_Area"],

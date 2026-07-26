@@ -17,6 +17,7 @@ from src.comptox_use import (
     build_product_use_table,
     run_comptox_use_batch,
 )
+from src.auto_query_file_views import safe_export_names, scoped_chart_key
 from src.cp_screening_workflow import (
     PBMToxPiConfig,
     build_detection_frequency,
@@ -457,12 +458,56 @@ def auto_input_from_multi_file_result(
     result: MultiFileScreeningResult,
 ) -> AutoWorkflowPreparedInput:
     local_tables = OrderedDict(result.tables)
-    local_tables["Input_File_Mappings"] = result.input_file_mappings
+    input_file_mappings = result.input_file_mappings.copy()
+    file_column = next(
+        (
+            column
+            for column in ("file_name", "source_file", "primary_file")
+            if column in input_file_mappings.columns
+        ),
+        None,
+    )
+    safe_names = safe_export_names(input_file_mappings)
+    if file_column is not None:
+        input_file_mappings["safe_export_name"] = input_file_mappings[
+            file_column
+        ].map(safe_names)
+    local_tables["Input_File_Mappings"] = input_file_mappings
     local_tables["Structure_Preparation"] = result.structure_preparation
     local_tables["DF_Table"] = result.df_table
     local_tables["Sample_Peak_Area"] = result.sample_peak_area
     local_tables["Group_Area_Raw_Long"] = result.group_area_raw_long
     local_tables["Group_Area_Mean_By_Sample"] = result.group_area_mean_by_sample
+    local_charts = OrderedDict(result.charts)
+    local_warnings = result.warnings.get(
+        "message",
+        pd.Series(dtype=str),
+    ).tolist()
+    sample_files = {}
+    if file_column is not None and "sample_id" in input_file_mappings.columns:
+        sample_files = {
+            _clean_text(row["sample_id"]): _clean_text(row[file_column])
+            for _, row in input_file_mappings.iterrows()
+        }
+    for sample_id, screening_result in result.screening_results:
+        file_name = sample_files.get(_clean_text(sample_id), "")
+        safe_name = safe_names.get(file_name)
+        if not safe_name:
+            continue
+        file_charts, chart_warnings = _load_local_screening_charts(
+            screening_result
+        )
+        for public_chart_name, chart in file_charts.items():
+            local_charts[
+                scoped_chart_key(
+                    "local_screening",
+                    safe_name,
+                    public_chart_name,
+                )
+            ] = chart
+        local_warnings.extend(
+            f"{file_name}: {message}" for message in chart_warnings
+        )
     return AutoWorkflowPreparedInput(
         mapping=AutoWorkflowMapping(
             compound_col="Name",
@@ -475,11 +520,8 @@ def auto_input_from_multi_file_result(
         prepared_input=result.structure_preparation,
         representative_table=result.representative_table,
         local_tables=local_tables,
-        local_charts=OrderedDict(result.charts),
-        local_warnings=result.warnings.get(
-            "message",
-            pd.Series(dtype=str),
-        ).tolist(),
+        local_charts=local_charts,
+        local_warnings=local_warnings,
         primary_membership=result.primary_membership,
         epi_universe=result.epi_universe,
     )
