@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from src.storage_controls import render_storage_location_controls
 from src.storage_paths import LEGACY_QUERY_CACHE_PATH, resolve_storage_paths
 
 
@@ -212,7 +213,15 @@ def render_query_cache_controls(
     st_module,
     prefix,
     ttl_seconds=DEFAULT_CACHE_TTL_SECONDS,
+    show_storage=True,
+    on_storage_changed=None,
 ):
+    if show_storage:
+        render_storage_location_controls(
+            st_module,
+            prefix,
+            on_change=on_storage_changed,
+        )
     cache_path = current_cache_path()
     st_module.caption(f"缓存文件：{cache_path}")
     warning_shown = False

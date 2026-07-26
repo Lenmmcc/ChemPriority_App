@@ -196,6 +196,28 @@ def _isolated_page_checkpoint_storage(root):
 
 
 class AutoQueryWorkflowTests(unittest.TestCase):
+    def test_page_6_storage_switch_detaches_without_deleting_checkpoint(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        start = page_text.index(
+            "def _detach_auto_query_recovery_for_storage_change():"
+        )
+        end = page_text.index("\n\n", start)
+        function_text = page_text[start:end]
+        self.assertIn(
+            'st.session_state.pop("auto_query_run_token", None)',
+            function_text,
+        )
+        self.assertIn('st.query_params.pop("run", None)', function_text)
+        self.assertNotIn("delete_checkpoint(", function_text)
+
+    def test_page_6_selects_storage_before_checkpoint_recovery(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+        storage_index = page_text.index("render_storage_location_controls(")
+        cleanup_index = page_text.index("cleanup_expired_checkpoints()")
+        load_index = page_text.index("loaded = load_checkpoint(recovery_token)")
+        self.assertLess(storage_index, cleanup_index)
+        self.assertLess(storage_index, load_index)
+
     def test_page_6_clears_only_epi_supplements_and_preserves_primary_and_pool(self):
         app = _app_test_with_cached_workbooks(
             [("Lake-A.xlsx", _app_test_workbook_bytes("Compound A"))]

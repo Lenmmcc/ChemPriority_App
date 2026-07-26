@@ -67,7 +67,7 @@ from src.identifier_resolver import (  # noqa: E402
 )
 from src.chemspider_run import prepare_chemspider_run_options  # noqa: E402
 from src.plot_style import configure_plot_style  # noqa: E402
-from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
+from src.query_cache import render_query_cache_controls  # noqa: E402
 from src.mol_structure_parser import (  # noqa: E402
     prepare_structure_dataframe,
     summarize_structure_preparation,
@@ -110,10 +110,7 @@ def render_speedup_settings(key_prefix, default_workers):
             key=f"{key_prefix}_query_max_workers",
             help="默认使用保守并发；遇到外部服务限流时可调低。",
         )
-        st.caption(f"缓存文件：{current_cache_path()}")
-        if st.button("清理本地查询缓存", key=f"{key_prefix}_clear_query_cache"):
-            clear_query_cache()
-            st.success("本地查询缓存已清理。")
+        render_query_cache_controls(st, key_prefix)
     return bool(cache_enabled), int(max_workers)
 
 

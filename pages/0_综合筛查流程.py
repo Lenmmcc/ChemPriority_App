@@ -37,7 +37,7 @@ from src.multi_file_screening import (  # noqa: E402
     read_primary_workbooks,
 )
 from src.pov_lrtp_replica import run_pov_lrtp_batch  # noqa: E402
-from src.query_cache import clear_query_cache, current_cache_path  # noqa: E402
+from src.query_cache import render_query_cache_controls  # noqa: E402
 from src.r_screening_replica.schema import ScreeningAxisRanges  # noqa: E402
 from src.r_screening_replica.downstream import (  # noqa: E402
     build_epi_input_from_identifiers,
@@ -654,10 +654,7 @@ with tab_downstream:
                 step=1,
                 key="screening_epi_max_workers",
             )
-            st.caption(f"缓存文件：{current_cache_path()}")
-            if st.button("清理本地查询缓存", key="screening_clear_query_cache"):
-                clear_query_cache()
-                st.success("本地查询缓存已清理。")
+            render_query_cache_controls(st, "screening")
 
         if st.button("运行下游 PBM/ToxPi", type="primary"):
             representative = front_state["representative_table"]

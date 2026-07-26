@@ -56,6 +56,7 @@ from src.multi_file_screening import (
     read_primary_workbooks,
 )
 from src.query_cache import render_query_cache_controls
+from src.storage_controls import render_storage_location_controls
 from src.mol_structure_parser import prepare_structure_dataframe, summarize_structure_preparation
 from src.r_screening_replica.schema import ScreeningAxisRanges
 from src.auto_query_progress import (
@@ -157,6 +158,15 @@ def clear_auto_query_state():
     st.query_params.pop("run", None)
 
 
+def _detach_auto_query_recovery_for_storage_change():
+    clear_uploads(
+        st.session_state,
+        (*RESULT_CACHE_KEYS, *CHECKPOINT_STATE_KEYS),
+    )
+    st.session_state.pop("auto_query_run_token", None)
+    st.query_params.pop("run", None)
+
+
 st.set_page_config(
     page_title="一键批量查询 - ChemPriority",
     page_icon="⚙️",
@@ -165,6 +175,13 @@ st.set_page_config(
 
 st.title("一键批量查询")
 st.caption("上传统一格式 Excel，勾选需要运行的项目后，系统按依赖顺序逐项自动执行。")
+
+with st.expander("缓存与断点存储位置", expanded=False):
+    render_storage_location_controls(
+        st,
+        "auto",
+        on_change=_detach_auto_query_recovery_for_storage_change,
+    )
 
 
 def _column_index(columns, value):
@@ -1183,7 +1200,7 @@ with st.expander("运行设置", expanded=False):
         )
     with col_cache:
         cache_enabled = st.checkbox("启用本地查询缓存", value=True)
-        render_query_cache_controls(st, "auto")
+        render_query_cache_controls(st, "auto", show_storage=False)
 
     speed_a, speed_b, speed_c = st.columns(3)
     with speed_a:

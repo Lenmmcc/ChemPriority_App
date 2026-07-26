@@ -489,7 +489,7 @@ class QueryCacheTests(unittest.TestCase):
         fake_st = FakeStreamlit()
         with tempfile.TemporaryDirectory() as tmpdir:
             with use_cache_path(Path(tmpdir) / "missing.sqlite3"):
-                render_query_cache_controls(fake_st, "test")
+                render_query_cache_controls(fake_st, "test", show_storage=False)
 
         self.assertEqual(
             [label for label, _ in fake_st.checkboxes],
@@ -536,7 +536,7 @@ class QueryCacheTests(unittest.TestCase):
             fake_st = FakeStreamlit()
 
             with use_cache_path(path):
-                render_query_cache_controls(fake_st, "test")
+                render_query_cache_controls(fake_st, "test", show_storage=False)
 
         self.assertEqual(len(fake_st.warnings), 1)
         self.assertIn("无法读取", fake_st.warnings[0])
