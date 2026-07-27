@@ -83,6 +83,7 @@ from src.upload_state import (
     upload_name,
     upload_signature,
 )
+from src.toxpi_display import toxpi_dataframe_column_config
 
 
 MAX_CHART_PIXELS = 50_000_000
@@ -540,7 +541,15 @@ def _render_epi_supplement_mappings(
 
 
 def _show_dataframe(frame):
-    st.dataframe(frame, width="stretch", hide_index=True)
+    st.dataframe(
+        frame,
+        width="stretch",
+        hide_index=True,
+        column_config=toxpi_dataframe_column_config(
+            frame,
+            st.column_config.NumberColumn,
+        ),
+    )
 
 
 def _render_structure_preparation_summary(prepared_df):

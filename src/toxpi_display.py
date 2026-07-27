@@ -15,3 +15,13 @@ def toxpi_score_columns(frame: pd.DataFrame) -> tuple[str, ...]:
     return tuple(
         column for column in frame.columns if column in TOXPI_SCORE_COLUMNS
     )
+
+
+def toxpi_dataframe_column_config(
+    frame: pd.DataFrame,
+    number_column_factory,
+) -> dict:
+    return {
+        column: number_column_factory(format=TOXPI_SCORE_FORMAT)
+        for column in toxpi_score_columns(frame)
+    }

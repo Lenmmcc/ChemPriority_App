@@ -23,6 +23,7 @@ from src.toxpi_calc import (  # noqa: E402
     run_sensitivity_analysis,
     safe_normalize_data,
 )
+from src.toxpi_display import toxpi_dataframe_column_config  # noqa: E402
 
 
 st.set_page_config(
@@ -45,6 +46,17 @@ def clear_cached_data():
     ]
     for key in keys_to_del:
         del st.session_state[key]
+
+
+def show_toxpi_dataframe(frame):
+    st.dataframe(
+        frame,
+        width="stretch",
+        column_config=toxpi_dataframe_column_config(
+            frame,
+            st.column_config.NumberColumn,
+        ),
+    )
 
 
 def parse_seed_text(seed_text):
@@ -310,7 +322,7 @@ with tab1:
     st.dataframe(normalized_df, width="stretch")
 
     st.subheader("ToxPi 得分")
-    st.dataframe(final_agg[["compound", "toxpi"]], width="stretch")
+    show_toxpi_dataframe(final_agg[["compound", "toxpi"]])
 
 with tab2:
     st.subheader("ToxPi 风玫瑰图")
@@ -403,7 +415,7 @@ with tab3:
 
         st.markdown("---")
         st.subheader(f"多 seed 汇总表 (Top {actual_top_k})")
-        st.dataframe(combined_summary, width="stretch")
+        show_toxpi_dataframe(combined_summary)
 
         excel_buffer = build_excel_report(final_agg, seed_results, combined_summary, actual_top_k, toxic_cols)
         st.download_button(

@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -27,6 +28,38 @@ class ToxPiDisplayTests(unittest.TestCase):
             display.toxpi_score_columns(frame),
             ("initial_toxpi", "toxpi"),
         )
+
+    def test_builds_four_decimal_number_column_config_without_mutating_frame(self):
+        display = self._display_module()
+        helper = getattr(display, "toxpi_dataframe_column_config", None)
+        self.assertIsNotNone(
+            helper,
+            "shared display policy should build Streamlit column configuration",
+        )
+        frame = pd.DataFrame({"compound": ["A"], "toxpi": [0.62126]})
+        original = frame.copy(deep=True)
+        calls = []
+
+        def factory(**kwargs):
+            calls.append(kwargs)
+            return kwargs
+
+        config = helper(frame, factory)
+
+        self.assertEqual(config, {"toxpi": {"format": "%.4f"}})
+        self.assertEqual(calls, [{"format": "%.4f"}])
+        pd.testing.assert_frame_equal(frame, original)
+
+    def test_toxpi_page_uses_shared_four_decimal_table_policy(self):
+        page_source = Path("pages/2_ToxPi毒性评估.py").read_text(encoding="utf-8")
+
+        self.assertIn("toxpi_dataframe_column_config", page_source)
+        self.assertIn("def show_toxpi_dataframe(", page_source)
+        self.assertIn(
+            'show_toxpi_dataframe(final_agg[["compound", "toxpi"]])',
+            page_source,
+        )
+        self.assertIn("show_toxpi_dataframe(combined_summary)", page_source)
 
 
 if __name__ == "__main__":

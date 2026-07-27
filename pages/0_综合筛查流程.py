@@ -46,6 +46,7 @@ from src.r_screening_replica.downstream import (  # noqa: E402
 )
 from src.upload_state import cached_uploads, clear_uploads, store_uploads  # noqa: E402
 import src.toxpi_calc as toxpi_calc  # noqa: E402
+from src.toxpi_display import toxpi_dataframe_column_config  # noqa: E402
 
 if not hasattr(toxpi_calc, "generate_r_style_toxpi_plot"):
     toxpi_calc = importlib.reload(toxpi_calc)
@@ -99,10 +100,22 @@ def clear_cached_input():
 
 
 def show_dataframe(df):
+    column_config = toxpi_dataframe_column_config(
+        df,
+        st.column_config.NumberColumn,
+    )
     try:
-        st.dataframe(df, width="stretch")
+        st.dataframe(
+            df,
+            width="stretch",
+            column_config=column_config,
+        )
     except TypeError:
-        st.dataframe(df, width="stretch")
+        st.dataframe(
+            df,
+            width="stretch",
+            column_config=column_config,
+        )
 
 
 def read_file_bytes(path):

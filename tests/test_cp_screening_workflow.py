@@ -759,6 +759,21 @@ class CpScreeningWorkflowTests(unittest.TestCase):
             page_text,
         )
 
+    def test_comprehensive_page_formats_toxpi_tables_to_four_decimals(self):
+        page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
+
+        self.assertIn("toxpi_dataframe_column_config", page_text)
+        show_dataframe_source = page_text.split("def show_dataframe(df):", 1)[1].split(
+            "\ndef ",
+            1,
+        )[0]
+        self.assertIn(
+            "column_config = toxpi_dataframe_column_config(",
+            show_dataframe_source,
+        )
+        self.assertIn("column_config=column_config", show_dataframe_source)
+        self.assertIn("st.column_config.NumberColumn", show_dataframe_source)
+
     def test_comprehensive_page_exposes_shared_axis_toxpi_and_robustness_controls(self):
         page_text = Path("pages/0_综合筛查流程.py").read_text(encoding="utf-8")
         for token in (

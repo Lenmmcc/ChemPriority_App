@@ -4664,6 +4664,17 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn('st.selectbox("查看结果表"', page_text)
         self.assertIn("Auto_Query_Workflow_Results.zip", page_text)
 
+    def test_page_6_formats_toxpi_tables_to_four_decimals(self):
+        page_text = Path("pages/6_一键批量查询.py").read_text(encoding="utf-8")
+
+        self.assertIn("toxpi_dataframe_column_config", page_text)
+        show_dataframe_source = page_text.split("def _show_dataframe(frame):", 1)[1].split(
+            "\ndef ",
+            1,
+        )[0]
+        self.assertIn("column_config=toxpi_dataframe_column_config(", show_dataframe_source)
+        self.assertIn("st.column_config.NumberColumn", show_dataframe_source)
+
 
     def test_page_6_renders_detailed_overall_and_module_progress(self):
         with open("pages/6_一键批量查询.py", encoding="utf-8") as page_file:
