@@ -15,6 +15,7 @@ import pandas as pd
 from src.comptox_use import (
     build_functional_use_table,
     build_product_use_table,
+    deduplicate_comptox_candidates,
     run_comptox_use_batch,
 )
 from src.auto_query_file_views import (
@@ -926,25 +927,30 @@ def run_auto_query_workflow(
             comptox_summary, comptox_candidates, comptox_errors = comptox_value
             tables["CompTox_Summary"] = comptox_summary
             tables["CompTox_Candidates"] = comptox_candidates
-            tables["Product_Use_Categories"] = build_product_use_table(comptox_candidates)
+            comptox_output_candidates = deduplicate_comptox_candidates(
+                comptox_candidates
+            )
+            tables["Product_Use_Categories"] = build_product_use_table(
+                comptox_output_candidates
+            )
             tables["Functional_Uses_Predicted"] = build_functional_use_table(
-                comptox_candidates,
+                comptox_output_candidates,
                 functional_source="predicted",
             )
             tables["Functional_Uses_Reported"] = build_functional_use_table(
-                comptox_candidates,
+                comptox_output_candidates,
                 functional_source="reported",
             )
             tables["EPA_PUC_Pie_Data"] = extract_top_product_use_category_data(
-                comptox_candidates,
+                comptox_output_candidates,
                 compound_universe,
             )
             tables["EPA_Predicted_Pie_Data"] = extract_top_predicted_functional_use_data(
-                comptox_candidates,
+                comptox_output_candidates,
                 compound_universe=compound_universe,
             )
             tables["EPA_Reported_Pie_Data"] = extract_top_reported_functional_use_data(
-                comptox_candidates,
+                comptox_output_candidates,
                 compound_universe,
                 source_label="EPA FC reported",
                 source_type="functional_use",
@@ -955,25 +961,30 @@ def run_auto_query_workflow(
             record("EPA CompTox 用途", "完成", len(comptox_summary))
 
         if comptox_value is None:
-            tables["Product_Use_Categories"] = build_product_use_table(comptox_candidates)
+            comptox_output_candidates = deduplicate_comptox_candidates(
+                comptox_candidates
+            )
+            tables["Product_Use_Categories"] = build_product_use_table(
+                comptox_output_candidates
+            )
             tables["Functional_Uses_Predicted"] = build_functional_use_table(
-                comptox_candidates,
+                comptox_output_candidates,
                 functional_source="predicted",
             )
             tables["Functional_Uses_Reported"] = build_functional_use_table(
-                comptox_candidates,
+                comptox_output_candidates,
                 functional_source="reported",
             )
             tables["EPA_PUC_Pie_Data"] = extract_top_product_use_category_data(
-                comptox_candidates,
+                comptox_output_candidates,
                 compound_universe,
             )
             tables["EPA_Predicted_Pie_Data"] = extract_top_predicted_functional_use_data(
-                comptox_candidates,
+                comptox_output_candidates,
                 compound_universe=compound_universe,
             )
             tables["EPA_Reported_Pie_Data"] = extract_top_reported_functional_use_data(
-                comptox_candidates,
+                comptox_output_candidates,
                 compound_universe,
                 source_label="EPA FC reported",
                 source_type="functional_use",
@@ -1513,29 +1524,72 @@ def _module_chart_file_name(chart_key: str) -> str:
 def build_auto_workflow_charts(
     result: AutoWorkflowResult,
 ) -> OrderedDict[str, AutoWorkflowChart]:
-    charts, _ = update_auto_workflow_charts(result)
+    charts, messages = update_auto_workflow_charts(result)
+    existing = (
+        result.warnings.copy()
+        if isinstance(result.warnings, pd.DataFrame)
+        else pd.DataFrame(columns=["stage", "message"])
+    )
+    for column in ("stage", "message"):
+        if column not in existing.columns:
+            existing[column] = pd.Series(dtype="object")
+    if "stage" in existing.columns:
+        existing = existing.loc[
+            ~existing["stage"].eq("Chart generation")
+        ].copy()
+    additions = pd.DataFrame(
+        [
+            {
+                "stage": "Chart generation",
+                "message": str(message),
+            }
+            for message in messages
+        ],
+        columns=["stage", "message"],
+    )
+    result.warnings = (
+        pd.concat([existing, additions], ignore_index=True)
+        .drop_duplicates(subset=["stage", "message"])
+        .reset_index(drop=True)
+    )
+    result.tables["Warnings"] = result.warnings.copy()
     return charts
 
 
 def update_auto_workflow_charts(result, completed_step=None):
+    configured_sources = available_chart_sources(
+        result,
+        completed_step=completed_step,
+    )
+    available_keys = {chart_key for chart_key, _ in configured_sources}
+    managed_scoped_prefixes = tuple(
+        f"{module_slug}__"
+        for module_slug in FILE_CHART_MODULE_REQUIRED_TABLES
+    )
     charts = OrderedDict(
         (key, chart)
         for key, chart in result.charts.items()
         if (
-            key in PUBLIC_CHART_NAMES
-            or any(
-                key.endswith(f"__{public_name}")
-                for public_name in PUBLIC_CHART_NAMES
+            (
+                key in PUBLIC_CHART_NAMES
+                or any(
+                    key.endswith(f"__{public_name}")
+                    for public_name in PUBLIC_CHART_NAMES
+                )
+            )
+            and (
+                not key.startswith(managed_scoped_prefixes)
+                or key in available_keys
             )
         )
     )
     warnings = []
-    for chart_key, source_config in available_chart_sources(
-        result,
-        completed_step=completed_step,
-    ):
-        if chart_key in charts:
+    refresh_existing = completed_step is None
+    for chart_key, source_config in configured_sources:
+        if chart_key in charts and not refresh_existing:
             continue
+        if refresh_existing:
+            charts.pop(chart_key, None)
         fig = None
         try:
             chart_df = _build_chart_data(source_config)
@@ -1555,18 +1609,26 @@ def update_auto_workflow_charts(result, completed_step=None):
     return charts, warnings
 
 
+FILE_CHART_MODULE_REQUIRED_TABLES = OrderedDict(
+    [
+        ("comptox_use", "CompTox_Candidates"),
+        ("echa_reach_use", "ECHA_Use_Candidates"),
+        ("source_origin", "Source_Origin_Summary"),
+    ]
+)
+
+
 def available_chart_sources(result, completed_step=None):
-    del completed_step
     views = build_file_module_views(result)
     configured = []
-    found_file_view = False
-    for module_slug in (
-        "comptox_use",
-        "echa_reach_use",
-        "source_origin",
-    ):
+    found_file_view = any(
+        views.get(module_slug)
+        for module_slug in FILE_CHART_MODULE_REQUIRED_TABLES
+    )
+    for module_slug, required_table in FILE_CHART_MODULE_REQUIRED_TABLES.items():
+        if required_table not in result.tables:
+            continue
         for view in views.get(module_slug, {}).values():
-            found_file_view = True
             proxy_tables = OrderedDict(view.tables)
             for name in ("ToxPi_Results", "ToxPi_Settings"):
                 table = result.tables.get(name)

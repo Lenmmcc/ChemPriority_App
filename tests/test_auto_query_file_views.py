@@ -21,6 +21,7 @@ from src.auto_query_workflow import (
     AutoWorkflowMapping,
     AutoWorkflowResult,
     auto_input_from_multi_file_result,
+    build_auto_workflow_charts,
     build_auto_workflow_module_workbooks,
     build_auto_workflow_zip,
     update_auto_workflow_charts,
@@ -149,6 +150,23 @@ class AutoQueryFileViewTests(unittest.TestCase):
         self.assertNotIn("Only B", set(epa_a["compound"]))
         self.assertNotIn("Only A", set(epa_b["compound"]))
 
+    def test_cached_duplicate_comptox_candidates_are_deduplicated_before_pie_data(self):
+        result = example_result()
+        duplicate = result.tables["CompTox_Candidates"].iloc[[0]].copy()
+        duplicate["query_source"] = "SMILES"
+        result.tables["CompTox_Candidates"] = pd.concat(
+            [result.tables["CompTox_Candidates"], duplicate],
+            ignore_index=True,
+        )
+
+        epa_a = build_file_module_views(result)["comptox_use"]["A.xlsx"].tables
+        pie_row = epa_a["EPA_PUC_Pie_Data"].loc[
+            epa_a["EPA_PUC_Pie_Data"]["compound"].eq("Only A")
+        ].iloc[0]
+
+        self.assertEqual(len(epa_a["Product_Use_Categories"]), 2)
+        self.assertEqual(pie_row["evidence_count"], 1)
+
     def test_upload_order_and_local_sample_partition_are_preserved(self):
         views = build_file_module_views(example_result())
         self.assertEqual(list(views["local_screening"]), ["A.xlsx", "B.xlsx"])
@@ -229,6 +247,67 @@ class AutoQueryFileViewTests(unittest.TestCase):
             charts[
                 "comptox_use__B__EPA_Product_Use_Category_Distribution"
             ].pdf.startswith(b"%PDF")
+        )
+
+    def test_chart_update_waits_for_external_module_raw_results(self):
+        result = example_result()
+        result.tables.pop("CompTox_Candidates")
+
+        charts, warnings = update_auto_workflow_charts(
+            result,
+            completed_step="EPI Suite",
+        )
+
+        self.assertEqual(warnings, [])
+        for module_prefix in (
+            "comptox_use__",
+            "echa_reach_use__",
+            "source_origin__",
+        ):
+            self.assertFalse(
+                any(key.startswith(module_prefix) for key in charts),
+                list(charts),
+            )
+
+    def test_final_chart_update_replaces_stale_available_chart(self):
+        result = example_result()
+        key = "comptox_use__A__EPA_Product_Use_Category_Distribution"
+        result.charts[key] = AutoWorkflowChart("stale", b"stale", b"stale")
+
+        charts, warnings = update_auto_workflow_charts(result)
+
+        self.assertEqual(warnings, [])
+        self.assertNotEqual(charts[key].png, b"stale")
+        self.assertTrue(charts[key].png.startswith(b"\x89PNG"))
+        self.assertTrue(charts[key].pdf.startswith(b"%PDF"))
+
+    def test_final_chart_refresh_drops_stale_chart_and_records_failure(self):
+        result = example_result()
+        key = "comptox_use__A__EPA_Product_Use_Category_Distribution"
+        result.charts[key] = AutoWorkflowChart("stale", b"stale", b"stale")
+
+        with patch(
+            "src.auto_query_workflow._build_chart_figure",
+            side_effect=RuntimeError("target chart failed"),
+        ):
+            charts = build_auto_workflow_charts(result)
+
+        self.assertNotIn(key, charts)
+        self.assertTrue(
+            (
+                result.warnings["stage"].eq("Chart generation")
+                & result.warnings["message"].str.contains(
+                    "target chart failed",
+                    regex=False,
+                )
+            ).any()
+        )
+
+        charts = build_auto_workflow_charts(result)
+
+        self.assertIn(key, charts)
+        self.assertFalse(
+            result.warnings["stage"].eq("Chart generation").any()
         )
 
     def test_one_chart_failure_keeps_other_available_charts(self):

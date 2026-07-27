@@ -79,7 +79,6 @@ REPORTED_FUNCTIONAL_PRESENCE_COLUMNS = [
 
 HIGH_CONFIDENCE_PROBABILITY_THRESHOLD = 0.8
 CLASSIFICATION_PIE_MAX_CATEGORIES = 12
-TOP_PREDICTED_PIE_MAX_CATEGORIES = CLASSIFICATION_PIE_MAX_CATEGORIES
 REPORTED_OTHERS_NOTE = (
     "Others includes compounds with no reported result or with a tie for the "
     "most frequently reported category."
@@ -487,9 +486,11 @@ def extract_top_predicted_functional_use_data(
         best_probability = -1.0
         for _, candidate in compound_df.iterrows():
             probability = _to_number(candidate.get("probability"))
-            if pd.isna(probability):
-                probability = _to_number(candidate.get("evidence_count"))
-            if pd.isna(probability):
+            if (
+                pd.isna(probability)
+                or not math.isfinite(float(probability))
+                or not 0.0 <= float(probability) <= 1.0
+            ):
                 continue
             if float(probability) > best_probability:
                 best_probability = float(probability)
@@ -1212,7 +1213,7 @@ def generate_top_predicted_functional_use_pie_plot(plot_df, title):
         plot_df,
         title,
         footnote="Slice size = number of compounds by top predicted functional use.",
-        max_categories=TOP_PREDICTED_PIE_MAX_CATEGORIES,
+        max_categories=None,
     )
 
 
@@ -1390,26 +1391,6 @@ def _summarize_top_predicted_functional_use(plot_df):
     if summary.empty:
         return summary
     summary = summary.sort_values(["compound_count", "display_label"], ascending=[False, True]).reset_index(drop=True)
-
-    max_categories = max(2, TOP_PREDICTED_PIE_MAX_CATEGORIES)
-    if len(summary) > max_categories:
-        kept = summary.head(max_categories - 1).copy()
-        other = summary.iloc[max_categories - 1 :]
-        summary = pd.concat(
-            [
-                kept,
-                pd.DataFrame(
-                    [
-                        {
-                            "use_key": "__other__",
-                            "display_label": "Others",
-                            "compound_count": int(other["compound_count"].sum()),
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
-        )
 
     total_count = float(summary["compound_count"].sum())
     summary["percent"] = summary["compound_count"].astype(float) / total_count * 100 if total_count else 0.0

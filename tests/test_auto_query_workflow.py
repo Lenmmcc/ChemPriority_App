@@ -265,11 +265,17 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         identifier_batch.return_value = (completed, pd.DataFrame())
         candidates = pd.DataFrame(
             {
-                "input_identity_key": ["cas:a", "cas:b", "cas:unknown"],
-                "compound": ["Only A", "Only B", "Unknown"],
-                "source_type": ["product_category"] * 3,
-                "raw_use": ["A use", "B use", "Unknown use"],
-                "use_cn": ["A use", "B use", "Unknown use"],
+                "input_identity_key": [
+                    "cas:a",
+                    "cas:a",
+                    "cas:b",
+                    "cas:unknown",
+                ],
+                "compound": ["Only A", "Only A", "Only B", "Unknown"],
+                "source_type": ["product_category"] * 4,
+                "raw_use": ["A use", "A use", "B use", "Unknown use"],
+                "use_cn": ["A use", "A use", "B use", "Unknown use"],
+                "query_source": ["名称", "SMILES", "名称", "名称"],
             }
         )
         comptox_batch.return_value = (
@@ -338,6 +344,9 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "comptox_use__B__EPA_Product_Use_Category_Distribution",
             epa_checkpoint.result.charts,
         )
+        root_pie = epa_checkpoint.result.tables["EPA_PUC_Pie_Data"]
+        only_a = root_pie.loc[root_pie["compound"].eq("Only A")].iloc[0]
+        self.assertEqual(only_a["evidence_count"], 1)
         self.assertTrue(
             (
                 epa_checkpoint.result.warnings["stage"]

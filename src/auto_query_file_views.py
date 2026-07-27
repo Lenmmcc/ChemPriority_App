@@ -8,7 +8,11 @@ import re
 
 import pandas as pd
 
-from src.comptox_use import build_functional_use_table, build_product_use_table
+from src.comptox_use import (
+    build_functional_use_table,
+    build_product_use_table,
+    deduplicate_comptox_candidates,
+)
 from src.query_identity import INPUT_IDENTITY_KEY
 from src.use_rose_plot import (
     build_compound_universe,
@@ -311,7 +315,9 @@ def _populate_external_views(
 
 
 def _rebuild_comptox_tables(tables, membership):
-    candidates = tables.get("CompTox_Candidates", pd.DataFrame())
+    candidates = deduplicate_comptox_candidates(
+        tables.get("CompTox_Candidates", pd.DataFrame())
+    )
     universe = build_compound_universe(membership)
     return OrderedDict(
         [

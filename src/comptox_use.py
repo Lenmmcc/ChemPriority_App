@@ -90,6 +90,24 @@ WARNING_COLUMNS = [
     "message",
 ]
 
+COMPTOX_CANDIDATE_EVIDENCE_COLUMNS = (
+    "compound",
+    "dtxsid",
+    "source_type",
+    "raw_use",
+    "general_category",
+    "product_family",
+    "product_type",
+    "functional_use_source",
+    "probability",
+    "reported_use",
+    "harmonized_use",
+    "evidence_count",
+    "description",
+    "specificity",
+    "source",
+)
+
 EVIDENCE_METADATA_COLUMNS = [
     "source_type",
     "中文名称",
@@ -130,7 +148,30 @@ EVIDENCE_METADATA_ROWS = [
     },
 ]
 
+EXACT_USE_TRANSLATIONS = {
+    "buffer": "缓冲剂",
+    "reducer": "还原剂",
+}
+
 USE_TRANSLATION_RULES = [
+    (
+        ("crosslinker", "crosslinking agent", "cross linking agent"),
+        "交联剂",
+    ),
+    (("heat stabilizer", "thermal stabilizer"), "热稳定剂"),
+    (("emollient",), "润肤剂"),
+    (("hair conditioner", "hair conditioning agent"), "护发剂"),
+    (("buffering agent",), "缓冲剂"),
+    (("photoinitiator", "photo initiator"), "光引发剂"),
+    (("preservative",), "防腐剂"),
+    (("humectant",), "保湿剂"),
+    (
+        ("adhesion promoter", "adhesion promoting agent"),
+        "附着力促进剂",
+    ),
+    (("wetting agent",), "润湿剂"),
+    (("reducing agent",), "还原剂"),
+    (("emulsion stabilizer",), "乳液稳定剂"),
     (("personal care", "cosmetic", "beauty", "skin care", "hair care", "toiletries"), "个人护理用品"),
     (("chemical intermediate", "intermediate", "intermediates"), "化学品中间体"),
     (("plasticizer", "phthalate"), "增塑剂"),
@@ -457,7 +498,9 @@ def run_comptox_use_batch(
             time.sleep(delay_seconds)
 
     summary_df = pd.DataFrame(summary_rows)
-    candidates_df = pd.DataFrame(candidate_rows)
+    candidates_df = deduplicate_comptox_candidates(
+        pd.DataFrame(candidate_rows)
+    )
     errors_df = pd.DataFrame(error_rows, columns=WARNING_COLUMNS)
     return summary_df, candidates_df, errors_df
 
@@ -758,6 +801,20 @@ def build_result_workbook(input_df, summary_df=None, candidates_df=None, errors_
             for keywords, label in USE_TRANSLATION_RULES
         ]
     )
+    exact_mapping_df = pd.DataFrame(
+        [
+            {
+                mapping_df.columns[0]: keyword,
+                mapping_df.columns[1]: label,
+            }
+            for keyword, label in EXACT_USE_TRANSLATIONS.items()
+        ],
+        columns=mapping_df.columns,
+    )
+    mapping_df = pd.concat(
+        [exact_mapping_df, mapping_df],
+        ignore_index=True,
+    )
     normalized_input = normalize_input_columns(input_df)
     compound_universe = build_compound_universe(normalized_input)
     predicted_pie = extract_top_predicted_functional_use_data(
@@ -991,7 +1048,11 @@ def build_product_use_table(candidates_df):
         ascending=[True, False, True],
         na_position="last",
     )
-    return output.drop(columns=["_sort_count"]).reset_index(drop=True)
+    return (
+        output.drop(columns=["_sort_count"])
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
 
 
 def build_functional_use_table(candidates_df, functional_source=None):
@@ -1047,7 +1108,35 @@ def build_functional_use_table(candidates_df, functional_source=None):
         ascending=[True, False, False, True],
         na_position="last",
     )
-    return output.drop(columns=["_sort_probability", "_sort_evidence"]).reset_index(drop=True)
+    return (
+        output.drop(columns=["_sort_probability", "_sort_evidence"])
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+
+
+def deduplicate_comptox_candidates(candidates_df):
+    """Keep one row for equivalent CompTox evidence from query variants."""
+    if not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
+        return (
+            candidates_df.copy()
+            if isinstance(candidates_df, pd.DataFrame)
+            else pd.DataFrame()
+        )
+    evidence_columns = [
+        column
+        for column in COMPTOX_CANDIDATE_EVIDENCE_COLUMNS
+        if column in candidates_df.columns
+    ]
+    if not evidence_columns:
+        return candidates_df.copy().reset_index(drop=True)
+    return (
+        candidates_df.drop_duplicates(
+            subset=evidence_columns,
+            keep="first",
+        )
+        .reset_index(drop=True)
+    )
 
 
 def build_evidence_metadata_table():
@@ -1339,7 +1428,16 @@ def _candidate(
 
 
 def classify_use_cn(*texts):
-    combined = _normalize_use_text(" ".join(_clean_cell(text) for text in texts if _clean_cell(text)))
+    normalized_texts = [
+        _normalize_use_text(text)
+        for text in texts
+        if _clean_cell(text)
+    ]
+    for normalized_text in normalized_texts:
+        exact_label = EXACT_USE_TRANSLATIONS.get(normalized_text)
+        if exact_label:
+            return exact_label
+    combined = _normalize_use_text(" ".join(normalized_texts))
     for keywords, label in USE_TRANSLATION_RULES:
         if any(keyword in combined for keyword in keywords):
             return label

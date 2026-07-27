@@ -790,6 +790,133 @@ class UseRosePlotTests(unittest.TestCase):
         self.assertEqual(plot_df["display_label"].tolist(), ["fragrance", "solvent"])
         self.assertAlmostEqual(plot_df.loc[0, "probability"], 0.81)
 
+    def test_top_predicted_data_uses_others_only_for_true_absence(self):
+        candidates_df = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "source_type": "functional_use",
+                    "raw_use": "crosslinker",
+                    "use_cn": "交联剂",
+                    "evidence_count": 0.80,
+                    "probability": 0.80,
+                    "functional_use_source": "predicted",
+                },
+                {
+                    "compound": "A",
+                    "source_type": "functional_use",
+                    "raw_use": "fragrance",
+                    "use_cn": "芳香剂",
+                    "evidence_count": 0.70,
+                    "probability": 0.70,
+                    "functional_use_source": "predicted",
+                },
+                {
+                    "compound": "B",
+                    "source_type": "functional_use",
+                    "raw_use": "specialty_unmapped_use",
+                    "use_cn": "",
+                    "evidence_count": 0.90,
+                    "probability": 0.90,
+                    "functional_use_source": "predicted",
+                },
+            ]
+        )
+        universe = pd.DataFrame(
+            [
+                {
+                    "compound_key": "a",
+                    "compound": "A",
+                    "compound_label": "A",
+                },
+                {
+                    "compound_key": "b",
+                    "compound": "B",
+                    "compound_label": "B",
+                },
+                {
+                    "compound_key": "c",
+                    "compound": "C",
+                    "compound_label": "C",
+                },
+            ]
+        )
+
+        result = extract_top_predicted_functional_use_data(
+            candidates_df,
+            compound_universe=universe,
+        ).set_index("compound")
+
+        self.assertEqual(
+            result["use_label"].to_dict(),
+            {
+                "A": "crosslinker",
+                "B": "specialty_unmapped_use",
+                "C": "Others",
+            },
+        )
+        self.assertEqual(
+            result["is_other"].to_dict(),
+            {"A": False, "B": False, "C": True},
+        )
+
+    def test_top_predicted_data_rejects_invalid_probabilities(self):
+        invalid_probabilities = {
+            "Missing": pd.NA,
+            "Nonnumeric": "not-a-number",
+            "Negative": -0.1,
+            "Above one": 1.1,
+            "Infinite": float("inf"),
+        }
+        candidates_df = pd.DataFrame(
+            [
+                {
+                    "compound": compound,
+                    "source_type": "functional_use",
+                    "raw_use": "fragrance",
+                    "evidence_count": 0.9,
+                    "probability": probability,
+                    "functional_use_source": "predicted",
+                }
+                for compound, probability in invalid_probabilities.items()
+            ]
+        )
+        universe = build_compound_universe(
+            pd.DataFrame({"compound": list(invalid_probabilities)})
+        )
+
+        result = extract_top_predicted_functional_use_data(
+            candidates_df,
+            compound_universe=universe,
+        )
+
+        self.assertEqual(result["use_label"].tolist(), ["Others"] * 5)
+        self.assertTrue(result["is_other"].all())
+
+    def test_top_predicted_data_keeps_first_candidate_when_probabilities_tie(self):
+        candidates_df = pd.DataFrame(
+            [
+                {
+                    "compound": "A",
+                    "source_type": "functional_use",
+                    "raw_use": "first_use",
+                    "probability": 0.8,
+                    "functional_use_source": "predicted",
+                },
+                {
+                    "compound": "A",
+                    "source_type": "functional_use",
+                    "raw_use": "second_use",
+                    "probability": 0.8,
+                    "functional_use_source": "predicted",
+                },
+            ]
+        )
+
+        result = extract_top_predicted_functional_use_data(candidates_df)
+
+        self.assertEqual(result["use_label"].tolist(), ["first_use"])
+
     def test_functional_use_specialized_extractors_return_typed_empty_frames(self):
         self.assertEqual(
             extract_top_predicted_functional_use_data(pd.DataFrame()).columns.tolist(),
@@ -1084,6 +1211,49 @@ class UseRosePlotTests(unittest.TestCase):
             self.assertTrue(any("catalyst" in label and "33.3%" in label for label in legend_labels))
             self.assertIn("Total compounds\n3", center_labels)
             self.assertEqual(horizontal_lines, [])
+        finally:
+            if fig is not None:
+                plt.close(fig)
+
+    def test_top_predicted_pie_keeps_all_existing_english_categories(self):
+        plot_df = pd.DataFrame(
+            [
+                {
+                    "compound": f"Compound {index:02d}",
+                    "compound_label": f"Compound {index:02d}",
+                    "use_cn": f"用途 {index:02d}",
+                    "use_label": f"raw_use_{index:02d}",
+                    "display_label": f"raw_use_{index:02d}",
+                    "probability": 0.9,
+                    "status": "predicted",
+                }
+                for index in range(13)
+            ]
+        )
+        fig = None
+
+        try:
+            fig = generate_top_predicted_functional_use_pie_plot(
+                plot_df,
+                "Top Predicted",
+            )
+            legend_labels = [
+                text.get_text()
+                for legend in fig.legends
+                for text in legend.get_texts()
+            ]
+
+            self.assertEqual(len(fig.axes[0].patches), 13)
+            for index in range(13):
+                self.assertTrue(
+                    any(
+                        f"raw_use_{index:02d}" in label
+                        for label in legend_labels
+                    )
+                )
+            self.assertFalse(
+                any(label.startswith("Others") for label in legend_labels)
+            )
         finally:
             if fig is not None:
                 plt.close(fig)

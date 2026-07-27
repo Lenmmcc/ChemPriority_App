@@ -158,6 +158,105 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertEqual(errors_df["stage"].tolist(), ["identity_conflict"])
         self.assertEqual(errors_df.loc[0, "query_source"], "名称 | SMILES")
 
+    @patch("src.comptox_use.fetch_use_candidates")
+    @patch("src.comptox_use.resolve_dtxsid")
+    def test_same_dtxsid_query_variants_do_not_duplicate_evidence(
+        self, resolve_dtxsid, fetch_use_candidates
+    ):
+        resolve_dtxsid.side_effect = [
+            {"dtxsid": "DTXSID0000001", "status": "name", "message": ""},
+            {"dtxsid": "DTXSID0000001", "status": "smiles", "message": ""},
+        ]
+        fetch_use_candidates.return_value = (
+            [_candidate("product_category", raw_use="same evidence")],
+            [],
+        )
+
+        summary_df, candidates_df, errors_df = comptox_use.run_comptox_use_batch(
+            pd.DataFrame([{"compound": "Example", "smiles": "CCO"}]),
+            delay_seconds=0,
+            cache_enabled=False,
+        )
+
+        self.assertEqual(len(summary_df), 2)
+        self.assertEqual(len(candidates_df), 1)
+        self.assertTrue(errors_df.empty)
+
+    def test_public_use_tables_remove_identical_projected_rows(self):
+        duplicate = {
+            "compound": "Example",
+            "dtxsid": "DTXSID0000001",
+            **_candidate("product_category", raw_use="same evidence"),
+        }
+        product_candidates = pd.DataFrame(
+            [
+                {**duplicate, "query_source": "名称"},
+                {**duplicate, "query_source": "SMILES"},
+            ]
+        )
+        functional = {
+            "compound": "Example",
+            "dtxsid": "DTXSID0000001",
+            **_candidate(
+                "functional_use",
+                raw_use="fragrance",
+                functional_use_source="predicted",
+                probability=0.9,
+            ),
+        }
+        functional_candidates = pd.DataFrame(
+            [
+                {**functional, "query_source": "名称"},
+                {**functional, "query_source": "SMILES"},
+            ]
+        )
+
+        self.assertEqual(
+            len(comptox_use.build_product_use_table(product_candidates)),
+            1,
+        )
+        self.assertEqual(
+            len(
+                comptox_use.build_functional_use_table(
+                    functional_candidates,
+                    functional_source="predicted",
+                )
+            ),
+            1,
+        )
+
+    def test_same_dtxsid_keeps_distinct_evidence_rows(self):
+        candidates = pd.DataFrame(
+            [
+                {
+                    "compound": "Example",
+                    "dtxsid": "DTXSID0000001",
+                    "query_source": "名称",
+                    **_candidate(
+                        "product_category",
+                        raw_use="cleaning agent",
+                    ),
+                },
+                {
+                    "compound": "Example",
+                    "dtxsid": "DTXSID0000001",
+                    "query_source": "SMILES",
+                    **_candidate(
+                        "product_category",
+                        raw_use="surface treatment",
+                    ),
+                },
+            ]
+        )
+
+        deduplicated = comptox_use.deduplicate_comptox_candidates(candidates)
+
+        self.assertEqual(len(deduplicated), 2)
+        self.assertEqual(
+            deduplicated["raw_use"].tolist(),
+            ["cleaning agent", "surface treatment"],
+        )
+
     def test_dashboard_mode_skips_unconfigured_api(self):
         with (
             patch.object(
@@ -484,7 +583,82 @@ class CompToxDashboardModeTests(unittest.TestCase):
         self.assertEqual(comptox_use.classify_use_cn("antimicrobial"), "抗微生物剂")
         self.assertEqual(comptox_use.classify_use_cn("skin_protectant"), "皮肤保护剂")
         self.assertEqual(comptox_use.classify_use_cn("skin_conditioner"), "皮肤调理剂")
+        expected = {
+            "crosslinker": "交联剂",
+            "cross-linking_agent": "交联剂",
+            "crosslinking_agent": "交联剂",
+            "heat_stabilizer": "热稳定剂",
+            "thermal stabilizer": "热稳定剂",
+            "thermal_stabilizer": "热稳定剂",
+            "emollient": "润肤剂",
+            "hair_conditioner": "护发剂",
+            "hair_conditioning_agent": "护发剂",
+            "buffering_agent": "缓冲剂",
+            "buffer": "缓冲剂",
+            "photoinitiator": "光引发剂",
+            "photo_initiator": "光引发剂",
+            "preservative": "防腐剂",
+            "humectant": "保湿剂",
+            "adhesion_promoter": "附着力促进剂",
+            "adhesion_promoting_agent": "附着力促进剂",
+            "wetting_agent": "润湿剂",
+            "reducing_agent": "还原剂",
+            "reducer": "还原剂",
+            "emulsion_stabilizer": "乳液稳定剂",
+        }
+        for raw_use, expected_cn in expected.items():
+            self.assertEqual(
+                comptox_use.classify_use_cn(raw_use),
+                expected_cn,
+            )
+        self.assertEqual(comptox_use.classify_use_cn("friction_reducer"), "")
+        self.assertEqual(comptox_use.classify_use_cn("unbuffered_solution"), "")
+        self.assertEqual(comptox_use.classify_use_cn("vinyl"), "")
         self.assertEqual(comptox_use.classify_use_cn("specialty_unmapped_use"), "")
+
+    def test_expanded_functional_use_translation_reaches_table_and_summary(self):
+        candidate = {
+            "compound": "Example",
+            "dtxsid": "DTXSID0000001",
+            "source_type": "functional_use",
+            "source": "dashboard:functional_use",
+            "raw_use": "crosslinker",
+            "use_cn": comptox_use.classify_use_cn("crosslinker"),
+            "reported_use": "",
+            "harmonized_use": "crosslinker",
+            "evidence_count": 0.475,
+            "probability": 0.475,
+            "functional_use_source": "predicted",
+        }
+
+        functional_df = comptox_use.build_functional_use_table(
+            pd.DataFrame([candidate]),
+            functional_source="predicted",
+        )
+        summary = comptox_use._format_source_type_uses(
+            [candidate],
+            "functional_use",
+            functional_source="predicted",
+        )
+
+        self.assertEqual(
+            functional_df.loc[
+                0,
+                comptox_use.FUNCTIONAL_USE_TABLE_COLUMNS[2],
+            ],
+            "交联剂",
+        )
+        self.assertEqual(
+            functional_df.loc[
+                0,
+                comptox_use.FUNCTIONAL_USE_TABLE_COLUMNS[3],
+            ],
+            "crosslinker",
+        )
+        self.assertEqual(
+            summary,
+            "交联剂 (crosslinker, p=0.475)",
+        )
 
     def test_functional_use_table_displays_unmapped_chinese_label_as_other_use(self):
         candidates_df = pd.DataFrame(
@@ -660,6 +834,12 @@ class CompToxDashboardModeTests(unittest.TestCase):
         metadata_rows = list(book["Evidence_Metadata"].iter_rows(values_only=True))
         self.assertIn("product_category", [row[0] for row in metadata_rows[1:]])
         self.assertIn("functional_use", [row[0] for row in metadata_rows[1:]])
+        mapping = pd.read_excel(
+            io.BytesIO(workbook.getvalue()), sheet_name="CN_Mapping"
+        )
+        mapping_pairs = set(zip(mapping.iloc[:, 0], mapping.iloc[:, 1]))
+        self.assertIn(("buffer", "缓冲剂"), mapping_pairs)
+        self.assertIn(("reducer", "还原剂"), mapping_pairs)
 
     def test_dashboard_request_retries_transient_network_failure(self):
         class Response:
