@@ -15,6 +15,7 @@ from src.auto_query_workflow import (
     AutoWorkflowEpiRetryError,
     AutoWorkflowMapping,
     AutoWorkflowResult,
+    PER_FILE_PUBLIC_TABLE_NAMES,
     PUBLIC_TABLE_NAMES,
     auto_input_from_multi_file_result,
     build_auto_workflow_charts,
@@ -28,6 +29,7 @@ from src.auto_query_workflow import (
     retry_auto_workflow_epi_failures,
     run_auto_query_workflow,
 )
+from src.auto_query_file_views import build_file_module_views
 from src.auto_query_checkpoint import (
     CheckpointStorageError,
     ExpiredCheckpoint,
@@ -576,9 +578,22 @@ def _result_dashboard_groups(result, charts):
                 "Plot_Warnings",
             ],
             ("Local_",),
+            "local_screening",
         ),
-        ("identifier", "标识符补全", ["Identifier_Completion", "Identifier_Warnings"], ()),
-        ("epi", "EPI Suite", ["EPI_Results", "EPI_Raw_Results", "EPI_Errors"], ()),
+        (
+            "identifier",
+            "标识符补全",
+            ["Identifier_Completion", "Identifier_Warnings"],
+            (),
+            None,
+        ),
+        (
+            "epi",
+            "EPI Suite",
+            ["EPI_Results", "EPI_Raw_Results", "EPI_Errors"],
+            (),
+            None,
+        ),
         (
             "comptox",
             "EPA CompTox",
@@ -593,6 +608,7 @@ def _result_dashboard_groups(result, charts):
                 "CompTox_Errors",
             ],
             ("EPA_",),
+            "comptox_use",
         ),
         (
             "echa",
@@ -608,6 +624,7 @@ def _result_dashboard_groups(result, charts):
                 "ECHA_GHS_Errors",
             ],
             ("ECHA_",),
+            "echa",
         ),
         (
             "source",
@@ -619,6 +636,7 @@ def _result_dashboard_groups(result, charts):
                 "Source_Origin_Pie_Data",
             ],
             ("Source_",),
+            "source_origin",
         ),
         (
             "toxpi",
@@ -636,11 +654,19 @@ def _result_dashboard_groups(result, charts):
                 "ToxPi_Robust_Stats",
             ],
             ("ToxPi_",),
+            None,
         ),
     ]
     available_charts = charts or {}
+    file_views = build_file_module_views(result)
     groups = []
-    for key, label, table_candidates, chart_prefixes in definitions:
+    for (
+        key,
+        label,
+        table_candidates,
+        chart_prefixes,
+        file_view_slug,
+    ) in definitions:
         table_names = [
             name
             for name in table_candidates
@@ -651,13 +677,28 @@ def _result_dashboard_groups(result, charts):
             for chart_key in available_charts
             if any(chart_key.startswith(prefix) for prefix in chart_prefixes)
         ]
-        if table_names or chart_keys:
+        has_file_content = any(
+            any(
+                isinstance(view.tables.get(name), pd.DataFrame)
+                and not view.tables[name].empty
+                for name in table_candidates
+            )
+            or bool(view.charts)
+            for view in (
+                file_views.get(file_view_slug, OrderedDict()).values()
+                if file_view_slug
+                else ()
+            )
+        )
+        if table_names or chart_keys or has_file_content:
             groups.append(
                 {
                     "key": key,
                     "label": label,
                     "table_names": table_names,
                     "chart_keys": chart_keys,
+                    "table_candidates": tuple(table_candidates),
+                    "file_view_slug": file_view_slug,
                 }
             )
     return groups
@@ -688,6 +729,16 @@ def _render_result_dashboard(result, charts):
     tabs = st.tabs([group["label"] for group in groups])
     for tab, group in zip(tabs, groups):
         with tab:
+            if group["key"] == "toxpi":
+                st.caption(
+                    "本栏汇总所有参与文件，并按现有 PA/PBM/DF ToxPi "
+                    "规则统一计算。"
+                )
+            if group["file_view_slug"] and _render_file_result_group(
+                group,
+                result,
+            ):
+                continue
             for table_name in group["table_names"]:
                 table = result.tables[table_name]
                 if _is_audit_table(table_name):
@@ -700,6 +751,50 @@ def _render_result_dashboard(result, charts):
             for chart_key in group["chart_keys"]:
                 chart = charts[chart_key]
                 _render_chart_image(chart)
+
+
+def _render_file_result_group(group, result):
+    views = build_file_module_views(result).get(
+        group["file_view_slug"],
+        OrderedDict(),
+    )
+    if not views:
+        return False
+
+    file_tabs = st.tabs(
+        [
+            "未归属" if view.primary_file == "unassigned" else view.primary_file
+            for view in views.values()
+        ]
+    )
+    for file_tab, view in zip(file_tabs, views.values()):
+        with file_tab:
+            rendered = False
+            for table_name in group["table_candidates"]:
+                table = view.tables.get(table_name)
+                if not isinstance(table, pd.DataFrame) or table.empty:
+                    continue
+                rendered = True
+                if (
+                    table_name == "Structure_Preparation"
+                    and {
+                        "smiles_source",
+                        "parse_status",
+                    }.issubset(table.columns)
+                ):
+                    _render_structure_preparation_summary(table)
+                if _is_audit_table(table_name):
+                    with st.expander(table_name, expanded=False):
+                        _show_dataframe(table)
+                else:
+                    st.caption(table_name)
+                    _show_dataframe(table)
+            for chart in view.charts.values():
+                rendered = True
+                _render_chart_image(chart)
+            if not rendered:
+                st.info("该文件在此模块中暂无结果。")
+    return True
 
 
 def _render_chart_image(chart):
@@ -816,12 +911,26 @@ def _render_saved_results(
     if not result.warnings.empty:
         with st.expander("Warnings", expanded=False):
             _show_dataframe(result.warnings)
-    table_names = [name for name in result.tables if name in PUBLIC_TABLE_NAMES]
+    per_file_mode = bool(
+        build_file_module_views(result).get("local_screening")
+    )
+    table_names = [
+        name
+        for name in result.tables
+        if name in PUBLIC_TABLE_NAMES
+        and not (
+            per_file_mode
+            and name in PER_FILE_PUBLIC_TABLE_NAMES
+        )
+    ]
     if table_names:
         selected_table = st.selectbox("查看结果表", table_names, key="auto_query_result_table")
         _show_dataframe(result.tables[selected_table])
     structure_preparation = result.tables.get("Structure_Preparation")
-    if isinstance(structure_preparation, pd.DataFrame):
+    if (
+        not per_file_mode
+        and isinstance(structure_preparation, pd.DataFrame)
+    ):
         _render_structure_preparation_summary(structure_preparation)
     _render_result_dashboard(result, charts)
     _render_module_downloads(result, module_workbooks, charts)
