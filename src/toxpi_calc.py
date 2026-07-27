@@ -9,6 +9,7 @@ from matplotlib.patches import Patch, Wedge
 from scipy.stats import spearmanr
 
 from src.plot_style import apply_figure_font, configure_plot_style
+from src.toxpi_display import format_toxpi_score
 
 
 configure_plot_style()
@@ -391,7 +392,7 @@ def generate_multi_toxpi_plot(toxpi_agg, custom_weights=None, beautify=True, tox
             va="top",
             transform=ax.transAxes,
         )
-        ax.text(0.5, -0.35, f"ToxPi: {score:.2f}", fontsize=11, color="black", ha="center", va="top",
+        ax.text(0.5, -0.35, f"ToxPi: {format_toxpi_score(score)}", fontsize=11, color="black", ha="center", va="top",
                 transform=ax.transAxes)
 
     layout_str = "Beautified Layout" if beautify else "Strict Original Layout"
@@ -515,7 +516,7 @@ def generate_r_style_toxpi_plot(
         if label_wrap_width:
             score_y -= max(0, label_lines - 1) * 0.3
         score = pd.to_numeric(pd.Series([row_data.get("toxpi", np.nan)]), errors="coerce").iloc[0]
-        score_label = "ToxPi: NA" if pd.isna(score) else f"ToxPi: {float(score):.2f}"
+        score_label = "ToxPi: NA" if pd.isna(score) else f"ToxPi: {format_toxpi_score(score)}"
         ax.text(
             x,
             score_y,
@@ -605,7 +606,7 @@ def generate_toxpi_bar_plot(toxpi_agg, bar_colors_dict=None):
         ax.text(
             bar.get_x() + bar.get_width() / 2.,
             height + 0.015,
-            f"{height:.2f}",
+            format_toxpi_score(height),
             ha="center",
             va="bottom",
             fontsize=10,

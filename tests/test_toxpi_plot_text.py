@@ -96,6 +96,56 @@ class ToxPiPlotTextTests(unittest.TestCase):
         self.assertIn("configure_plot_style", page_source)
         self.assertIn("st.warning", page_source)
 
+    def test_toxpi_score_labels_use_four_decimal_places(self):
+        toxpi_agg = pd.DataFrame(
+            {
+                "compound": ["Compound A", "Compound B"],
+                "toxpi": [0.62126, 0.62124],
+                "norm_peak_area": [0.8, 0.7],
+                "norm_pbm": [0.6, 0.5],
+                "norm_df": [0.4, 0.3],
+            }
+        )
+        toxpi_agg.attrs["toxic_cols"] = ["peak_area", "pbm", "df"]
+        figures = [
+            generate_multi_toxpi_plot(
+                toxpi_agg,
+                toxic_cols=["peak_area", "pbm", "df"],
+            ),
+            generate_r_style_toxpi_plot(
+                toxpi_agg,
+                toxic_cols=["peak_area", "pbm", "df"],
+            ),
+            generate_toxpi_bar_plot(toxpi_agg),
+        ]
+
+        try:
+            multi_labels = [
+                text.get_text()
+                for axis in figures[0].axes
+                for text in axis.texts
+                if text.get_text().startswith("ToxPi:")
+            ]
+            r_style_labels = [
+                text.get_text()
+                for text in figures[1].axes[0].texts
+                if text.get_text().startswith("ToxPi:")
+            ]
+            bar_labels = [
+                text.get_text()
+                for text in figures[2].axes[0].texts
+                if text.get_text().startswith("0.")
+            ]
+
+            for labels in (multi_labels, r_style_labels):
+                self.assertIn("ToxPi: 0.6213", labels)
+                self.assertIn("ToxPi: 0.6212", labels)
+            self.assertIn("0.6213", bar_labels)
+            self.assertIn("0.6212", bar_labels)
+        finally:
+            for figure in figures:
+                plt.close(figure)
+
     def test_r_style_toxpi_plot_uses_single_canvas_grid(self):
         norm_peak_area = np.linspace(1.0, 0.35, 15)
         norm_pbm = np.linspace(0.9, 0.3, 15)
