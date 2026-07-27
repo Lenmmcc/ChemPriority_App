@@ -6,6 +6,7 @@ import math
 from typing import Iterable
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
@@ -766,6 +767,9 @@ def generate_pbm_toxpi_bar_plot(toxpi_results: pd.DataFrame, top_n: int = 15):
     ax.set_title("PA/PBM/DF ToxPi Ranking", fontsize=14, fontweight="bold")
     ax.set_xlabel("Compound")
     ax.set_ylabel("ToxPi Score")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_yticks([0.0, 0.5, 1.0])
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     ax.tick_params(axis="x", rotation=90)
     ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
     fig.tight_layout()
@@ -792,6 +796,22 @@ def generate_pbm_toxpi_robustness_plot(result: PBMToxPiResult):
     ax.set_xlabel("Spearman correlation with baseline ranking")
     ax.set_ylabel("Frequency")
     ax.text(0.02, 0.96, f"Mean rho = {mean_rho:.3f}", transform=ax.transAxes, va="top")
+    automatic_upper = float(ax.get_ylim()[1])
+    locator = MaxNLocator(nbins=6, integer=True, min_n_ticks=2)
+    ticks = locator.tick_values(0.0, max(1.0, automatic_upper))
+    ticks = ticks[ticks >= 0.0]
+    top_candidates = ticks[ticks >= automatic_upper]
+    top_tick = (
+        float(top_candidates[0])
+        if len(top_candidates)
+        else float(math.ceil(automatic_upper))
+    )
+    visible_ticks = ticks[ticks <= top_tick]
+    if not np.allclose(visible_ticks, np.round(visible_ticks)):
+        top_tick = float(math.ceil(automatic_upper))
+        visible_ticks = np.arange(0.0, top_tick + 1.0, 1.0)
+    ax.set_ylim(0.0, top_tick)
+    ax.set_yticks(visible_ticks)
     fig.tight_layout()
     return apply_figure_font(fig)
 

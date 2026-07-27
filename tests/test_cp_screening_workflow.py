@@ -72,6 +72,29 @@ class CpScreeningWorkflowTests(unittest.TestCase):
         finally:
             plt.close(figure)
 
+    def test_pbm_toxpi_bar_plot_shows_full_zero_to_one_scale(self):
+        toxpi_results = pd.DataFrame(
+            {
+                "compound": ["Compound A", "Compound B"],
+                "toxpi": [0.8, 0.4],
+            }
+        )
+
+        figure = generate_pbm_toxpi_bar_plot(toxpi_results)
+        try:
+            axis = figure.axes[0]
+            self.assertEqual(axis.get_ylim(), (0.0, 1.0))
+            np.testing.assert_allclose(
+                axis.get_yticks(),
+                [0.0, 0.5, 1.0],
+            )
+            self.assertEqual(
+                [label.get_text() for label in axis.get_yticklabels()],
+                ["0.0", "0.5", "1.0"],
+            )
+        finally:
+            plt.close(figure)
+
     def test_screening_default_mapping_detects_recognized_mol_column(self):
         defaults = default_sample_mapping(
             PrimaryWorkbook(
@@ -862,6 +885,36 @@ class CpScreeningWorkflowTests(unittest.TestCase):
                 fig.axes[0].get_xlabel(),
                 "Spearman correlation with baseline ranking",
             )
+        finally:
+            plt.close(fig)
+
+    def test_toxpi_robustness_plot_top_tick_matches_axis_limit(self):
+        data = pd.DataFrame(
+            {
+                "compound": ["A", "B", "C"],
+                "Peak_Area": [1e6, 1e4, 1e2],
+                "Scores": [1, 5, 3],
+                "DF": [0.9, 0.2, 0.6],
+            }
+        )
+        config = PBMToxPiConfig(
+            candidate_top_n=3,
+            display_top_n=2,
+            n_iter=25,
+            seed=7,
+        )
+        result = run_pbm_toxpi_robustness(
+            calculate_pbm_toxpi(data, config),
+            config,
+        )
+
+        fig = generate_pbm_toxpi_robustness_plot(result)
+
+        try:
+            axis = fig.axes[0]
+            self.assertEqual(axis.get_ylim()[0], 0.0)
+            self.assertEqual(axis.get_ylim()[1], axis.get_yticks()[-1])
+            self.assertTrue(float(axis.get_yticks()[-1]).is_integer())
         finally:
             plt.close(fig)
 
