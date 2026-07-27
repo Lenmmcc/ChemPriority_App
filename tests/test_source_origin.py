@@ -64,6 +64,48 @@ def _natural_evidence(source_name="ChEBI", confidence="strong"):
 
 
 class SourceOriginBatchTests(unittest.TestCase):
+    @patch("src.source_origin.fetch_coconut_evidence", return_value=[])
+    @patch("src.source_origin.fetch_chebi_evidence", return_value=[])
+    def test_reused_evidence_matches_same_name_rows_by_identity_key(
+        self,
+        _chebi,
+        _coconut,
+    ):
+        input_df = pd.DataFrame(
+            {
+                "compound": ["Shared", "Shared"],
+                "cas": ["11-11-1", "22-22-2"],
+                "input_identity_key": ["cas:11-11-1", "cas:22-22-2"],
+            }
+        )
+        candidates = pd.DataFrame(
+            {
+                "compound": ["Shared", "Shared"],
+                "input_identity_key": ["cas:11-11-1", "cas:22-22-2"],
+                "source_type": ["product_category", "product_category"],
+                "raw_use": ["Use A", "Use B"],
+                "use_cn": ["用途 A", "用途 B"],
+            }
+        )
+
+        _, evidence, _ = run_source_origin_batch(
+            input_df,
+            comptox_summary_df=pd.DataFrame(),
+            comptox_candidates_df=candidates,
+            echa_summary_df=pd.DataFrame(),
+            echa_candidates_df=pd.DataFrame(),
+            echa_dossiers_df=pd.DataFrame(),
+            delay_seconds=0,
+            max_workers=1,
+        )
+
+        evidence_by_identity = {
+            identity: set(rows["evidence_text"])
+            for identity, rows in evidence.groupby("input_identity_key")
+        }
+        self.assertEqual(evidence_by_identity["cas:11-11-1"], {"Use A"})
+        self.assertEqual(evidence_by_identity["cas:22-22-2"], {"Use B"})
+
     @patch("src.source_origin.run_ordered_batch")
     def test_batch_outputs_retain_input_identity_key(self, runner):
         runner.return_value = [

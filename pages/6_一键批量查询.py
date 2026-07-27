@@ -17,6 +17,7 @@ from src.auto_query_workflow import (
     AutoWorkflowResult,
     PER_FILE_PUBLIC_TABLE_NAMES,
     PUBLIC_TABLE_NAMES,
+    R_DF_STEP_LABEL,
     auto_input_from_multi_file_result,
     build_auto_workflow_charts,
     build_auto_workflow_module_download,
@@ -579,6 +580,7 @@ def _result_dashboard_groups(result, charts):
             ],
             ("Local_",),
             "local_screening",
+            (R_DF_STEP_LABEL,),
         ),
         (
             "identifier",
@@ -586,6 +588,7 @@ def _result_dashboard_groups(result, charts):
             ["Identifier_Completion", "Identifier_Warnings"],
             (),
             None,
+            ("标识符补全",),
         ),
         (
             "epi",
@@ -593,6 +596,7 @@ def _result_dashboard_groups(result, charts):
             ["EPI_Results", "EPI_Raw_Results", "EPI_Errors"],
             (),
             None,
+            ("EPI Suite 环境归趋",),
         ),
         (
             "comptox",
@@ -609,6 +613,7 @@ def _result_dashboard_groups(result, charts):
             ],
             ("EPA_",),
             "comptox_use",
+            ("EPA CompTox 用途",),
         ),
         (
             "echa",
@@ -625,6 +630,7 @@ def _result_dashboard_groups(result, charts):
             ],
             ("ECHA_",),
             "echa",
+            ("ECHA REACH 用途", "ECHA GHS/C&L 危害"),
         ),
         (
             "source",
@@ -637,6 +643,7 @@ def _result_dashboard_groups(result, charts):
             ],
             ("Source_",),
             "source_origin",
+            ("来源属性评估",),
         ),
         (
             "toxpi",
@@ -655,10 +662,19 @@ def _result_dashboard_groups(result, charts):
             ],
             ("ToxPi_",),
             None,
+            ("Pov-LRTP / PBM / ToxPi",),
         ),
     ]
     available_charts = charts or {}
     file_views = build_file_module_views(result)
+    completed_steps = (
+        set(result.step_status["step"].astype(str))
+        if (
+            isinstance(result.step_status, pd.DataFrame)
+            and "step" in result.step_status.columns
+        )
+        else set()
+    )
     groups = []
     for (
         key,
@@ -666,6 +682,7 @@ def _result_dashboard_groups(result, charts):
         table_candidates,
         chart_prefixes,
         file_view_slug,
+        module_steps,
     ) in definitions:
         table_names = [
             name
@@ -690,7 +707,17 @@ def _result_dashboard_groups(result, charts):
                 else ()
             )
         )
-        if table_names or chart_keys or has_file_content:
+        completed_empty_file_module = bool(
+            file_view_slug
+            and file_views.get(file_view_slug)
+            and any(step in completed_steps for step in module_steps)
+        )
+        if (
+            table_names
+            or chart_keys
+            or has_file_content
+            or completed_empty_file_module
+        ):
             groups.append(
                 {
                     "key": key,
@@ -699,6 +726,11 @@ def _result_dashboard_groups(result, charts):
                     "chart_keys": chart_keys,
                     "table_candidates": tuple(table_candidates),
                     "file_view_slug": file_view_slug,
+                    "completed_empty": bool(
+                        completed_empty_file_module
+                        and not table_names
+                        and not chart_keys
+                    ),
                 }
             )
     return groups
@@ -769,6 +801,9 @@ def _render_file_result_group(group, result):
     )
     for file_tab, view in zip(file_tabs, views.values()):
         with file_tab:
+            if group.get("completed_empty"):
+                st.info("该文件在此模块中暂无结果。")
+                continue
             rendered = False
             for table_name in group["table_candidates"]:
                 table = view.tables.get(table_name)

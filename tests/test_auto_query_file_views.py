@@ -12,6 +12,7 @@ import pandas as pd
 import src.auto_query_workflow as auto_query_workflow
 from src.auto_query_file_views import (
     build_file_module_views,
+    file_assignment_warnings,
     safe_export_names,
     scoped_chart_key,
 )
@@ -111,6 +112,34 @@ def example_result():
 
 
 class AutoQueryFileViewTests(unittest.TestCase):
+    def test_assignment_warnings_audit_missing_and_unknown_identity_keys(self):
+        result = example_result()
+        result.tables["CompTox_Errors"] = pd.DataFrame(
+            {
+                "compound": ["Missing identity"],
+                "message": ["legacy row"],
+            }
+        )
+        result.tables["ECHA_GHS_Errors"] = pd.DataFrame(
+            {
+                "compound": ["Unknown identity"],
+                "input_identity_key": ["cas:unknown"],
+                "message": ["unmatched row"],
+            }
+        )
+
+        warnings = file_assignment_warnings(result)
+
+        self.assertEqual(
+            set(warnings["table"]),
+            {"CompTox_Errors", "ECHA_GHS_Errors"},
+        )
+        self.assertTrue(warnings["message"].str.contains("未归属").all())
+        self.assertEqual(
+            dict(zip(warnings["table"], warnings["row_count"])),
+            {"CompTox_Errors": 1, "ECHA_GHS_Errors": 1},
+        )
+
     def test_external_rows_follow_exact_file_membership(self):
         views = build_file_module_views(example_result())
         epa_a = views["comptox_use"]["A.xlsx"].tables["CompTox_Summary"]

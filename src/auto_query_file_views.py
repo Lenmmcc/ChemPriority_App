@@ -62,6 +62,16 @@ SOURCE_RAW_TABLES = (
     "Source_Origin_Evidence",
     "Source_Origin_Errors",
 )
+ASSIGNMENT_AUDIT_TABLES = tuple(
+    dict.fromkeys(
+        (
+            *COMPT0X_RAW_TABLES,
+            *ECHA_REACH_RAW_TABLES,
+            *ECHA_GHS_RAW_TABLES,
+            *SOURCE_RAW_TABLES,
+        )
+    )
+)
 
 
 def scoped_chart_key(module_slug, safe_export_name, chart_name):
@@ -203,6 +213,46 @@ def build_file_module_views(result):
     )
     _assign_scoped_charts(output, result.charts)
     return output
+
+
+def file_assignment_warnings(result):
+    membership = result.tables.get("EPI_Primary_Membership", pd.DataFrame())
+    identity_files = _identity_file_map(membership)
+    if not identity_files:
+        return pd.DataFrame(
+            columns=["stage", "table", "row_count", "message"]
+        )
+
+    rows = []
+    for name in ASSIGNMENT_AUDIT_TABLES:
+        frame = result.tables.get(name)
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        if INPUT_IDENTITY_KEY not in frame.columns:
+            count = len(frame)
+            reason = f"缺少 {INPUT_IDENTITY_KEY}"
+        else:
+            keys = frame[INPUT_IDENTITY_KEY].map(_clean_text)
+            unknown = keys.eq("") | ~keys.isin(identity_files)
+            count = int(unknown.sum())
+            reason = "身份键为空或不在输入文件成员关系中"
+        if not count:
+            continue
+        rows.append(
+            {
+                "stage": "File assignment",
+                "table": name,
+                "row_count": count,
+                "message": (
+                    f"{name} 有 {count} 行未归属到输入文件，"
+                    f"已隔离到 unassigned（{reason}）。"
+                ),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=["stage", "table", "row_count", "message"],
+    )
 
 
 def _populate_external_views(

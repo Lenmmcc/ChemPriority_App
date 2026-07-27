@@ -19,6 +19,7 @@ from src.comptox_use import (
 )
 from src.auto_query_file_views import (
     build_file_module_views,
+    file_assignment_warnings,
     safe_export_names,
     scoped_chart_key,
 )
@@ -652,6 +653,15 @@ def run_auto_query_workflow(
             warning = {
                 "stage": "Chart generation",
                 "message": str(message),
+            }
+            if warning not in warning_rows:
+                warning_rows.append(warning)
+        for assignment_warning in file_assignment_warnings(
+            current_result()
+        ).to_dict("records"):
+            warning = {
+                "stage": assignment_warning["stage"],
+                "message": assignment_warning["message"],
             }
             if warning not in warning_rows:
                 warning_rows.append(warning)

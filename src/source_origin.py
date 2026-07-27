@@ -768,8 +768,61 @@ def _warning_row(row, source_name, stage, message):
 def _matching_rows(df, row):
     if not isinstance(df, pd.DataFrame) or df.empty or "compound" not in df.columns:
         return pd.DataFrame()
+    identity_key = _normalize_key(row.get(INPUT_IDENTITY_KEY))
+    if identity_key and INPUT_IDENTITY_KEY in df.columns:
+        keys = df[INPUT_IDENTITY_KEY].map(_normalize_key)
+        return df.loc[keys.eq(identity_key)]
+
+    stable_identifiers = (
+        ("cas", ("cas",)),
+        ("smiles", ("smiles",)),
+        ("dtxsid", ("dtxsid", "matched_dtxsid")),
+        ("echa_id", ("echa_id",)),
+        ("ec", ("ec",)),
+    )
+    for row_field, candidate_fields in stable_identifiers:
+        target = _normalize_key(row.get(row_field))
+        if not target:
+            continue
+        available_fields = [
+            field for field in candidate_fields if field in df.columns
+        ]
+        if not available_fields:
+            continue
+        populated = pd.Series(False, index=df.index)
+        matched = pd.Series(False, index=df.index)
+        for field in available_fields:
+            normalized = df[field].map(_normalize_key)
+            populated |= normalized.ne("")
+            matched |= normalized.eq(target)
+        if populated.any():
+            return df.loc[matched]
+
     key = _normalize_key(_display_compound(row))
-    return df[df["compound"].map(lambda value: _normalize_key(value) == key)]
+    name_rows = df[
+        df["compound"].map(lambda value: _normalize_key(value) == key)
+    ]
+    if name_rows.empty:
+        return name_rows
+    for field in (
+        INPUT_IDENTITY_KEY,
+        "cas",
+        "smiles",
+        "dtxsid",
+        "matched_dtxsid",
+        "echa_id",
+        "ec",
+    ):
+        if field not in name_rows.columns:
+            continue
+        distinct = {
+            _normalize_key(value)
+            for value in name_rows[field]
+            if _normalize_key(value)
+        }
+        if len(distinct) > 1:
+            return name_rows.iloc[0:0]
+    return name_rows
 
 
 def _attach_compound(evidence_rows, compound):

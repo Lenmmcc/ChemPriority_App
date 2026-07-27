@@ -265,18 +265,22 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         identifier_batch.return_value = (completed, pd.DataFrame())
         candidates = pd.DataFrame(
             {
-                "input_identity_key": ["cas:a", "cas:b"],
-                "compound": ["Only A", "Only B"],
-                "source_type": ["product_category", "product_category"],
-                "raw_use": ["A use", "B use"],
-                "use_cn": ["A use", "B use"],
+                "input_identity_key": ["cas:a", "cas:b", "cas:unknown"],
+                "compound": ["Only A", "Only B", "Unknown"],
+                "source_type": ["product_category"] * 3,
+                "raw_use": ["A use", "B use", "Unknown use"],
+                "use_cn": ["A use", "B use", "Unknown use"],
             }
         )
         comptox_batch.return_value = (
             pd.DataFrame(
                 {
-                    "input_identity_key": ["cas:a", "cas:b"],
-                    "compound": ["Only A", "Only B"],
+                    "input_identity_key": [
+                        "cas:a",
+                        "cas:b",
+                        "cas:unknown",
+                    ],
+                    "compound": ["Only A", "Only B", "Unknown"],
                 }
             ),
             candidates,
@@ -333,6 +337,17 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertIn(
             "comptox_use__B__EPA_Product_Use_Category_Distribution",
             epa_checkpoint.result.charts,
+        )
+        self.assertTrue(
+            (
+                epa_checkpoint.result.warnings["stage"]
+                == "File assignment"
+            ).any()
+        )
+        self.assertTrue(
+            epa_checkpoint.result.warnings["message"]
+            .str.contains("unassigned")
+            .any()
         )
 
     def test_page_6_storage_switch_detaches_without_deleting_checkpoint(self):
@@ -4398,6 +4413,77 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertNotIn("CompTox_Summary", result_table_select.options)
         self.assertIn("ToxPi_Results", result_table_select.options)
         self.assertIn("Input_File_Mappings", result_table_select.options)
+        self.assertEqual(list(app.exception), [])
+
+    def test_page_6_keeps_completed_empty_module_visible_for_every_file(self):
+        workbook = _app_test_workbook_bytes()
+        app = _app_test_with_cached_workbooks(
+            [("A.xlsx", workbook), ("B.xlsx", workbook)]
+        )
+        result = AutoWorkflowResult(
+            mapping=AutoWorkflowMapping(),
+            representative_table=pd.DataFrame({"Name": ["Shared"]}),
+            tables=OrderedDict(
+                [
+                    (
+                        "Input_File_Mappings",
+                        pd.DataFrame(
+                            {
+                                "source_file": ["A.xlsx", "B.xlsx"],
+                                "sample_id": ["A", "B"],
+                            }
+                        ),
+                    ),
+                    (
+                        "EPI_Primary_Membership",
+                        pd.DataFrame(
+                            {
+                                "identity_key": [
+                                    "cas:64-17-5",
+                                    "cas:64-17-5",
+                                ],
+                                "primary_file": ["A.xlsx", "B.xlsx"],
+                                "sample_id": ["A", "B"],
+                                "compound": ["Shared", "Shared"],
+                            }
+                        ),
+                    ),
+                    (
+                        "CompTox_Summary",
+                        pd.DataFrame(
+                            columns=["compound", "input_identity_key"]
+                        ),
+                    ),
+                ]
+            ),
+            step_status=pd.DataFrame(
+                [
+                    {
+                        "step": "EPA CompTox 用途",
+                        "status": "完成",
+                        "rows": 0,
+                        "message": "",
+                    }
+                ]
+            ),
+            warnings=pd.DataFrame(columns=["stage", "message"]),
+        )
+        app.session_state["auto_query_workflow_result"] = result
+        app.session_state["auto_query_workflow_charts"] = OrderedDict()
+
+        app = app.run(timeout=20)
+
+        tab_labels = [tab.label for tab in app.tabs]
+        self.assertIn("EPA CompTox", tab_labels)
+        self.assertIn("A.xlsx", tab_labels)
+        self.assertIn("B.xlsx", tab_labels)
+        self.assertEqual(
+            sum(
+                message.value == "该文件在此模块中暂无结果。"
+                for message in app.info
+            ),
+            2,
+        )
         self.assertEqual(list(app.exception), [])
 
     def test_page_6_routes_plot_warnings_to_screening_audit_tables(self):

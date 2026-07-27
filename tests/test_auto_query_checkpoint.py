@@ -158,6 +158,43 @@ class AutoQueryCheckpointTests(unittest.TestCase):
             self.assertEqual(restored.primary_file, "A.xlsx")
             self.assertEqual(restored.safe_export_name, "A")
 
+    def test_schema_two_module_without_per_file_metadata_loads_with_defaults(self):
+        with TemporaryDirectory() as root:
+            token = generate_run_token()
+            now = datetime(2026, 7, 26, tzinfo=timezone.utc)
+            module = AutoWorkflowModuleWorkbook(
+                step="标识符补全",
+                slug="identifier_completion",
+                file_name="Identifier_Completion_Results.xlsx",
+                data=b"xlsx",
+            )
+            run_dir = save_checkpoint(
+                token,
+                example_checkpoint(now),
+                ["A.xlsx"],
+                OrderedDict([(module.slug, module)]),
+                root=root,
+                now=now,
+            )
+            manifest_path = run_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 2
+            for entry in manifest["module_files"].values():
+                entry.pop("module_slug", None)
+                entry.pop("primary_file", None)
+                entry.pop("safe_export_name", None)
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            loaded = load_checkpoint(token, root=root, now=now)
+
+            restored = loaded.module_workbooks["identifier_completion"]
+            self.assertEqual(restored.module_slug, "identifier_completion")
+            self.assertEqual(restored.primary_file, "")
+            self.assertEqual(restored.safe_export_name, "")
+
     def test_checkpoint_default_root_is_resolved_at_each_call(self):
         with TemporaryDirectory() as first, TemporaryDirectory() as second:
             roots = [
