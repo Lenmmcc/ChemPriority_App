@@ -424,7 +424,12 @@ class QueryCacheTests(unittest.TestCase):
             app.session_state["epi_input_name"] = "epi-input.xlsx"
             app.session_state["epi_input_signature"] = "page-3-app-test"
 
-            with patch("src.query_cache.DEFAULT_CACHE_PATH", cache_path):
+            with patch(
+                "src.query_cache.resolve_storage_paths",
+                return_value=SimpleNamespace(
+                    query_cache_path=cache_path
+                ),
+            ):
                 app.run(timeout=20)
 
         self.assertEqual(list(app.exception), [])
