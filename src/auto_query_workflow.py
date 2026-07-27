@@ -260,6 +260,13 @@ PUBLIC_CHART_NAMES = frozenset(
     for chart_name in chart_names
 )
 
+PER_FILE_PUBLIC_TABLE_NAMES = frozenset(
+    name
+    for module_index in (0, 3, 4, 5)
+    for name in AUTO_WORKFLOW_EXPORT_MODULES[module_index][2]
+    if name != "Input_File_Mappings"
+)
+
 
 @dataclass(frozen=True)
 class AutoWorkflowMapping:
@@ -354,6 +361,9 @@ class AutoWorkflowModuleWorkbook:
     slug: str
     file_name: str
     data: bytes
+    module_slug: str = ""
+    primary_file: str = ""
+    safe_export_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -1231,6 +1241,7 @@ def queryable_epi_retry_input(retry_input: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
+    per_file_mode = _has_file_mappings(result)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         result.step_status.to_excel(writer, sheet_name="Run_Log", index=False)
@@ -1240,6 +1251,8 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
         for name, table in result.tables.items():
             if name not in PUBLIC_TABLE_NAMES:
                 continue
+            if per_file_mode and name in PER_FILE_PUBLIC_TABLE_NAMES:
+                continue
             sheet_name = _safe_sheet_name(name)
             (table if table is not None else pd.DataFrame()).to_excel(writer, sheet_name=sheet_name, index=False)
     buffer.seek(0)
@@ -1247,12 +1260,19 @@ def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:
 
 
 def _build_module_workbook(result: AutoWorkflowResult, table_names: tuple[str, ...]) -> io.BytesIO:
+    return _build_tables_workbook(result.tables, table_names)
+
+
+def _build_tables_workbook(
+    tables: Mapping[str, pd.DataFrame],
+    table_names: tuple[str, ...],
+) -> io.BytesIO:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for name in table_names:
             if name not in PUBLIC_TABLE_NAMES:
                 continue
-            table = result.tables.get(name)
+            table = tables.get(name)
             if isinstance(table, pd.DataFrame):
                 table.to_excel(writer, sheet_name=_safe_sheet_name(name), index=False)
     buffer.seek(0)
@@ -1263,30 +1283,116 @@ def build_auto_workflow_module_workbook(
     result: AutoWorkflowResult,
     step: str,
 ) -> AutoWorkflowModuleWorkbook | None:
+    modules = build_auto_workflow_module_workbooks(result, step)
+    return next(iter(modules.values()), None)
+
+
+PER_FILE_MODULE_VIEW_SLUG = {
+    "local_screening": "local_screening",
+    "comptox_use": "comptox_use",
+    "echa_reach_use": "echa_reach_use",
+    "echa_ghs_cl": "echa_ghs_cl",
+    "source_origin": "source_origin",
+}
+
+
+def build_auto_workflow_module_workbooks(
+    result: AutoWorkflowResult,
+    step: str,
+) -> OrderedDict[str, AutoWorkflowModuleWorkbook]:
     export = AUTO_WORKFLOW_CHECKPOINT_EXPORTS.get(step)
     if export is None:
-        return None
+        return OrderedDict()
     slug, file_name, candidates = export
+    view_slug = PER_FILE_MODULE_VIEW_SLUG.get(slug)
+    views = (
+        build_file_module_views(result).get(view_slug, OrderedDict())
+        if view_slug is not None
+        else OrderedDict()
+    )
+    modules = OrderedDict()
+    for view in views.values():
+        table_names = tuple(
+            name
+            for name in candidates
+            if name in PUBLIC_TABLE_NAMES
+            and isinstance(view.tables.get(name), pd.DataFrame)
+        )
+        if not table_names:
+            continue
+        unique_slug = f"{slug}__{view.safe_export_name}"
+        modules[unique_slug] = AutoWorkflowModuleWorkbook(
+            step=step,
+            slug=unique_slug,
+            file_name=file_name,
+            data=_build_tables_workbook(
+                view.tables,
+                table_names,
+            ).getvalue(),
+            module_slug=slug,
+            primary_file=view.primary_file,
+            safe_export_name=view.safe_export_name,
+        )
+    if modules:
+        return modules
+
     table_names = tuple(
         name
         for name in candidates
         if name in PUBLIC_TABLE_NAMES and isinstance(result.tables.get(name), pd.DataFrame)
     )
     if not table_names:
-        return None
-    return AutoWorkflowModuleWorkbook(
+        return OrderedDict()
+    modules[slug] = AutoWorkflowModuleWorkbook(
         step=step,
         slug=slug,
         file_name=file_name,
         data=_build_module_workbook(result, table_names).getvalue(),
+        module_slug=slug,
     )
+    return modules
+
+
+EXPORT_FOLDER_BY_SLUG = {
+    "local_screening": "01_Local_Screening",
+    "identifier_completion": "02_Identifier_Completion",
+    "epi_suite": "03_EPI_Suite",
+    "comptox_use": "04_EPA_CompTox",
+    "echa_reach_use": "05_ECHA",
+    "echa_ghs_cl": "05_ECHA",
+    "echa": "05_ECHA",
+    "source_origin": "06_Source_Origin",
+    "pov_lrtp_pbm_toxpi": "07_Pov_LRTP_PBM_ToxPi",
+}
+
+
+def module_archive_root(module):
+    module_slug = module.module_slug or module.slug
+    folder = EXPORT_FOLDER_BY_SLUG.get(module_slug, module_slug)
+    if module.safe_export_name:
+        return f"{folder}/{module.safe_export_name}"
+    return folder
 
 
 def _module_download_chart_keys(
     module: AutoWorkflowModuleWorkbook,
     charts: Mapping[str, AutoWorkflowChart],
 ) -> tuple[str, ...]:
-    candidates = AUTO_WORKFLOW_MODULE_CHARTS_BY_SLUG.get(module.slug, ())
+    module_slug = module.module_slug or module.slug
+    candidates = AUTO_WORKFLOW_MODULE_CHARTS_BY_SLUG.get(module_slug, ())
+    if module.safe_export_name:
+        return tuple(
+            key
+            for candidate in candidates
+            for key in (
+                scoped_chart_key(
+                    module_slug,
+                    module.safe_export_name,
+                    candidate,
+                ),
+            )
+            if key in charts
+        )
     return tuple(
         key
         for key in candidates
@@ -1321,6 +1427,41 @@ def build_auto_workflow_module_download(
     )
 
 
+def build_auto_workflow_module_group_download(
+    modules,
+    charts: Mapping[str, AutoWorkflowChart] | None = None,
+) -> AutoWorkflowModuleDownload:
+    modules = tuple(modules)
+    if len(modules) == 1 and not modules[0].safe_export_name:
+        return build_auto_workflow_module_download(modules[0], charts)
+    available_charts = charts or {}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(
+        buffer,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        for module in modules:
+            root = module_archive_root(module)
+            archive.writestr(f"{root}/{module.file_name}", module.data)
+            for key in _module_download_chart_keys(module, available_charts):
+                stem = _module_chart_file_name(key)
+                archive.writestr(
+                    f"{root}/figures/{stem}.png",
+                    available_charts[key].png,
+                )
+                archive.writestr(
+                    f"{root}/figures/{stem}.pdf",
+                    available_charts[key].pdf,
+                )
+    label = (modules[0].module_slug or modules[0].slug) if modules else "module"
+    return AutoWorkflowModuleDownload(
+        file_name=f"{label}_Results.zip",
+        mime="application/zip",
+        data=buffer.getvalue(),
+    )
+
+
 def build_auto_workflow_partial_zip(
     result: AutoWorkflowResult,
     module_workbooks: Mapping[str, AutoWorkflowModuleWorkbook],
@@ -1334,15 +1475,21 @@ def build_auto_workflow_partial_zip(
             build_auto_workflow_workbook(result).getvalue(),
         )
         for module in module_workbooks.values():
-            archive.writestr(f"modules/{module.file_name}", module.data)
+            if module.safe_export_name:
+                workbook_path = f"{module_archive_root(module)}/{module.file_name}"
+                figures_root = f"{module_archive_root(module)}/figures"
+            else:
+                workbook_path = f"modules/{module.file_name}"
+                figures_root = f"modules/{module.slug}/figures"
+            archive.writestr(workbook_path, module.data)
             for key in _module_download_chart_keys(module, available_charts):
                 stem = _module_chart_file_name(key)
                 archive.writestr(
-                    f"modules/{module.slug}/figures/{stem}.png",
+                    f"{figures_root}/{stem}.png",
                     available_charts[key].png,
                 )
                 archive.writestr(
-                    f"modules/{module.slug}/figures/{stem}.pdf",
+                    f"{figures_root}/{stem}.pdf",
                     available_charts[key].pdf,
                 )
     buffer.seek(0)
@@ -1350,7 +1497,7 @@ def build_auto_workflow_partial_zip(
 
 
 def _module_chart_file_name(chart_key: str) -> str:
-    return chart_key.removeprefix("Local_")
+    return chart_key.rsplit("__", 1)[-1].removeprefix("Local_")
 
 
 def build_auto_workflow_charts(
@@ -1450,29 +1597,152 @@ def build_auto_workflow_zip(
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("Auto_Query_Workflow_Results.xlsx", build_auto_workflow_workbook(result).getvalue())
-        for folder, workbook_name, table_candidates, chart_candidates in AUTO_WORKFLOW_EXPORT_MODULES:
+        if _has_file_mappings(result):
+            _write_per_file_full_exports(archive, result, charts)
+            _write_shared_full_exports(archive, result, charts)
+        else:
+            for folder, workbook_name, table_candidates, chart_candidates in AUTO_WORKFLOW_EXPORT_MODULES:
+                table_names = tuple(
+                    name
+                    for name in table_candidates
+                    if name in PUBLIC_TABLE_NAMES
+                    and isinstance(result.tables.get(name), pd.DataFrame)
+                )
+                chart_keys = tuple(
+                    key
+                    for key in charts
+                    if key in PUBLIC_CHART_NAMES and key in chart_candidates
+                )
+                if not table_names and not chart_keys:
+                    continue
+                if table_names:
+                    workbook = _build_module_workbook(result, table_names)
+                    archive.writestr(f"{folder}/{workbook_name}", workbook.getvalue())
+                for key in chart_keys:
+                    stem = _module_chart_file_name(key)
+                    archive.writestr(f"{folder}/figures/{stem}.png", charts[key].png)
+                    archive.writestr(f"{folder}/figures/{stem}.pdf", charts[key].pdf)
+    buffer.seek(0)
+    return buffer
+
+
+def _has_file_mappings(result):
+    mappings = result.tables.get("Input_File_Mappings")
+    return (
+        isinstance(mappings, pd.DataFrame)
+        and not mappings.empty
+        and bool(safe_export_names(mappings))
+    )
+
+
+def _write_per_file_full_exports(archive, result, charts):
+    views = build_file_module_views(result)
+    definitions = (
+        (
+            "01_Local_Screening",
+            "Local_Screening_Results.xlsx",
+            AUTO_WORKFLOW_EXPORT_MODULES[0][2],
+            AUTO_WORKFLOW_EXPORT_MODULES[0][3],
+            "local_screening",
+            ("local_screening",),
+        ),
+        (
+            "04_EPA_CompTox",
+            "EPA_CompTox_Results.xlsx",
+            AUTO_WORKFLOW_EXPORT_MODULES[3][2],
+            AUTO_WORKFLOW_EXPORT_MODULES[3][3],
+            "comptox_use",
+            ("comptox_use",),
+        ),
+        (
+            "05_ECHA",
+            "ECHA_Results.xlsx",
+            AUTO_WORKFLOW_EXPORT_MODULES[4][2],
+            AUTO_WORKFLOW_EXPORT_MODULES[4][3],
+            "echa",
+            ("echa_reach_use", "echa_ghs_cl"),
+        ),
+        (
+            "06_Source_Origin",
+            "Source_Origin_Results.xlsx",
+            AUTO_WORKFLOW_EXPORT_MODULES[5][2],
+            AUTO_WORKFLOW_EXPORT_MODULES[5][3],
+            "source_origin",
+            ("source_origin",),
+        ),
+    )
+    for (
+        folder,
+        workbook_name,
+        table_candidates,
+        chart_candidates,
+        view_slug,
+        chart_slugs,
+    ) in definitions:
+        for view in views.get(view_slug, {}).values():
+            root = f"{folder}/{view.safe_export_name}"
             table_names = tuple(
                 name
                 for name in table_candidates
                 if name in PUBLIC_TABLE_NAMES
-                and isinstance(result.tables.get(name), pd.DataFrame)
+                and isinstance(view.tables.get(name), pd.DataFrame)
             )
-            chart_keys = tuple(
-                key
-                for key in charts
-                if key in PUBLIC_CHART_NAMES and key in chart_candidates
-            )
-            if not table_names and not chart_keys:
-                continue
             if table_names:
-                workbook = _build_module_workbook(result, table_names)
-                archive.writestr(f"{folder}/{workbook_name}", workbook.getvalue())
-            for key in chart_keys:
-                stem = _module_chart_file_name(key)
-                archive.writestr(f"{folder}/figures/{stem}.png", charts[key].png)
-                archive.writestr(f"{folder}/figures/{stem}.pdf", charts[key].pdf)
-    buffer.seek(0)
-    return buffer
+                workbook = _build_tables_workbook(view.tables, table_names)
+                archive.writestr(
+                    f"{root}/{workbook_name}",
+                    workbook.getvalue(),
+                )
+            for candidate in chart_candidates:
+                for chart_slug in chart_slugs:
+                    key = scoped_chart_key(
+                        chart_slug,
+                        view.safe_export_name,
+                        candidate,
+                    )
+                    if key not in charts:
+                        continue
+                    stem = _module_chart_file_name(key)
+                    archive.writestr(
+                        f"{root}/figures/{stem}.png",
+                        charts[key].png,
+                    )
+                    archive.writestr(
+                        f"{root}/figures/{stem}.pdf",
+                        charts[key].pdf,
+                    )
+                    break
+
+
+def _write_shared_full_exports(archive, result, charts):
+    for module_index in (1, 2, 6):
+        (
+            folder,
+            workbook_name,
+            table_candidates,
+            chart_candidates,
+        ) = AUTO_WORKFLOW_EXPORT_MODULES[module_index]
+        table_names = tuple(
+            name
+            for name in table_candidates
+            if name in PUBLIC_TABLE_NAMES
+            and isinstance(result.tables.get(name), pd.DataFrame)
+        )
+        if table_names:
+            workbook = _build_module_workbook(result, table_names)
+            archive.writestr(f"{folder}/{workbook_name}", workbook.getvalue())
+        for key in chart_candidates:
+            if key not in charts:
+                continue
+            stem = _module_chart_file_name(key)
+            archive.writestr(
+                f"{folder}/figures/{stem}.png",
+                charts[key].png,
+            )
+            archive.writestr(
+                f"{folder}/figures/{stem}.pdf",
+                charts[key].pdf,
+            )
 
 
 def build_representative_table(input_df: pd.DataFrame, mapping: AutoWorkflowMapping) -> pd.DataFrame:

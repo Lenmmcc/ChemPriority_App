@@ -19,7 +19,9 @@ from src.auto_query_workflow import (
     auto_input_from_multi_file_result,
     build_auto_workflow_charts,
     build_auto_workflow_module_download,
+    build_auto_workflow_module_group_download,
     build_auto_workflow_module_workbook,
+    build_auto_workflow_module_workbooks,
     build_auto_workflow_partial_zip,
     build_auto_workflow_zip,
     queryable_epi_retry_input,
@@ -749,9 +751,9 @@ def _render_module_downloads(
     if result.step_status.empty:
         return
     st.subheader("已完成模块，可立即下载")
-    modules_by_step = {
-        module.step: (slug, module) for slug, module in module_workbooks.items()
-    }
+    modules_by_step = OrderedDict()
+    for module in module_workbooks.values():
+        modules_by_step.setdefault(module.step, []).append(module)
     for row in result.step_status.to_dict("records"):
         step = str(row["step"])
         warning_count = 0
@@ -779,22 +781,24 @@ def _render_module_downloads(
         if preview is not None:
             with st.expander(f"预览 {step} 关键结果", expanded=False):
                 _show_dataframe(preview.head(20))
-        export = modules_by_step.get(step)
-        if export is None:
+        modules = modules_by_step.get(step)
+        if not modules:
             st.caption("该模块当前没有可导出的结果表。")
             continue
-        slug, module = export
         try:
-            download = build_auto_workflow_module_download(module, charts)
+            download = build_auto_workflow_module_group_download(
+                modules,
+                charts,
+            )
         except Exception as exc:
-            st.warning(f"{module.step} 下载包生成失败：{exc}")
+            st.warning(f"{step} 下载包生成失败：{exc}")
             continue
         st.download_button(
-            f"下载 {module.step}",
+            f"下载 {step}",
             data=download.data,
             file_name=download.file_name,
             mime=download.mime,
-            key=f"{key_prefix}_download_{slug}",
+            key=f"{key_prefix}_download_{modules[0].module_slug or modules[0].slug}",
             on_click="ignore",
         )
 
@@ -1369,12 +1373,34 @@ def handle_checkpoint(checkpoint, *, strict_module_export=False):
             checkpoint.current_step
         )
         if export is not None:
-            module_workbooks.pop(export[0], None)
+            for existing_slug, existing_module in list(
+                module_workbooks.items()
+            ):
+                if existing_module.step == checkpoint.current_step:
+                    module_workbooks.pop(existing_slug, None)
         try:
-            module = build_auto_workflow_module_workbook(
-                checkpoint.result,
-                checkpoint.current_step,
-            )
+            export_slug = export[0]
+            if export_slug in {
+                "local_screening",
+                "comptox_use",
+                "echa_reach_use",
+                "echa_ghs_cl",
+                "source_origin",
+            }:
+                modules = build_auto_workflow_module_workbooks(
+                    checkpoint.result,
+                    checkpoint.current_step,
+                )
+            else:
+                module = build_auto_workflow_module_workbook(
+                    checkpoint.result,
+                    checkpoint.current_step,
+                )
+                modules = (
+                    OrderedDict([(module.slug, module)])
+                    if module is not None
+                    else OrderedDict()
+                )
         except Exception as exc:
             st.session_state["auto_query_checkpoint_warning"] = (
                 f"模块导出失败：{exc}"
@@ -1385,8 +1411,7 @@ def handle_checkpoint(checkpoint, *, strict_module_export=False):
             if strict_module_export:
                 raise
         else:
-            if module is not None:
-                module_workbooks[module.slug] = module
+            module_workbooks.update(modules)
     st.session_state["auto_query_module_workbooks"] = OrderedDict(
         module_workbooks
     )

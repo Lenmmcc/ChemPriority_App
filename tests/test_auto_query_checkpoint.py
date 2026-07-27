@@ -128,6 +128,36 @@ def redirect_path_resolution(source, destination):
 
 
 class AutoQueryCheckpointTests(unittest.TestCase):
+    def test_schema_three_round_trip_preserves_per_file_module_metadata(self):
+        with TemporaryDirectory() as root:
+            token = generate_run_token()
+            now = datetime(2026, 7, 26, tzinfo=timezone.utc)
+            module = AutoWorkflowModuleWorkbook(
+                step="EPA CompTox 用途",
+                slug="comptox_use__A",
+                file_name="EPA_CompTox_Results.xlsx",
+                data=b"xlsx",
+                module_slug="comptox_use",
+                primary_file="A.xlsx",
+                safe_export_name="A",
+            )
+            save_checkpoint(
+                token,
+                example_checkpoint(now),
+                ["A.xlsx"],
+                OrderedDict([(module.slug, module)]),
+                root=root,
+                now=now,
+            )
+
+            loaded = load_checkpoint(token, root=root, now=now)
+
+            restored = loaded.module_workbooks[module.slug]
+            self.assertEqual(loaded.manifest["schema_version"], 3)
+            self.assertEqual(restored.module_slug, "comptox_use")
+            self.assertEqual(restored.primary_file, "A.xlsx")
+            self.assertEqual(restored.safe_export_name, "A")
+
     def test_checkpoint_default_root_is_resolved_at_each_call(self):
         with TemporaryDirectory() as first, TemporaryDirectory() as second:
             roots = [

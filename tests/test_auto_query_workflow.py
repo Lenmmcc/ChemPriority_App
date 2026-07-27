@@ -1271,11 +1271,11 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertTrue(
             {
                 "Input_File_Mappings",
-                "Group_Area_Mean_By_Sample",
-                "DF_Table",
                 *required_epi_sheets,
             }.issubset(root_sheets)
         )
+        self.assertNotIn("Group_Area_Mean_By_Sample", root_sheets)
+        self.assertNotIn("DF_Table", root_sheets)
         self.assertEqual(
             set(result.tables["Input_File_Mappings"]["source_file"]),
             {"Lake-A.xlsx", "Lake-B.xlsx"},
@@ -3457,7 +3457,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             manifest = json.loads(
                 manifest_path.read_text(encoding="utf-8")
             )
-            manifest["schema_version"] = 3
+            manifest["schema_version"] = 4
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -4041,9 +4041,13 @@ class AutoQueryWorkflowTests(unittest.TestCase):
                     {
                         "Run_Log",
                         "Representative_Input",
-                        "Structure_Preparation",
+                        "Input_File_Mappings",
                         "Warnings",
                     }.issubset(workbook.sheet_names)
+                )
+                self.assertNotIn(
+                    "Structure_Preparation",
+                    workbook.sheet_names,
                 )
 
             stored = load_checkpoint(run_token, root=checkpoint_root)

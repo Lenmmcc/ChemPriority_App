@@ -1,9 +1,11 @@
 from collections import OrderedDict
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import zipfile
 
 import pandas as pd
 
@@ -18,6 +20,8 @@ from src.auto_query_workflow import (
     AutoWorkflowMapping,
     AutoWorkflowResult,
     auto_input_from_multi_file_result,
+    build_auto_workflow_module_workbooks,
+    build_auto_workflow_zip,
     update_auto_workflow_charts,
 )
 from src.multi_file_screening import MultiFileScreeningResult
@@ -260,6 +264,86 @@ class AutoQueryFileViewTests(unittest.TestCase):
                 "local_screening__A__Local_DBE_Bubble_Plot"
             ].png,
             b"\x89PNG\r\n\x1a\nchart",
+        )
+
+    def test_full_zip_and_module_workbooks_use_per_file_layout(self):
+        result = example_result()
+        result.tables["ECHA_Use_Summary"] = pd.DataFrame(
+            {
+                "input_identity_key": ["cas:a", "cas:b"],
+                "compound": ["Only A", "Only B"],
+            }
+        )
+        result.tables["Source_Origin_Errors"] = pd.DataFrame(
+            {
+                "input_identity_key": ["cas:a", "cas:b"],
+                "compound": ["Only A", "Only B"],
+                "message": ["A warning", "B warning"],
+            }
+        )
+        result.tables["ToxPi_Results"] = pd.DataFrame(
+            {"compound": ["Only A", "Only B"], "toxpi": [0.8, 0.6]}
+        )
+
+        charts, warnings = update_auto_workflow_charts(result)
+        self.assertEqual(warnings, [])
+        package = build_auto_workflow_zip(result, charts)
+        with zipfile.ZipFile(package) as archive:
+            names = set(archive.namelist())
+            expected = {
+                "01_Local_Screening/A/Local_Screening_Results.xlsx",
+                "01_Local_Screening/B/Local_Screening_Results.xlsx",
+                "04_EPA_CompTox/A/EPA_CompTox_Results.xlsx",
+                "04_EPA_CompTox/B/EPA_CompTox_Results.xlsx",
+                "05_ECHA/A/ECHA_Results.xlsx",
+                "05_ECHA/B/ECHA_Results.xlsx",
+                "06_Source_Origin/A/Source_Origin_Results.xlsx",
+                "06_Source_Origin/B/Source_Origin_Results.xlsx",
+                "07_Pov_LRTP_PBM_ToxPi/Pov_LRTP_PBM_ToxPi_Results.xlsx",
+            }
+            self.assertTrue(expected.issubset(names))
+            self.assertEqual(
+                len(
+                    [
+                        name
+                        for name in names
+                        if name.endswith(
+                            "Pov_LRTP_PBM_ToxPi_Results.xlsx"
+                        )
+                    ]
+                ),
+                1,
+            )
+            epa_a = pd.read_excel(
+                io.BytesIO(
+                    archive.read(
+                        "04_EPA_CompTox/A/EPA_CompTox_Results.xlsx"
+                    )
+                ),
+                sheet_name="CompTox_Summary",
+            )
+            epa_b = pd.read_excel(
+                io.BytesIO(
+                    archive.read(
+                        "04_EPA_CompTox/B/EPA_CompTox_Results.xlsx"
+                    )
+                ),
+                sheet_name="CompTox_Summary",
+            )
+        self.assertEqual(set(epa_a["compound"]), {"Only A", "Shared"})
+        self.assertEqual(set(epa_b["compound"]), {"Only B", "Shared"})
+
+        modules = build_auto_workflow_module_workbooks(
+            result,
+            "EPA CompTox 用途",
+        )
+        self.assertTrue(
+            {"comptox_use__A", "comptox_use__B"}.issubset(modules)
+        )
+        self.assertTrue(
+            {"A.xlsx", "B.xlsx"}.issubset(
+                {module.primary_file for module in modules.values()}
+            )
         )
 
 

@@ -28,8 +28,8 @@ from src.auto_query_workflow import (
 from src.storage_paths import LEGACY_CHECKPOINT_ROOT, resolve_storage_paths
 
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3}
 TTL = timedelta(hours=24)
 DEFAULT_CHECKPOINT_ROOT = LEGACY_CHECKPOINT_ROOT
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -240,12 +240,26 @@ def save_checkpoint(
     for slug, module in module_workbooks.items():
         _safe_name(slug)
         safe_file_name = _safe_file_name(module.file_name)
+        module_slug = _safe_name(module.module_slug or module.slug)
+        safe_export_name = (
+            _safe_name(module.safe_export_name)
+            if module.safe_export_name
+            else ""
+        )
+        primary_file = (
+            _input_basename(module.primary_file)
+            if module.primary_file
+            else ""
+        )
         relative = _content_artifact_path("modules", module.data, ".xlsx")
         _write_immutable_artifact(run_dir, relative, module.data)
         module_files[slug] = {
             "step": module.step,
             "file_name": safe_file_name,
             "path": relative.as_posix(),
+            "module_slug": module_slug,
+            "primary_file": primary_file,
+            "safe_export_name": safe_export_name,
         }
 
     created_at = now.isoformat()
@@ -355,11 +369,25 @@ def load_checkpoint(token, *, root=None, now=None):
         modules = OrderedDict()
         for slug, entry in manifest["module_files"].items():
             safe_slug = _safe_name(slug)
+            module_slug = _safe_name(entry.get("module_slug", safe_slug))
+            primary_file = (
+                _input_basename(entry.get("primary_file"))
+                if entry.get("primary_file")
+                else ""
+            )
+            safe_export_name = (
+                _safe_name(entry.get("safe_export_name"))
+                if entry.get("safe_export_name")
+                else ""
+            )
             modules[safe_slug] = AutoWorkflowModuleWorkbook(
                 step=entry["step"],
                 slug=safe_slug,
                 file_name=_safe_file_name(entry["file_name"]),
                 data=_checked_relative_file(run_dir, entry["path"]).read_bytes(),
+                module_slug=module_slug,
+                primary_file=primary_file,
+                safe_export_name=safe_export_name,
             )
 
         result = AutoWorkflowResult(
