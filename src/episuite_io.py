@@ -410,10 +410,20 @@ def call_epi_web_search(
 
 
 def _call_epi_web_search_uncached(query, search_url, timeout=90, limit=100):
-    params = urllib.parse.urlencode({"query": query, "limit": int(limit)})
-    separator = "&" if "?" in search_url else "?"
+    parsed = urllib.parse.urlsplit(search_url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    params.extend((("query", query), ("limit", int(limit))))
+    url = urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urllib.parse.urlencode(params),
+            parsed.fragment,
+        )
+    )
     request = urllib.request.Request(
-        f"{search_url}{separator}{params}",
+        url,
         headers={
             "Accept": "application/json",
             "User-Agent": "ChemPriority EPISuite connector",
@@ -450,7 +460,8 @@ def resolve_epi_name_exact(
         (
             candidate
             for candidate in candidates
-            if _clean_optional_text(candidate.get("name")).casefold() == expected
+            if isinstance(candidate, dict)
+            and _clean_optional_text(candidate.get("name")).casefold() == expected
         ),
         None,
     )

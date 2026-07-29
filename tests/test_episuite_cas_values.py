@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.parse
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -256,6 +257,27 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertIn("query=Ethanol", request.full_url)
         self.assertEqual(candidates[0]["cas"], "000064-17-5")
 
+    @patch("src.episuite_io.urllib.request.urlopen")
+    def test_call_epi_web_search_merges_params_before_existing_fragment(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = b"[]"
+        urlopen.return_value.__enter__.return_value = response
+
+        with cache_control(False):
+            episuite_io.call_epi_web_search(
+                "Ethanol",
+                api_url="https://example.test/api/submit?existing=base#kept",
+                limit=42,
+            )
+
+        parsed = urllib.parse.urlsplit(urlopen.call_args.args[0].full_url)
+        self.assertEqual(parsed.path, "/api/search")
+        self.assertEqual(
+            urllib.parse.parse_qs(parsed.query),
+            {"existing": ["base"], "query": ["Ethanol"], "limit": ["42"]},
+        )
+        self.assertEqual(parsed.fragment, "kept")
+
     @patch("src.episuite_io.call_epi_web_search")
     def test_exact_name_resolution_ignores_case_and_uses_first_exact_candidate(self, search):
         search.return_value = [
@@ -275,6 +297,13 @@ class EPISuiteCasValueTests(unittest.TestCase):
         search.return_value = [
             {"name": "Ethanol derivative", "smiles": "CCC", "cas": "1-11-1"}
         ]
+
+        with self.assertRaisesRegex(RuntimeError, "完全一致"):
+            episuite_io.resolve_epi_name_exact("Ethanol")
+
+    @patch("src.episuite_io.call_epi_web_search")
+    def test_exact_name_resolution_skips_malformed_candidates(self, search):
+        search.return_value = ["malformed", {"name": "Ethanol derivative", "smiles": "CCC"}]
 
         with self.assertRaisesRegex(RuntimeError, "完全一致"):
             episuite_io.resolve_epi_name_exact("Ethanol")
