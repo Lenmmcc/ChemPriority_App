@@ -478,22 +478,82 @@ class EPISuiteCasValueTests(unittest.TestCase):
 
     @patch("src.episuite_io.call_epi_web_api")
     @patch("src.episuite_io.resolve_epi_name_exact")
-    def test_mixed_name_and_smiles_rows_keep_order(self, resolve_name, call_api):
+    def test_transient_name_resolution_failure_retries_and_succeeds(self, resolve_name, call_api):
+        resolve_name.side_effect = [
+            RuntimeError("EPI Web Suite 名称搜索返回 HTTP 429: busy"),
+            {
+                "name": "ETHANOL",
+                "smiles": "OCC",
+                "cas": "000064-17-5",
+            },
+        ]
+        call_api.return_value = ETHANOL_CAS_AND_SMILES_RESPONSE
+
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
+            pd.DataFrame({"compound": ["Ethanol"]}),
+            delay_seconds=0,
+        )
+
+        self.assertEqual(resolve_name.call_count, 2)
+        self.assertEqual(results.loc[0, "status"], "success")
+        self.assertEqual(raw_rows.loc[0, "cas"], "000064-17-5")
+        self.assertTrue(errors.empty)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    @patch("src.episuite_io.resolve_epi_name_exact")
+    def test_resolved_name_cas_fallback_preserves_both_query_notes(
+        self, resolve_name, call_api
+    ):
         resolve_name.return_value = {
             "name": "ETHANOL",
             "smiles": "OCC",
             "cas": "000064-17-5",
         }
+        call_api.side_effect = [
+            RuntimeError(
+                "EPI Web Suite 返回 HTTP 404: Could not locate CAS ID, "
+                "try again with SMILES if available"
+            ),
+            ETHANOL_CAS_AND_SMILES_RESPONSE,
+        ]
+
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
+            pd.DataFrame({"compound": ["Ethanol"]}),
+            delay_seconds=0,
+        )
+
+        self.assertEqual(call_api.call_args_list[0].kwargs["cas"], "000064-17-5")
+        self.assertIsNone(call_api.call_args_list[1].kwargs["cas"])
+        for note in (results.loc[0, "query_note"], raw_rows.loc[0, "query_note"]):
+            self.assertIn("名称完全一致", note)
+            self.assertIn("CAS 查询失败，已回退到 SMILES", note)
+        self.assertEqual(raw_rows.loc[0, "smiles"], "OCC")
+        self.assertEqual(raw_rows.loc[0, "cas"], "000064-17-5")
+        self.assertTrue(errors.empty)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    @patch("src.episuite_io.resolve_epi_name_exact")
+    def test_mixed_name_failures_keep_order_and_isolate_rows(self, resolve_name, call_api):
+        def resolve(compound, **kwargs):
+            if compound == "Unknown":
+                raise RuntimeError("没有名称完全一致的 EPI Suite 候选")
+            return {
+                "name": "ETHANOL",
+                "smiles": "OCC",
+                "cas": "000064-17-5",
+            }
+
+        resolve_name.side_effect = resolve
         call_api.return_value = ETHANOL_CAS_AND_SMILES_RESPONSE
         input_df = pd.DataFrame(
             {
-                "compound": ["Name only", "SMILES only", "SMILES and CAS"],
-                "smiles": [pd.NA, "CC", "CCC"],
+                "compound": ["Ethanol", "Unknown", "Direct SMILES"],
+                "smiles": [pd.NA, pd.NA, "CCC"],
                 "cas": [pd.NA, pd.NA, "3-33-3"],
             }
         )
 
-        results, _, errors = episuite_io.run_epi_web_batch(
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
             input_df,
             delay_seconds=0,
             max_workers=3,
@@ -501,10 +561,13 @@ class EPISuiteCasValueTests(unittest.TestCase):
 
         self.assertEqual(
             results["compound"].tolist(),
-            ["Name only", "SMILES only", "SMILES and CAS"],
+            ["Ethanol", "Unknown", "Direct SMILES"],
         )
-        self.assertEqual(resolve_name.call_count, 1)
-        self.assertTrue(errors.empty)
+        self.assertEqual(results["status"].tolist(), ["success", "failed", "success"])
+        self.assertEqual(errors["compound"].tolist(), ["Unknown"])
+        self.assertEqual(raw_rows["compound"].tolist(), ["Ethanol", "Direct SMILES"])
+        self.assertEqual(raw_rows.loc[0, "smiles"], "OCC")
+        self.assertEqual(raw_rows.loc[0, "cas"], "000064-17-5")
 
     @patch("src.episuite_io.call_epi_web_api")
     def test_run_epi_web_batch_keeps_order_and_isolates_parallel_row_failure(self, call_api):

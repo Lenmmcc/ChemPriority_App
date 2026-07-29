@@ -601,7 +601,11 @@ def run_epi_web_batch(
             should_retry=lambda result: (
                 is_transient_query_error(result.error)
                 if result.error is not None
-                else warning_frame_has_transient_error(result.value[-1])
+                else warning_frame_has_transient_error(
+                    result.value[-1]
+                    if isinstance(result.value[-1], pd.DataFrame)
+                    else pd.DataFrame(result.value[-1])
+                )
             ),
         )
 
