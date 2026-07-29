@@ -848,10 +848,8 @@ def run_auto_query_workflow(
                     label,
                 )
 
-        if (
-            not resolution.query_input.empty
-            and not resolution.query_input["smiles"].eq("").all()
-        ):
+        network_query_input = queryable_epi_retry_input(resolution.query_input)
+        if not network_query_input.empty:
             forward_epi_activity = activity_for(
                 "EPI Suite 环境归趋",
                 config.epi_timeout,
@@ -864,7 +862,7 @@ def run_auto_query_workflow(
             epi_value = run_step(
                 "EPI Suite 环境归趋",
                 lambda: run_epi_web_batch(
-                    resolution.query_input,
+                    network_query_input,
                     api_url=config.epi_api_url,
                     timeout=int(config.epi_timeout),
                     delay_seconds=float(config.epi_delay_seconds),
@@ -904,8 +902,13 @@ def run_auto_query_workflow(
         )
         if resolution.query_input.empty:
             record("EPI Suite 环境归趋", "完成", len(epi_results))
-        elif resolution.query_input["smiles"].eq("").all():
-            record("EPI Suite 环境归趋", "跳过", 0, "缺少可用于 EPI 的 SMILES。")
+        elif network_query_input.empty:
+            record(
+                "EPI Suite 环境归趋",
+                "跳过",
+                0,
+                "缺少可用于 EPI 的名称或 SMILES。",
+            )
         elif epi_value is not None:
             record("EPI Suite 环境归趋", "完成", len(epi_results))
         emit_checkpoint("EPI Suite 环境归趋")
@@ -1251,14 +1254,20 @@ def retry_auto_workflow_epi_failures(
 
 
 def queryable_epi_retry_input(retry_input: pd.DataFrame) -> pd.DataFrame:
-    if (
-        not isinstance(retry_input, pd.DataFrame)
-        or retry_input.empty
-        or "smiles" not in retry_input.columns
-    ):
+    if not isinstance(retry_input, pd.DataFrame) or retry_input.empty:
         return pd.DataFrame(columns=getattr(retry_input, "columns", None))
-    queryable = retry_input["smiles"].map(_clean_text).ne("")
-    return retry_input.loc[queryable].copy().reset_index(drop=True)
+
+    smiles = (
+        retry_input["smiles"].map(_clean_text).ne("")
+        if "smiles" in retry_input.columns
+        else pd.Series(False, index=retry_input.index)
+    )
+    compound = (
+        retry_input["compound"].map(_clean_text).ne("")
+        if "compound" in retry_input.columns
+        else pd.Series(False, index=retry_input.index)
+    )
+    return retry_input.loc[smiles | compound].copy().reset_index(drop=True)
 
 
 def build_auto_workflow_workbook(result: AutoWorkflowResult) -> io.BytesIO:

@@ -1564,45 +1564,36 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         )
 
     @patch("src.auto_query_workflow.run_epi_web_batch")
-    def test_retry_epi_queries_only_rows_with_smiles_and_keeps_blank_rows(
-        self,
-        run_epi,
-    ):
+    def test_retry_epi_queries_name_only_and_smiles_rows(self, run_epi):
         original = _result_with_epi_retry_input(
-            ["Queryable B", "Missing SMILES C"]
+            ["Queryable B", "Name only C"]
         )
         for table_name in ("EPI_Results", "EPI_Retry_Input"):
             table = original.tables[table_name].copy()
-            missing = table["compound"].eq("Missing SMILES C")
-            table.loc[missing, ["smiles", "cas"]] = ""
+            name_only = table["compound"].eq("Name only C")
+            table.loc[name_only, ["smiles", "cas"]] = ""
             original.tables[table_name] = table
         run_epi.return_value = (
-            complete_epi_rows(["Queryable B"]),
+            complete_epi_rows(["Queryable B", "Name only C"]),
             pd.DataFrame(),
             pd.DataFrame(),
         )
 
-        retried = retry_auto_workflow_epi_failures(
+        retry_auto_workflow_epi_failures(
             original,
             AutoWorkflowConfig(run_epi=True, epi_delay_seconds=0),
         )
 
         self.assertEqual(
             run_epi.call_args.args[0]["compound"].tolist(),
-            ["Queryable B"],
-        )
-        self.assertEqual(
-            retried.tables["EPI_Retry_Input"]["compound"].tolist(),
-            ["Missing SMILES C"],
+            ["Queryable B", "Name only C"],
         )
 
     @patch("src.auto_query_workflow.run_epi_web_batch")
-    def test_retry_epi_with_only_blank_smiles_does_not_call_batch(
-        self,
-        run_epi,
-    ):
-        original = _result_with_epi_retry_input(["Missing SMILES B"])
+    def test_retry_epi_skips_rows_without_name_or_smiles(self, run_epi):
+        original = _result_with_epi_retry_input([""])
         retry_input = original.tables["EPI_Retry_Input"].copy()
+        retry_input["compound"] = " "
         retry_input["smiles"] = " "
         original.tables["EPI_Retry_Input"] = retry_input
 
@@ -2484,12 +2475,14 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             self.assertEqual(len(table), 3)
             self.assertEqual(table["compound_key"].nunique(), 3)
 
+    @patch("src.auto_query_workflow.run_epi_web_batch")
     @patch("src.auto_query_workflow.run_comptox_use_batch")
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
     def test_workflow_emits_one_checkpoint_per_terminal_step_and_one_final_checkpoint(
         self,
         run_identifier,
         run_comptox,
+        run_epi,
     ):
         run_identifier.return_value = (
             pd.DataFrame(
@@ -2504,6 +2497,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             ),
             pd.DataFrame(),
         )
+        run_epi.return_value = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
         run_comptox.side_effect = RuntimeError("EPA unavailable")
         checkpoints = []
         context = AutoWorkflowCheckpointContext(
@@ -2534,7 +2528,7 @@ class AutoQueryWorkflowTests(unittest.TestCase):
         self.assertEqual(checkpoints[-1].status, "completed")
         self.assertEqual(checkpoints[-1].finished_steps, context.selected_steps)
         status_by_step = result.step_status.set_index("step")["status"].to_dict()
-        self.assertEqual(status_by_step["EPI Suite 环境归趋"], "跳过")
+        self.assertEqual(status_by_step["EPI Suite 环境归趋"], "完成")
         self.assertEqual(status_by_step["EPA CompTox 用途"], "失败")
 
     @patch("src.auto_query_workflow.run_identifier_completion_batch")
@@ -2689,8 +2683,8 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             pd.DataFrame(
                 {
                     "compound": ["Ethanol"],
-                    "smiles": ["CCO"],
-                    "cas": ["64-17-5"],
+                    "smiles": [""],
+                    "cas": [""],
                     "ec": [""],
                     "dtxsid": [""],
                     "echa_id": [""],
@@ -3565,10 +3559,11 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             [button.label for button in app.button],
         )
 
-    def test_page_6_blank_smiles_retry_input_shows_hint_without_button(self):
+    def test_page_6_missing_name_and_smiles_retry_input_shows_hint_without_button(self):
         app = _app_test_with_cached_workbook()
-        original = _result_with_epi_retry_input(["Missing SMILES B"])
+        original = _result_with_epi_retry_input([""])
         retry_input = original.tables["EPI_Retry_Input"].copy()
+        retry_input["compound"] = " "
         retry_input["smiles"] = " "
         original.tables["EPI_Retry_Input"] = retry_input
         app.session_state["auto_query_workflow_result"] = original
