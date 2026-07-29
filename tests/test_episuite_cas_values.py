@@ -237,6 +237,70 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertEqual(second, {"ok": True})
         urlopen.assert_called_once()
 
+    @patch("src.episuite_io.urllib.request.urlopen")
+    def test_call_epi_web_search_uses_sibling_search_endpoint(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = json.dumps(
+            [{"name": "ETHANOL", "smiles": "OCC", "cas": "000064-17-5"}]
+        ).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        with cache_control(False):
+            candidates = episuite_io.call_epi_web_search(
+                " Ethanol ",
+                api_url="https://example.test/api/submit",
+            )
+
+        request = urlopen.call_args.args[0]
+        self.assertIn("/api/search?", request.full_url)
+        self.assertIn("query=Ethanol", request.full_url)
+        self.assertEqual(candidates[0]["cas"], "000064-17-5")
+
+    @patch("src.episuite_io.call_epi_web_search")
+    def test_exact_name_resolution_ignores_case_and_uses_first_exact_candidate(self, search):
+        search.return_value = [
+            {"name": "Ethanol derivative", "smiles": "CCC", "cas": "1-11-1"},
+            {"name": " ETHANOL ", "smiles": "OCC", "cas": "000064-17-5"},
+            {"name": "ethanol", "smiles": "CCO", "cas": "64-17-5"},
+        ]
+
+        resolved = episuite_io.resolve_epi_name_exact("Ethanol")
+
+        self.assertEqual(resolved["name"], "ETHANOL")
+        self.assertEqual(resolved["smiles"], "OCC")
+        self.assertEqual(resolved["cas"], "000064-17-5")
+
+    @patch("src.episuite_io.call_epi_web_search")
+    def test_exact_name_resolution_rejects_fuzzy_only_candidates(self, search):
+        search.return_value = [
+            {"name": "Ethanol derivative", "smiles": "CCC", "cas": "1-11-1"}
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "完全一致"):
+            episuite_io.resolve_epi_name_exact("Ethanol")
+
+    @patch("src.episuite_io.call_epi_web_search")
+    def test_exact_name_resolution_requires_candidate_smiles(self, search):
+        search.return_value = [{"name": "ETHANOL", "smiles": "", "cas": "64-17-5"}]
+
+        with self.assertRaisesRegex(RuntimeError, "SMILES"):
+            episuite_io.resolve_epi_name_exact("Ethanol")
+
+    @patch("src.episuite_io.urllib.request.urlopen")
+    def test_call_epi_web_search_reuses_cached_response(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.read.return_value = b"[]"
+        urlopen.return_value.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with use_cache_path(Path(tmpdir) / "queries.sqlite3"):
+                first = episuite_io.call_epi_web_search("Ethanol")
+                second = episuite_io.call_epi_web_search("Ethanol")
+
+        self.assertEqual(first, [])
+        self.assertEqual(second, [])
+        urlopen.assert_called_once()
+
     def test_extract_epi_web_summary_keeps_selected_estimated_and_experimental_values(self):
         summary = episuite_io.extract_epi_web_summary(
             "Ethanol",

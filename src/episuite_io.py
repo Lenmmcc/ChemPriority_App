@@ -373,6 +373,100 @@ def call_epi_web_api(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, cas=None):
     )
 
 
+def _epi_web_search_url(api_url):
+    parsed = urllib.parse.urlsplit(api_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/submit"):
+        path = f"{path[:-len('/submit')]}/search"
+    else:
+        path = f"{path}/search"
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment)
+    )
+
+
+def call_epi_web_search(
+    query,
+    api_url=DEFAULT_EPI_WEB_API,
+    timeout=90,
+    limit=100,
+):
+    query = _clean_optional_text(query)
+    if not query:
+        return []
+    search_url = _epi_web_search_url(api_url)
+    return cached_call(
+        "epi_web_search",
+        "v1",
+        {"search_url": search_url, "query": query, "limit": int(limit)},
+        lambda: _call_epi_web_search_uncached(
+            query,
+            search_url=search_url,
+            timeout=timeout,
+            limit=limit,
+        ),
+        cache_empty=True,
+    )
+
+
+def _call_epi_web_search_uncached(query, search_url, timeout=90, limit=100):
+    params = urllib.parse.urlencode({"query": query, "limit": int(limit)})
+    separator = "&" if "?" in search_url else "?"
+    request = urllib.request.Request(
+        f"{search_url}{separator}{params}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "ChemPriority EPISuite connector",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"EPI Web Suite 名称搜索返回 HTTP {exc.code}: {body[:300]}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法连接 EPI Web Suite 名称搜索: {exc.reason}") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("EPI Web Suite 名称搜索返回了非列表结果。")
+    return payload
+
+
+def resolve_epi_name_exact(
+    compound,
+    api_url=DEFAULT_EPI_WEB_API,
+    timeout=90,
+):
+    compound = _clean_optional_text(compound)
+    candidates = call_epi_web_search(
+        compound,
+        api_url=api_url,
+        timeout=timeout,
+    )
+    expected = compound.casefold()
+    exact = next(
+        (
+            candidate
+            for candidate in candidates
+            if _clean_optional_text(candidate.get("name")).casefold() == expected
+        ),
+        None,
+    )
+    if exact is None:
+        raise RuntimeError(f"名称“{compound}”没有名称完全一致的 EPI Suite 候选。")
+
+    smiles = _clean_optional_text(exact.get("smiles"))
+    if not smiles:
+        raise RuntimeError(f"名称“{compound}”的精确候选缺少 SMILES。")
+    return {
+        "name": _clean_optional_text(exact.get("name")),
+        "smiles": smiles,
+        "cas": _clean_optional_text(exact.get("cas")),
+    }
+
+
 def _call_epi_web_api_uncached(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, cas=None):
     request_params = {"smiles": smiles}
     cas = _clean_optional_text(cas)
