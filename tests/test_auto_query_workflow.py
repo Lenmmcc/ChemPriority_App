@@ -3575,8 +3575,9 @@ class AutoQueryWorkflowTests(unittest.TestCase):
             "仅重试未完成的 EPI 行",
             [button.label for button in app.button],
         )
-        self.assertTrue(
-            any("SMILES" in message.value for message in app.info)
+        self.assertIn(
+            "未完成的 EPI 行缺少可查询的化合物名称或 SMILES，请先补充名称或结构信息。",
+            [message.value for message in app.info],
         )
 
     def test_page_6_epi_retry_refreshes_exports_and_uses_checkpoint_handler(self):

@@ -1845,7 +1845,9 @@ if result is not None:
     if isinstance(retry_input, pd.DataFrame) and not retry_input.empty:
         retry_query_input = queryable_epi_retry_input(retry_input)
         if retry_query_input.empty:
-            st.info("未完成的 EPI 行缺少可查询的 SMILES，请先补充结构信息。")
+            st.info(
+                "未完成的 EPI 行缺少可查询的化合物名称或 SMILES，请先补充名称或结构信息。"
+            )
         else:
             retry_requested = st.button(
                 "仅重试未完成的 EPI 行",
