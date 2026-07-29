@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -119,6 +120,36 @@ ETHANOL_CAS_AND_SMILES_RESPONSE = {
 
 
 class EPISuiteCasValueTests(unittest.TestCase):
+    def test_name_alias_without_smiles_is_valid_epi_input(self):
+        normalized = episuite_io.normalize_input_columns(
+            pd.DataFrame({"name": [" Ethanol "]})
+        )
+
+        valid, message = episuite_io.validate_input(normalized)
+
+        self.assertTrue(valid, message)
+        self.assertEqual(normalized.loc[0, "compound"], "Ethanol")
+        self.assertNotIn("smiles", normalized.columns)
+
+    def test_name_only_input_zip_contains_query_terms_without_blank_smiles(self):
+        package = episuite_io.build_input_zip(
+            pd.DataFrame({"compound": ["Ethanol", "Benzene"], "smiles": [pd.NA, "c1ccccc1"]})
+        )
+
+        with zipfile.ZipFile(package) as archive:
+            self.assertEqual(
+                archive.read("episuite_query_terms.txt").decode("utf-8"),
+                "Ethanol\nc1ccccc1\n",
+            )
+            self.assertEqual(
+                archive.read("episuite_smiles_only.txt").decode("utf-8"),
+                "c1ccccc1\n",
+            )
+            self.assertIn(
+                "Ethanol",
+                archive.read("episuite_input.csv").decode("utf-8"),
+            )
+
     @patch("src.episuite_io.run_ordered_batch", return_value=[])
     def test_epi_batch_enables_three_transient_failure_rounds(self, runner):
         episuite_io.run_epi_web_batch(

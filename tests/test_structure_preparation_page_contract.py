@@ -16,6 +16,12 @@ def _module_source(name: str) -> str:
 
 
 class StructurePreparationPageContractTests(unittest.TestCase):
+    def test_epi_page_advertises_name_only_input_and_exact_matching(self):
+        source = _page_source("3")
+
+        self.assertIn("name 或 compound", source)
+        self.assertIn("名称完全一致", source)
+
     def test_target_pages_reference_shared_structure_preparation_interfaces(self):
         for prefix in ("3", "4", "6"):
             source = _page_source(prefix)

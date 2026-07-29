@@ -20,8 +20,8 @@ from src.query_retry import (
 from src.query_cache import cache_control, cached_call
 
 
-REQUIRED_COLUMNS = ["compound", "smiles"]
-OPTIONAL_COLUMNS = ["cas"]
+REQUIRED_COLUMNS = ["compound"]
+OPTIONAL_COLUMNS = ["smiles", "cas"]
 
 DEFAULT_EPI_WEB_API = "https://episuite.dev/api/submit"
 
@@ -244,9 +244,9 @@ COLUMN_ALIASES = {
 def make_template_file():
     template_df = pd.DataFrame(
         {
-            "compound": ["example_compound_1", "example_compound_2"],
-            "smiles": ["CCO", "c1ccccc1"],
-            "cas": ["64-17-5", "71-43-2"],
+            "compound": ["Ethanol", "Benzene"],
+            "smiles": ["", "c1ccccc1"],
+            "cas": ["", "71-43-2"],
         }
     )
     buffer = io.BytesIO()
@@ -283,9 +283,9 @@ def validate_input(df):
     if missing_cols:
         return False, f"缺少必要列：{', '.join(missing_cols)}"
 
-    empty_rows = df[REQUIRED_COLUMNS].isna().any(axis=1).sum()
+    empty_rows = df["compound"].isna().sum()
     if empty_rows > 0:
-        return False, f"compound 或 smiles 存在空值，请先处理 {empty_rows} 行不完整数据。"
+        return False, f"compound 存在空值，请先处理 {empty_rows} 行不完整数据。"
 
     duplicated = df["compound"].duplicated().sum()
     if duplicated > 0:
@@ -296,37 +296,50 @@ def validate_input(df):
 
 def build_input_zip(df):
     clean_df = df[input_columns_for_display(df)].copy()
+    if "smiles" not in clean_df.columns:
+        clean_df["smiles"] = pd.NA
+    if "cas" not in clean_df.columns:
+        clean_df["cas"] = pd.NA
+
+    clean_df["compound"] = clean_df["compound"].map(_clean_optional_text)
+    clean_df["smiles"] = clean_df["smiles"].map(_clean_optional_text)
+    clean_df["cas"] = clean_df["cas"].map(_clean_optional_text)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     csv_buffer = io.StringIO()
-    clean_df.to_csv(csv_buffer, index=False)
+    clean_df[["compound", "smiles", "cas"]].to_csv(csv_buffer, index=False)
 
-    smiles_only = "\n".join(clean_df["smiles"].tolist()) + "\n"
-    named_smi = "\n".join(
-        f"{row.smiles}\t{row.compound}" for row in clean_df.itertuples(index=False)
-    ) + "\n"
-    paste_list = "\n".join(clean_df["smiles"].tolist())
+    smiles_rows = clean_df.loc[clean_df["smiles"].ne("")]
+    smiles_only = "".join(f"{value}\n" for value in smiles_rows["smiles"])
+    named_smi = "".join(
+        f"{row.smiles}\t{row.compound}\n"
+        for row in smiles_rows.itertuples(index=False)
+    )
+    paste_list = "\n".join(smiles_rows["smiles"].tolist())
+    query_terms = "".join(
+        f"{row.smiles or row.compound}\n"
+        for row in clean_df.itertuples(index=False)
+    )
 
     readme = "\n".join(
         [
             "EPI Suite input package",
             "",
             "Files:",
-            "- episuite_input.csv: compound, SMILES, and optional CAS table for traceability.",
-            "- episuite_smiles_only.txt: one SMILES per line; safest format for EPI Web Suite paste input.",
-            "- episuite_named.smi: SMILES + compound name separated by tab; useful for cheminformatics tools.",
-            "- episuite_paste_list.txt: SMILES list for direct copy/paste.",
+            "- episuite_input.csv: compound, optional SMILES, and optional CAS.",
+            "- episuite_query_terms.txt: SMILES when available, otherwise the chemical name.",
+            "- episuite_smiles_only.txt: rows that already contain SMILES.",
+            "- episuite_named.smi: available SMILES plus compound names.",
+            "- episuite_paste_list.txt: available SMILES for direct copy/paste.",
             "",
-            "Recommended workflow:",
-            "1. Submit the SMILES list in EPI Suite or EPI Web Suite.",
-            "2. Export or copy the EPI Suite result as CSV, Excel, TXT, or DOC.",
-            "3. Upload that result back to the ChemPriority EPI Suite page for parsing.",
+            "Name-only rows must be resolved to an exact EPI Suite name match.",
         ]
     )
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("episuite_input.csv", csv_buffer.getvalue())
+        zf.writestr("episuite_query_terms.txt", query_terms)
         zf.writestr("episuite_smiles_only.txt", smiles_only)
         zf.writestr("episuite_named.smi", named_smi)
         zf.writestr("episuite_paste_list.txt", paste_list)

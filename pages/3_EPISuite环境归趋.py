@@ -204,7 +204,7 @@ with left_col:
         "上传 Excel 文件",
         type=["xlsx", "xls"],
         key=f"epi_input_file_{input_uploader_epoch}",
-        help="文件至少需要包含 compound 和 smiles 两列；cas 可选。有 cas 时会与 smiles 一起提交，并同时保留估算值与实验/库值。",
+        help="文件只需包含 name 或 compound；smiles、cas 可选。缺少 smiles 时仅接受 EPI Suite 名称完全一致的首个候选。",
     )
 
 with right_col:
@@ -239,7 +239,7 @@ cached_input_bytes = st.session_state.get("epi_input_bytes")
 cached_input_name = st.session_state.get("epi_input_name")
 
 if cached_input_bytes is None:
-    st.info("请先上传包含 compound 和 smiles 的 Excel 文件；cas 可选。")
+    st.info("请先上传至少包含 name 或 compound 的 Excel 文件；smiles、cas 可选。")
     st.stop()
 
 st.success(f"已加载输入文件：{cached_input_name}")
@@ -300,7 +300,8 @@ with tab_predict:
     st.subheader("EPI Web Suite 自动预测")
     st.write(
         "点击后，系统会逐个调用 EPI Web Suite 网页端 API，并把结果整理成表格。"
-        "若输入包含 cas，会同时提交 smiles 与 cas；结果表会同时显示 selected、estimated 和 experimental 值。"
+        "缺少 smiles 时会先按名称搜索，并仅接受名称完全一致的首个候选；"
+        "有 cas 时会同时提交 smiles 与 cas。"
     )
 
     api_url = st.text_input(
@@ -394,10 +395,11 @@ with tab_fallback:
     st.markdown(
         "\n".join(
             [
-                "1. `episuite_smiles_only.txt`：每行一个 SMILES，适合复制到 EPI Web Suite。",
-                "2. `episuite_named.smi`：SMILES 与化合物名称，用于保留名称映射。",
-                "3. `episuite_input.csv`：原始 compound + smiles + 可选 cas 表。",
-                "4. `README.txt`：后续上传结果的说明。",
+                "1. `episuite_query_terms.txt`：优先写入 SMILES；缺少 SMILES 时写入化合物名称。",
+                "2. `episuite_smiles_only.txt`：仅包含已有 SMILES 的行。",
+                "3. `episuite_named.smi`：已有 SMILES 与化合物名称，用于保留名称映射。",
+                "4. `episuite_input.csv`：原始 compound + 可选 smiles + 可选 cas 表。",
+                "5. `README.txt`：名称精确匹配规则与后续上传结果说明。",
             ]
         )
     )
