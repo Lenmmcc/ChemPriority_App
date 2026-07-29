@@ -430,16 +430,81 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
 
     @patch("src.episuite_io.call_epi_web_api")
-    def test_missing_smiles_is_rejected_without_api_call(self, call_api):
-        input_df = pd.DataFrame(
-            {"compound": ["Bad"], "smiles": [pd.NA], "cas": ["1-11-1"]}
+    @patch("src.episuite_io.resolve_epi_name_exact")
+    def test_name_only_row_resolves_and_submits_exact_candidate(self, resolve_name, call_api):
+        resolve_name.return_value = {
+            "name": "ETHANOL",
+            "smiles": "OCC",
+            "cas": "000064-17-5",
+        }
+        call_api.return_value = ETHANOL_CAS_AND_SMILES_RESPONSE
+
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
+            pd.DataFrame({"compound": ["Ethanol"]}),
+            delay_seconds=0,
         )
 
-        results, _, errors = episuite_io.run_epi_web_batch(input_df, delay_seconds=0)
+        resolve_name.assert_called_once_with(
+            "Ethanol",
+            api_url=episuite_io.DEFAULT_EPI_WEB_API,
+            timeout=90,
+        )
+        call_api.assert_called_once_with(
+            "OCC",
+            cas="000064-17-5",
+            api_url=episuite_io.DEFAULT_EPI_WEB_API,
+            timeout=90,
+        )
+        self.assertEqual(results.loc[0, "smiles"], "OCC")
+        self.assertEqual(results.loc[0, "cas"], "000064-17-5")
+        self.assertIn("名称完全一致", results.loc[0, "query_note"])
+        self.assertEqual(raw_rows.loc[0, "smiles"], "OCC")
+        self.assertTrue(errors.empty)
+
+    @patch("src.episuite_io.call_epi_web_api")
+    @patch("src.episuite_io.resolve_epi_name_exact")
+    def test_name_resolution_failure_isolated_without_submit(self, resolve_name, call_api):
+        resolve_name.side_effect = RuntimeError("没有名称完全一致的 EPI Suite 候选")
+
+        results, raw_rows, errors = episuite_io.run_epi_web_batch(
+            pd.DataFrame({"compound": ["Unknown"]}),
+            delay_seconds=0,
+        )
 
         call_api.assert_not_called()
+        self.assertTrue(raw_rows.empty)
         self.assertEqual(results.loc[0, "status"], "failed")
-        self.assertIn("SMILES", errors.loc[0, "error"])
+        self.assertIn("完全一致", errors.loc[0, "error"])
+
+    @patch("src.episuite_io.call_epi_web_api")
+    @patch("src.episuite_io.resolve_epi_name_exact")
+    def test_mixed_name_and_smiles_rows_keep_order(self, resolve_name, call_api):
+        resolve_name.return_value = {
+            "name": "ETHANOL",
+            "smiles": "OCC",
+            "cas": "000064-17-5",
+        }
+        call_api.return_value = ETHANOL_CAS_AND_SMILES_RESPONSE
+        input_df = pd.DataFrame(
+            {
+                "compound": ["Name only", "SMILES only", "SMILES and CAS"],
+                "smiles": [pd.NA, "CC", "CCC"],
+                "cas": [pd.NA, pd.NA, "3-33-3"],
+            }
+        )
+
+        results, _, errors = episuite_io.run_epi_web_batch(
+            input_df,
+            delay_seconds=0,
+            max_workers=3,
+        )
+
+        self.assertEqual(
+            results["compound"].tolist(),
+            ["Name only", "SMILES only", "SMILES and CAS"],
+        )
+        self.assertEqual(resolve_name.call_count, 1)
+        self.assertTrue(errors.empty)
 
     @patch("src.episuite_io.call_epi_web_api")
     def test_run_epi_web_batch_keeps_order_and_isolates_parallel_row_failure(self, call_api):

@@ -504,6 +504,10 @@ def _call_epi_web_api_uncached(smiles, api_url=DEFAULT_EPI_WEB_API, timeout=90, 
         raise RuntimeError(f"无法连接 EPI Web Suite: {exc.reason}") from exc
 
 
+def _join_query_notes(*notes):
+    return "；".join(note for note in notes if _clean_optional_text(note))
+
+
 def run_epi_web_batch(
     input_df,
     api_url=DEFAULT_EPI_WEB_API,
@@ -533,15 +537,28 @@ def run_epi_web_batch(
         row_raw_rows = []
         row_errors = []
         if not smiles:
-            _append_failed_epi_row(
-                row_rows,
-                row_errors,
-                compound,
-                smiles,
-                cas,
-                "缺少有效 SMILES，未向 EPI Web Suite 发送请求。",
+            try:
+                resolved = resolve_epi_name_exact(
+                    compound,
+                    api_url=api_url,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                _append_failed_epi_row(
+                    row_rows,
+                    row_errors,
+                    compound,
+                    smiles,
+                    cas,
+                    f"EPI Suite 名称解析失败：{exc}",
+                )
+                return row_rows, row_raw_rows, row_errors
+            smiles = resolved["smiles"]
+            cas = resolved["cas"]
+            query_note = (
+                f"名称完全一致匹配：{resolved['name']}；"
+                f"已使用解析得到的 SMILES"
             )
-            return row_rows, row_raw_rows, row_errors
         try:
             raw = call_epi_web_api(smiles, cas=cas, api_url=api_url, timeout=timeout)
         except Exception as exc:
@@ -549,7 +566,10 @@ def run_epi_web_batch(
             if cas and _is_cas_fallback_error(error_text):
                 try:
                     raw = call_epi_web_api(smiles, cas=None, api_url=api_url, timeout=timeout)
-                    query_note = f"CAS 查询失败，已回退到 SMILES：{error_text}"
+                    query_note = _join_query_notes(
+                        query_note,
+                        f"CAS 查询失败，已回退到 SMILES：{error_text}",
+                    )
                 except Exception as fallback_exc:
                     fallback_error = f"{error_text}; SMILES 回退失败：{fallback_exc}"
                     _append_failed_epi_row(row_rows, row_errors, compound, smiles, cas, fallback_error)
