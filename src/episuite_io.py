@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.batch_runner import run_ordered_batch
+from src.episuite_display import episuite_property_export_frame
 from src.episuite_properties import build_epi_property_enrichment
 from src.query_retry import (
     is_transient_query_error,
@@ -971,7 +972,12 @@ def build_result_workbook(
         input_df[input_columns_for_display(input_df)].to_excel(writer, sheet_name="Validated_Input", index=False)
         for sheet_name in EPI_WEB_RESULT_SHEETS:
             table = epi_tables.get(sheet_name, pd.DataFrame())
-            table.to_excel(writer, sheet_name=sheet_name, index=False)
+            export_table = (
+                episuite_property_export_frame(table)
+                if sheet_name == "Properties"
+                else table
+            )
+            export_table.to_excel(writer, sheet_name=sheet_name, index=False)
         if raw_df is None and parsed_df is not None and not parsed_df.empty:
             parsed_df.to_excel(writer, sheet_name="Parsed_Raw_Results", index=False)
     buffer.seek(0)

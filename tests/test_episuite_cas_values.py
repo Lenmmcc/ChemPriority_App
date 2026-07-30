@@ -839,6 +839,44 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertIn("ECOSAR_Aquatic_Toxicity", sheets)
         self.assertIn("Raw_API_JSON", sheets)
 
+    def test_workbook_properties_sheet_uses_labels_and_keeps_values_numeric(self):
+        response = self._response_with_koawin_model()
+        input_df = pd.DataFrame(
+            {"compound": ["Ethanol"], "smiles": ["CCO"], "cas": ["64-17-5"]}
+        )
+        raw_rows = pd.DataFrame(
+            [
+                {
+                    "compound": "Ethanol",
+                    "smiles": "CCO",
+                    "cas": "64-17-5",
+                    "raw_json": json.dumps(response),
+                }
+            ]
+        )
+        tables = episuite_io.build_epi_web_result_tables(raw_df=raw_rows)
+
+        workbook_buffer = episuite_io.build_result_workbook(
+            input_df,
+            raw_df=raw_rows,
+            epi_tables=tables,
+        )
+        workbook = load_workbook(workbook_buffer, data_only=True, read_only=True)
+        worksheet = workbook["Properties"]
+        rows = list(worksheet.iter_rows(values_only=True))
+        header = list(rows[0])
+        data = rows[1]
+
+        for column in (
+            "KOW（KOAWIN估算）",
+            "KOA（KOAWIN估算）",
+            "KAW（KOAWIN估算）",
+            "TPSA（Å²，RDKit）",
+            "MR（cm³/mol，RDKit）",
+        ):
+            self.assertIsInstance(data[header.index(column)], (int, float))
+        self.assertNotIn("koawin_kow", header)
+
 
 if __name__ == "__main__":
     unittest.main()
