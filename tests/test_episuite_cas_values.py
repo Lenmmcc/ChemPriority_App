@@ -841,7 +841,7 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertIn("ECOSAR_Aquatic_Toxicity", sheets)
         self.assertIn("Raw_API_JSON", sheets)
 
-    def test_workbook_properties_sheet_uses_labels_and_keeps_values_numeric(self):
+    def test_workbook_properties_sheet_uses_internal_headers_and_numeric_values(self):
         response = self._response_with_koawin_model()
         input_df = pd.DataFrame(
             {"compound": ["Ethanol"], "smiles": ["CCO"], "cas": ["64-17-5"]}
@@ -869,27 +869,38 @@ class EPISuiteCasValueTests(unittest.TestCase):
         header = list(rows[0])
         data = rows[1]
 
-        label_to_internal_column = {
-            "logKOW（KOAWIN估算）": "koawin_log_kow",
-            "KOW（KOAWIN估算）": "koawin_kow",
-            "logKOA（KOAWIN估算）": "koawin_log_koa",
-            "KOA（KOAWIN估算）": "koawin_koa",
-            "logKAW（KOAWIN估算）": "koawin_log_kaw",
-            "KAW（KOAWIN估算）": "koawin_kaw",
-            "TPSA（Å²，RDKit）": "tpsa_rdkit_a2",
-            "MR（cm³/mol，RDKit）": "mr_rdkit_cm3_mol",
+        retained_columns = (
+            "koawin_log_kaw",
+            "tpsa_rdkit_a2",
+            "mr_rdkit_cm3_mol",
+        )
+        removed_headers = {
+            "koawin_log_kow",
+            "koawin_kow",
+            "koawin_log_koa",
+            "koawin_koa",
+            "koawin_kaw",
+            "logKOW（KOAWIN估算）",
+            "KOW（KOAWIN估算）",
+            "logKOA（KOAWIN估算）",
+            "KOA（KOAWIN估算）",
+            "logKAW（KOAWIN估算）",
+            "KAW（KOAWIN估算）",
+            "TPSA（Å²，RDKit）",
+            "MR（cm³/mol，RDKit）",
         }
         properties = tables["Properties"]
-        for label, internal_column in label_to_internal_column.items():
-            self.assertIn(label, header)
-            self.assertNotIn(internal_column, header)
-            workbook_value = data[header.index(label)]
+        for column in retained_columns:
+            self.assertIn(column, header)
+            workbook_value = data[header.index(column)]
             self.assertIsInstance(workbook_value, (int, float))
             self.assertAlmostEqual(
                 workbook_value,
-                properties.loc[0, internal_column],
+                properties.loc[0, column],
                 places=14,
             )
+        for removed_header in removed_headers:
+            self.assertNotIn(removed_header, header)
 
 
 if __name__ == "__main__":

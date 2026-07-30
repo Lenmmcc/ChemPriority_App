@@ -30,7 +30,6 @@ from src.episuite_io import (  # noqa: E402
     slim_epi_report_columns,
     validate_input,
 )
-from src.episuite_display import episuite_property_column_config  # noqa: E402
 from src.episuite_result_pool import (  # noqa: E402
     build_api_epi_pool_payload,
     build_uploaded_epi_pool_payload,
@@ -155,17 +154,9 @@ def render_epi_web_tables(epi_tables):
         table = epi_tables.get(sheet_name)
         with tab:
             if table is not None and not table.empty:
-                column_config = (
-                    episuite_property_column_config(
-                        table,
-                        st.column_config.NumberColumn,
-                    )
-                    if sheet_name == "Properties"
-                    else {}
-                )
                 st.dataframe(
                     table,
-                    column_config=column_config,
+                    hide_index=True,
                     width="stretch",
                 )
             else:
@@ -175,7 +166,11 @@ def render_epi_web_tables(epi_tables):
     if raw_table is not None and not raw_table.empty:
         with st.expander("审计数据：Raw API JSON", expanded=False):
             preview_cols = [col for col in ["compound", "smiles", "cas", "epi_cas", "epi_smiles", "raw_json"] if col in raw_table.columns]
-            st.dataframe(raw_table[preview_cols], width="stretch")
+            st.dataframe(
+                raw_table[preview_cols],
+                hide_index=True,
+                width="stretch",
+            )
 
 
 def render_structure_preparation_summary(prepared_df):
