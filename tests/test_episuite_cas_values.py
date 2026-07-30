@@ -867,20 +867,27 @@ class EPISuiteCasValueTests(unittest.TestCase):
         header = list(rows[0])
         data = rows[1]
 
-        expected_labels = {
-            "koawin_log_kow": "logKOW（KOAWIN估算）",
-            "koawin_kow": "KOW（KOAWIN估算）",
-            "koawin_log_koa": "logKOA（KOAWIN估算）",
-            "koawin_koa": "KOA（KOAWIN估算）",
-            "koawin_log_kaw": "logKAW（KOAWIN估算）",
-            "koawin_kaw": "KAW（KOAWIN估算）",
-            "tpsa_rdkit_a2": "TPSA（Å²，RDKit）",
-            "mr_rdkit_cm3_mol": "MR（cm³/mol，RDKit）",
+        label_to_internal_column = {
+            "logKOW（KOAWIN估算）": "koawin_log_kow",
+            "KOW（KOAWIN估算）": "koawin_kow",
+            "logKOA（KOAWIN估算）": "koawin_log_koa",
+            "KOA（KOAWIN估算）": "koawin_koa",
+            "logKAW（KOAWIN估算）": "koawin_log_kaw",
+            "KAW（KOAWIN估算）": "koawin_kaw",
+            "TPSA（Å²，RDKit）": "tpsa_rdkit_a2",
+            "MR（cm³/mol，RDKit）": "mr_rdkit_cm3_mol",
         }
-        for internal_column, label in expected_labels.items():
+        properties = tables["Properties"]
+        for label, internal_column in label_to_internal_column.items():
             self.assertIn(label, header)
             self.assertNotIn(internal_column, header)
-            self.assertIsInstance(data[header.index(label)], (int, float))
+            workbook_value = data[header.index(label)]
+            self.assertIsInstance(workbook_value, (int, float))
+            self.assertAlmostEqual(
+                workbook_value,
+                properties.loc[0, internal_column],
+                places=14,
+            )
 
 
 if __name__ == "__main__":
