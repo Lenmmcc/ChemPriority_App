@@ -867,15 +867,20 @@ class EPISuiteCasValueTests(unittest.TestCase):
         header = list(rows[0])
         data = rows[1]
 
-        for column in (
-            "KOW（KOAWIN估算）",
-            "KOA（KOAWIN估算）",
-            "KAW（KOAWIN估算）",
-            "TPSA（Å²，RDKit）",
-            "MR（cm³/mol，RDKit）",
-        ):
-            self.assertIsInstance(data[header.index(column)], (int, float))
-        self.assertNotIn("koawin_kow", header)
+        expected_labels = {
+            "koawin_log_kow": "logKOW（KOAWIN估算）",
+            "koawin_kow": "KOW（KOAWIN估算）",
+            "koawin_log_koa": "logKOA（KOAWIN估算）",
+            "koawin_koa": "KOA（KOAWIN估算）",
+            "koawin_log_kaw": "logKAW（KOAWIN估算）",
+            "koawin_kaw": "KAW（KOAWIN估算）",
+            "tpsa_rdkit_a2": "TPSA（Å²，RDKit）",
+            "mr_rdkit_cm3_mol": "MR（cm³/mol，RDKit）",
+        }
+        for internal_column, label in expected_labels.items():
+            self.assertIn(label, header)
+            self.assertNotIn(internal_column, header)
+            self.assertIsInstance(data[header.index(label)], (int, float))
 
 
 if __name__ == "__main__":
