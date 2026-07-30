@@ -694,6 +694,15 @@ class EPISuiteCasValueTests(unittest.TestCase):
         ]
         positions = [properties.columns.get_loc(name) for name in expected_columns]
         self.assertEqual(positions, list(range(positions[0], positions[0] + 8)))
+        for column in expected_columns:
+            self.assertIn(column, properties.columns)
+            for sheet_name in episuite_io.EPI_WEB_RESULT_SHEETS:
+                if sheet_name != "Properties":
+                    self.assertNotIn(
+                        column,
+                        tables[sheet_name].columns,
+                        msg=f"{column} leaked into {sheet_name}",
+                    )
         self.assertAlmostEqual(properties.loc[0, "tpsa_rdkit_a2"], 20.23)
         self.assertAlmostEqual(properties.loc[0, "mr_rdkit_cm3_mol"], 12.7598)
         self.assertTrue(
@@ -702,9 +711,6 @@ class EPISuiteCasValueTests(unittest.TestCase):
                 math.log10(properties.loc[0, "koawin_kaw"]),
             )
         )
-        self.assertNotIn("koawin_kow", tables["Core_Summary"].columns)
-        self.assertNotIn("tpsa_rdkit_a2", tables["Core_Summary"].columns)
-        self.assertNotIn("tpsa_rdkit_a2", tables["Raw_API_JSON"].columns)
         self.assertEqual(
             json.loads(tables["Raw_API_JSON"].loc[0, "raw_json"]),
             response,
@@ -725,14 +731,93 @@ class EPISuiteCasValueTests(unittest.TestCase):
                 }
             ]
         )
+        existing_warning = {
+            "compound": "Existing compound",
+            "smiles": "CCC",
+            "cas": "111-11-1",
+            "warning": "已有警告",
+        }
 
-        tables = episuite_io.build_epi_web_result_tables(raw_df=raw_rows)
+        tables = episuite_io.build_epi_web_result_tables(
+            raw_df=raw_rows,
+            warnings_df=pd.DataFrame([existing_warning]),
+        )
 
         self.assertEqual(len(tables["Properties"]), 1)
-        self.assertTrue(pd.isna(tables["Properties"].loc[0, "tpsa_rdkit_a2"]))
+        for column in ("tpsa_rdkit_a2", "mr_rdkit_cm3_mol"):
+            self.assertTrue(pd.isna(tables["Properties"].loc[0, column]))
+
+        warnings = tables["Warnings"]
+        retained = warnings.loc[warnings["warning"].eq(existing_warning["warning"])]
         self.assertEqual(
-            tables["Warnings"].loc[0, "warning"],
-            "RDKit 描述符未计算：SMILES 无法解析",
+            retained[["compound", "smiles", "cas", "warning"]].to_dict("records"),
+            [existing_warning],
+        )
+        descriptor_warning = warnings.loc[
+            warnings["warning"].eq("RDKit 描述符未计算：SMILES 无法解析")
+        ]
+        self.assertEqual(
+            descriptor_warning[
+                ["compound", "smiles", "cas", "warning"]
+            ].to_dict("records"),
+            [
+                {
+                    "compound": "Broken structure",
+                    "smiles": "",
+                    "cas": "",
+                    "warning": "RDKit 描述符未计算：SMILES 无法解析",
+                }
+            ],
+        )
+
+    def test_koawin_inconsistency_warning_keeps_identity_and_existing_warnings(self):
+        response = self._response_with_koawin_model()
+        response["logKoa"]["estimatedValue"]["model"]["koa"] *= 2
+        raw_rows = pd.DataFrame(
+            [
+                {
+                    "compound": "Inconsistent partition",
+                    "smiles": "CCO",
+                    "cas": "64-17-5",
+                    "raw_json": json.dumps(response),
+                }
+            ]
+        )
+        existing_warning = {
+            "compound": "Existing compound",
+            "smiles": "CCC",
+            "cas": "111-11-1",
+            "warning": "已有警告",
+        }
+
+        tables = episuite_io.build_epi_web_result_tables(
+            raw_df=raw_rows,
+            warnings_df=pd.DataFrame([existing_warning]),
+        )
+
+        warnings = tables["Warnings"]
+        retained = warnings.loc[warnings["warning"].eq(existing_warning["warning"])]
+        self.assertEqual(
+            retained[["compound", "smiles", "cas", "warning"]].to_dict("records"),
+            [existing_warning],
+        )
+        coefficient_warning = warnings.loc[
+            warnings["warning"].eq(
+                "KOAWIN 原始系数关系不一致：KOA != KOW / KAW"
+            )
+        ]
+        self.assertEqual(
+            coefficient_warning[
+                ["compound", "smiles", "cas", "warning"]
+            ].to_dict("records"),
+            [
+                {
+                    "compound": "Inconsistent partition",
+                    "smiles": "CCO",
+                    "cas": "64-17-5",
+                    "warning": "KOAWIN 原始系数关系不一致：KOA != KOW / KAW",
+                }
+            ],
         )
 
     @patch("src.episuite_io.call_epi_web_api")
