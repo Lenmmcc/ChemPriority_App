@@ -252,12 +252,13 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
         self.assertIsNone(fields["mr_rdkit_cm3_mol"])
         self.assertEqual(warnings, ["RDKit 描述符未计算：缺少可用 SMILES"])
 
-    def test_combined_enrichment_preserves_column_order(self):
+    def test_public_enrichment_exposes_only_unique_partition_and_rdkit_fields(self):
         data = {
             "chemicalProperties": {"smiles": "CCO"},
             "logKow": {"estimatedValue": {"value": 3.0}},
             "logKoa": {
                 "estimatedValue": {
+                    "value": 5.0,
                     "model": {
                         "kow": 1000.0,
                         "kaw": 0.01,
@@ -271,10 +272,20 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
         fields, warnings = build_epi_property_enrichment(data)
 
         self.assertEqual(
-            tuple(fields)[-2:],
-            ("tpsa_rdkit_a2", "mr_rdkit_cm3_mol"),
+            list(fields),
+            ["koawin_log_kaw", "tpsa_rdkit_a2", "mr_rdkit_cm3_mol"],
         )
-        self.assertAlmostEqual(fields["tpsa_rdkit_a2"], 20.23, places=6)
+        self.assertEqual(fields["koawin_log_kaw"], -2.0)
+        self.assertAlmostEqual(fields["tpsa_rdkit_a2"], 20.23)
+        self.assertAlmostEqual(fields["mr_rdkit_cm3_mol"], 12.7598)
+        for removed in (
+            "koawin_log_kow",
+            "koawin_kow",
+            "koawin_log_koa",
+            "koawin_koa",
+            "koawin_kaw",
+        ):
+            self.assertNotIn(removed, fields)
         self.assertEqual(warnings, [])
 
     def test_combined_enrichment_falls_back_to_epi_smiles_before_input_smiles(self):

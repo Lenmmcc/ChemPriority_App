@@ -665,7 +665,7 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertEqual(tables["ECOSAR_Aquatic_Toxicity"].loc[0, "endpoint"], "LC50")
         self.assertIn("raw_json", tables["Raw_API_JSON"].columns)
 
-    def test_properties_include_partition_pairs_and_rdkit_descriptors(self):
+    def test_properties_include_only_unique_partition_log_and_rdkit_descriptors(self):
         response = self._response_with_koawin_model()
         raw_rows = pd.DataFrame(
             [
@@ -682,35 +682,37 @@ class EPISuiteCasValueTests(unittest.TestCase):
         tables = episuite_io.build_epi_web_result_tables(raw_df=raw_rows)
         properties = tables["Properties"]
 
-        expected_columns = [
+        retained_columns = [
+            "koawin_log_kaw",
+            "tpsa_rdkit_a2",
+            "mr_rdkit_cm3_mol",
+        ]
+        removed_columns = {
             "koawin_log_kow",
             "koawin_kow",
             "koawin_log_koa",
             "koawin_koa",
-            "koawin_log_kaw",
             "koawin_kaw",
-            "tpsa_rdkit_a2",
-            "mr_rdkit_cm3_mol",
-        ]
-        positions = [properties.columns.get_loc(name) for name in expected_columns]
-        self.assertEqual(positions, list(range(positions[0], positions[0] + 8)))
-        for column in expected_columns:
-            self.assertIn(column, properties.columns)
-            for sheet_name in episuite_io.EPI_WEB_RESULT_SHEETS:
-                if sheet_name != "Properties":
-                    self.assertNotIn(
-                        column,
-                        tables[sheet_name].columns,
-                        msg=f"{column} leaked into {sheet_name}",
-                    )
+        }
+        positions = [properties.columns.get_loc(name) for name in retained_columns]
+        self.assertEqual(positions, list(range(positions[0], positions[0] + 3)))
+        self.assertEqual(
+            properties.loc[0, "log_kow_estimated"],
+            response["logKow"]["estimatedValue"]["value"],
+        )
+        self.assertEqual(
+            properties.loc[0, "log_koa_estimated"],
+            response["logKoa"]["estimatedValue"]["value"],
+        )
+        self.assertAlmostEqual(
+            properties.loc[0, "koawin_log_kaw"],
+            math.log10(response["logKoa"]["estimatedValue"]["model"]["kaw"]),
+        )
         self.assertAlmostEqual(properties.loc[0, "tpsa_rdkit_a2"], 20.23)
         self.assertAlmostEqual(properties.loc[0, "mr_rdkit_cm3_mol"], 12.7598)
-        self.assertTrue(
-            math.isclose(
-                properties.loc[0, "koawin_log_kaw"],
-                math.log10(properties.loc[0, "koawin_kaw"]),
-            )
-        )
+        for table_name, table in tables.items():
+            for column in removed_columns:
+                self.assertNotIn(column, table.columns, table_name)
         self.assertEqual(
             json.loads(tables["Raw_API_JSON"].loc[0, "raw_json"]),
             response,
