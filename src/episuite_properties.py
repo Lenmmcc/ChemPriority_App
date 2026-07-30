@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import math
 
+from rdkit import Chem
+from rdkit.Chem import Crippen, rdMolDescriptors
+
 
 PARTITION_COLUMN_ORDER = (
     "koawin_log_kow",
@@ -106,3 +109,58 @@ def extract_koawin_partition_fields(data: dict):
         "koawin_kaw": coefficients["kaw"],
     }
     return fields, warnings
+
+
+def _clean_smiles(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"", "nan", "none", "<na>"} else text
+
+
+def calculate_rdkit_descriptor_fields(
+    api_smiles=None,
+    epi_smiles=None,
+    input_smiles=None,
+):
+    fields = {
+        "tpsa_rdkit_a2": None,
+        "mr_rdkit_cm3_mol": None,
+    }
+    smiles = next(
+        (
+            cleaned
+            for cleaned in (
+                _clean_smiles(api_smiles),
+                _clean_smiles(epi_smiles),
+                _clean_smiles(input_smiles),
+            )
+            if cleaned
+        ),
+        "",
+    )
+    if not smiles:
+        return fields, ["RDKit 描述符未计算：缺少可用 SMILES"]
+
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        return fields, ["RDKit 描述符未计算：SMILES 无法解析"]
+
+    fields["tpsa_rdkit_a2"] = float(rdMolDescriptors.CalcTPSA(molecule))
+    fields["mr_rdkit_cm3_mol"] = float(Crippen.MolMR(molecule))
+    return fields, []
+
+
+def build_epi_property_enrichment(data: dict, epi_smiles=None, input_smiles=None):
+    partition_fields, partition_warnings = extract_koawin_partition_fields(data)
+    chemical = data.get("chemicalProperties", {})
+    api_smiles = chemical.get("smiles") if isinstance(chemical, dict) else None
+    descriptor_fields, descriptor_warnings = calculate_rdkit_descriptor_fields(
+        api_smiles=api_smiles,
+        epi_smiles=epi_smiles,
+        input_smiles=input_smiles,
+    )
+    return (
+        {**partition_fields, **descriptor_fields},
+        [*partition_warnings, *descriptor_warnings],
+    )
