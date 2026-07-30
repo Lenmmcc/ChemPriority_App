@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from rdkit import Chem
+from rdkit import Chem, rdBase
 from rdkit.Chem import Crippen, rdMolDescriptors
 
 
@@ -142,7 +142,8 @@ def calculate_rdkit_descriptor_fields(
     if not smiles:
         return fields, ["RDKit 描述符未计算：缺少可用 SMILES"]
 
-    molecule = Chem.MolFromSmiles(smiles)
+    with rdBase.BlockLogs():
+        molecule = Chem.MolFromSmiles(smiles)
     if molecule is None:
         return fields, ["RDKit 描述符未计算：SMILES 无法解析"]
 

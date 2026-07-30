@@ -1,5 +1,9 @@
+import contextlib
+import io
 import math
 import unittest
+
+from rdkit import rdBase
 
 from src.episuite_properties import (
     build_epi_property_enrichment,
@@ -129,15 +133,22 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_invalid_smiles_leaves_descriptors_empty_and_warns(self):
-        fields, warnings = calculate_rdkit_descriptor_fields(
-            api_smiles="not-a-smiles",
-            epi_smiles=None,
-            input_smiles=None,
-        )
+        stream = io.StringIO()
+        rdBase.LogToPythonStderr()
+        try:
+            with contextlib.redirect_stderr(stream):
+                fields, warnings = calculate_rdkit_descriptor_fields(
+                    api_smiles="not-a-smiles",
+                    epi_smiles=None,
+                    input_smiles=None,
+                )
+        finally:
+            rdBase.LogToCppStreams()
 
         self.assertIsNone(fields["tpsa_rdkit_a2"])
         self.assertIsNone(fields["mr_rdkit_cm3_mol"])
         self.assertEqual(warnings, ["RDKit 描述符未计算：SMILES 无法解析"])
+        self.assertEqual(stream.getvalue(), "")
 
     def test_missing_smiles_leaves_descriptors_empty_and_warns(self):
         fields, warnings = calculate_rdkit_descriptor_fields()
@@ -169,6 +180,17 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
             ("tpsa_rdkit_a2", "mr_rdkit_cm3_mol"),
         )
         self.assertAlmostEqual(fields["tpsa_rdkit_a2"], 20.23, places=6)
+        self.assertEqual(warnings, [])
+
+    def test_combined_enrichment_falls_back_to_epi_smiles_before_input_smiles(self):
+        fields, warnings = build_epi_property_enrichment(
+            {"chemicalProperties": {}},
+            epi_smiles="CC",
+            input_smiles="CCO",
+        )
+
+        self.assertEqual(fields["tpsa_rdkit_a2"], 0.0)
+        self.assertAlmostEqual(fields["mr_rdkit_cm3_mol"], 11.348, places=6)
         self.assertEqual(warnings, [])
 
 
