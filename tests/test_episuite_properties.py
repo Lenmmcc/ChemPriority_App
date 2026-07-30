@@ -69,6 +69,43 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
         self.assertIsNone(fields["koawin_log_kaw"])
         self.assertEqual(warnings, [])
 
+    def test_missing_kow_with_out_of_range_finite_log_stays_missing(self):
+        for direct_log in (-400.0, 400.0):
+            with self.subTest(direct_log=direct_log):
+                data = {
+                    "logKow": {"estimatedValue": {"value": direct_log}},
+                    "logKoa": {"estimatedValue": {"model": {}}},
+                }
+
+                try:
+                    fields, warnings = extract_koawin_partition_fields(data)
+                except ValueError as error:
+                    self.fail(f"finite logKOW must not raise ValueError: {error}")
+
+                self.assertIsNone(fields["koawin_kow"])
+                self.assertIsNone(fields["koawin_log_kow"])
+                self.assertEqual(warnings, [])
+
+    def test_missing_koa_with_out_of_range_finite_log_stays_missing(self):
+        for direct_log in (-400.0, 400.0):
+            with self.subTest(direct_log=direct_log):
+                data = {
+                    "logKoa": {
+                        "estimatedValue": {
+                            "model": {"logKoa": direct_log},
+                        }
+                    },
+                }
+
+                try:
+                    fields, warnings = extract_koawin_partition_fields(data)
+                except ValueError as error:
+                    self.fail(f"finite logKOA must not raise ValueError: {error}")
+
+                self.assertIsNone(fields["koawin_koa"])
+                self.assertIsNone(fields["koawin_log_koa"])
+                self.assertEqual(warnings, [])
+
     def test_present_invalid_kow_is_not_recovered_from_valid_log_kow(self):
         for invalid_coefficient in (0.0, -1.0, float("inf"), "not-a-number"):
             with self.subTest(invalid_coefficient=invalid_coefficient):

@@ -57,7 +57,11 @@ def _coefficient_and_log(coefficient, direct_log):
             coefficient_value = 10.0 ** log_value
         except OverflowError:
             coefficient_value = None
-    if coefficient_value is None or not math.isfinite(coefficient_value):
+    if (
+        coefficient_value is None
+        or not math.isfinite(coefficient_value)
+        or coefficient_value <= 0
+    ):
         return None, None
     return coefficient_value, math.log10(coefficient_value)
 
