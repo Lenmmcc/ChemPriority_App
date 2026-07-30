@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.batch_runner import run_ordered_batch
+from src.episuite_properties import build_epi_property_enrichment
 from src.query_retry import (
     is_transient_query_error,
     transient_retry_delay,
@@ -904,16 +905,34 @@ def build_epi_web_result_tables(core_df=None, raw_df=None, warnings_df=None):
     bioaccumulation_rows = []
     ecosar_rows = []
     metadata_rows = []
+    property_warning_rows = []
 
     for _, raw_row in raw.iterrows():
         data = _parse_raw_json(raw_row.get("raw_json"))
         base = _base_epi_identity(raw_row, data)
-        properties_rows.append(_build_properties_row(base, data))
+        properties_row, property_warnings = _build_properties_row(base, data)
+        properties_rows.append(properties_row)
+        for warning in property_warnings:
+            property_warning_rows.append(
+                {
+                    "compound": base.get("compound"),
+                    "smiles": base.get("smiles"),
+                    "cas": base.get("cas"),
+                    "warning": warning,
+                }
+            )
         degradation_rows.append(_build_degradation_row(base, data))
         fate_rows.append(_build_fate_transport_row(base, data))
         bioaccumulation_rows.append(_build_bioaccumulation_row(base, data))
         ecosar_rows.extend(_build_ecosar_rows(base, data))
         metadata_rows.extend(_build_metadata_rows(base, data))
+
+    if property_warning_rows:
+        warnings = pd.concat(
+            [warnings, pd.DataFrame(property_warning_rows)],
+            ignore_index=True,
+            sort=False,
+        )
 
     return {
         "Core_Summary": core,
@@ -1036,7 +1055,13 @@ def _build_properties_row(base, data):
             "dermal_lag_time": _value_at(data, "dermalPermeability.lagTime.value"),
         }
     )
-    return row
+    enrichment, warnings = build_epi_property_enrichment(
+        data,
+        epi_smiles=base.get("epi_smiles"),
+        input_smiles=base.get("smiles"),
+    )
+    row.update(enrichment)
+    return row, warnings
 
 
 def _build_degradation_row(base, data):

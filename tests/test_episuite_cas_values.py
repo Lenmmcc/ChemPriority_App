@@ -1,4 +1,6 @@
+import copy
 import json
+import math
 import tempfile
 import unittest
 import urllib.parse
@@ -121,6 +123,32 @@ ETHANOL_CAS_AND_SMILES_RESPONSE = {
 
 
 class EPISuiteCasValueTests(unittest.TestCase):
+    def _response_with_koawin_model(self):
+        response = copy.deepcopy(ETHANOL_CAS_AND_SMILES_RESPONSE)
+        kow = 10.0 ** response["logKow"]["estimatedValue"]["value"]
+        kaw = 0.001
+        koa = kow / kaw
+        response["logKoa"] = {
+            "selectedValue": {
+                "value": math.log10(koa),
+                "units": "",
+                "valueType": "ESTIMATED",
+            },
+            "estimatedValue": {
+                "value": math.log10(koa),
+                "units": "",
+                "valueType": "ESTIMATED",
+                "model": {
+                    "kow": kow,
+                    "kaw": kaw,
+                    "koa": koa,
+                    "logKoa": math.log10(koa),
+                },
+            },
+            "experimentalValues": [],
+        }
+        return response
+
     def test_name_alias_without_smiles_is_valid_epi_input(self):
         normalized = episuite_io.normalize_input_columns(
             pd.DataFrame({"name": [" Ethanol "]})
@@ -636,6 +664,76 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertEqual(len(tables["ECOSAR_Aquatic_Toxicity"]), 2)
         self.assertEqual(tables["ECOSAR_Aquatic_Toxicity"].loc[0, "endpoint"], "LC50")
         self.assertIn("raw_json", tables["Raw_API_JSON"].columns)
+
+    def test_properties_include_partition_pairs_and_rdkit_descriptors(self):
+        response = self._response_with_koawin_model()
+        raw_rows = pd.DataFrame(
+            [
+                {
+                    "compound": "Ethanol",
+                    "smiles": "CC",
+                    "cas": "64-17-5",
+                    "epi_smiles": "c1ccccc1",
+                    "raw_json": json.dumps(response),
+                }
+            ]
+        )
+
+        tables = episuite_io.build_epi_web_result_tables(raw_df=raw_rows)
+        properties = tables["Properties"]
+
+        expected_columns = [
+            "koawin_log_kow",
+            "koawin_kow",
+            "koawin_log_koa",
+            "koawin_koa",
+            "koawin_log_kaw",
+            "koawin_kaw",
+            "tpsa_rdkit_a2",
+            "mr_rdkit_cm3_mol",
+        ]
+        positions = [properties.columns.get_loc(name) for name in expected_columns]
+        self.assertEqual(positions, list(range(positions[0], positions[0] + 8)))
+        self.assertAlmostEqual(properties.loc[0, "tpsa_rdkit_a2"], 20.23)
+        self.assertAlmostEqual(properties.loc[0, "mr_rdkit_cm3_mol"], 12.7598)
+        self.assertTrue(
+            math.isclose(
+                properties.loc[0, "koawin_log_kaw"],
+                math.log10(properties.loc[0, "koawin_kaw"]),
+            )
+        )
+        self.assertNotIn("koawin_kow", tables["Core_Summary"].columns)
+        self.assertNotIn("tpsa_rdkit_a2", tables["Core_Summary"].columns)
+        self.assertNotIn("tpsa_rdkit_a2", tables["Raw_API_JSON"].columns)
+        self.assertEqual(
+            json.loads(tables["Raw_API_JSON"].loc[0, "raw_json"]),
+            response,
+        )
+        self.assertTrue(tables["Warnings"].empty)
+
+    def test_descriptor_failure_is_added_to_warnings_without_dropping_properties(self):
+        response = self._response_with_koawin_model()
+        response["chemicalProperties"]["smiles"] = "not-a-smiles"
+        raw_rows = pd.DataFrame(
+            [
+                {
+                    "compound": "Broken structure",
+                    "smiles": "",
+                    "cas": "",
+                    "epi_smiles": "",
+                    "raw_json": json.dumps(response),
+                }
+            ]
+        )
+
+        tables = episuite_io.build_epi_web_result_tables(raw_df=raw_rows)
+
+        self.assertEqual(len(tables["Properties"]), 1)
+        self.assertTrue(pd.isna(tables["Properties"].loc[0, "tpsa_rdkit_a2"]))
+        self.assertEqual(
+            tables["Warnings"].loc[0, "warning"],
+            "RDKit 描述符未计算：SMILES 无法解析",
+        )
 
     @patch("src.episuite_io.call_epi_web_api")
     def test_result_workbook_writes_category_tables_and_raw_json(self, call_api):
