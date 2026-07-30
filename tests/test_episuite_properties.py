@@ -69,6 +69,64 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
         self.assertIsNone(fields["koawin_log_kaw"])
         self.assertEqual(warnings, [])
 
+    def test_present_invalid_kow_is_not_recovered_from_valid_log_kow(self):
+        for invalid_coefficient in (0.0, -1.0, float("inf"), "not-a-number"):
+            with self.subTest(invalid_coefficient=invalid_coefficient):
+                data = {
+                    "logKow": {"estimatedValue": {"value": 2.0}},
+                    "logKoa": {
+                        "estimatedValue": {
+                            "model": {"kow": invalid_coefficient},
+                        }
+                    },
+                }
+
+                fields, warnings = extract_koawin_partition_fields(data)
+
+                self.assertIsNone(fields["koawin_kow"])
+                self.assertIsNone(fields["koawin_log_kow"])
+                self.assertEqual(warnings, [])
+
+    def test_present_invalid_koa_is_not_recovered_from_valid_log_koa(self):
+        for invalid_coefficient in (0.0, -1.0, float("inf"), "not-a-number"):
+            with self.subTest(invalid_coefficient=invalid_coefficient):
+                data = {
+                    "logKoa": {
+                        "estimatedValue": {
+                            "model": {
+                                "koa": invalid_coefficient,
+                                "logKoa": 4.0,
+                            },
+                        }
+                    },
+                }
+
+                fields, warnings = extract_koawin_partition_fields(data)
+
+                self.assertIsNone(fields["koawin_koa"])
+                self.assertIsNone(fields["koawin_log_koa"])
+                self.assertEqual(warnings, [])
+
+    def test_present_invalid_kaw_stays_missing_and_ignores_unrelated_log_kaw(self):
+        for invalid_coefficient in (0.0, -1.0, float("inf"), "not-a-number"):
+            with self.subTest(invalid_coefficient=invalid_coefficient):
+                data = {
+                    "logKoa": {
+                        "estimatedValue": {
+                            "model": {
+                                "kaw": invalid_coefficient,
+                                "logKaw": -2.0,
+                            },
+                        }
+                    },
+                }
+
+                fields, warnings = extract_koawin_partition_fields(data)
+
+                self.assertIsNone(fields["koawin_kaw"])
+                self.assertIsNone(fields["koawin_log_kaw"])
+                self.assertEqual(warnings, [])
+
     def test_preserves_inconsistent_api_coefficients_and_warns(self):
         data = {
             "logKow": {"estimatedValue": {"value": 2.0}},

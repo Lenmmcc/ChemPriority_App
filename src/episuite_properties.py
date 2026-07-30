@@ -16,6 +16,7 @@ PARTITION_COLUMN_ORDER = (
 )
 COEFFICIENT_REL_TOL = 1e-9
 LOG_ABS_TOL = 1e-9
+_MISSING = object()
 
 
 def _nested_value(data, *keys):
@@ -43,9 +44,15 @@ def _positive_float(value):
 
 
 def _coefficient_and_log(coefficient, direct_log):
-    coefficient_value = _positive_float(coefficient)
+    if coefficient is not _MISSING:
+        coefficient_value = _positive_float(coefficient)
+        if coefficient_value is None:
+            return None, None
+        return coefficient_value, math.log10(coefficient_value)
+
     log_value = _finite_float(direct_log)
-    if coefficient_value is None and log_value is not None:
+    coefficient_value = None
+    if log_value is not None:
         try:
             coefficient_value = 10.0 ** log_value
         except OverflowError:
@@ -71,7 +78,7 @@ def extract_koawin_partition_fields(data: dict):
     paired_logs = {}
     for name in ("kow", "koa", "kaw"):
         coefficients[name], paired_logs[name] = _coefficient_and_log(
-            model.get(name),
+            model[name] if name in model else _MISSING,
             direct_logs[name],
         )
 
