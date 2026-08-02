@@ -30,7 +30,7 @@ FATE_ENDPOINTS = [
     {
         "endpoint": "log_kow",
         "model": "KOWWIN",
-        "description": "辛醇/水分配系数 logKow",
+        "description": "辛醇/水分配系数 logKow（优先采用实验值；无实验值时采用 KOWWIN 估算值）",
     },
     {
         "endpoint": "water_solubility_mg_l",
@@ -50,7 +50,7 @@ FATE_ENDPOINTS = [
     {
         "endpoint": "log_koc",
         "model": "KOCWIN",
-        "description": "有机碳归一化吸附系数 logKoc",
+        "description": "有机碳归一化吸附系数 logKoc（优先采用实验值；无实验值时采用 KOCWIN 的 MCI 估算值）",
     },
     {
         "endpoint": "biowin_ultimate",
@@ -120,6 +120,31 @@ FATE_ENDPOINTS = [
 ]
 
 ENDPOINT_KEYS = [item["endpoint"] for item in FATE_ENDPOINTS]
+
+TARGET_INDICATOR_DESCRIPTIONS = [
+    FATE_ENDPOINTS[0],
+    {
+        "endpoint": "log_koa",
+        "model": "KOAWIN",
+        "description": "辛醇/空气分配系数 logKoa（优先采用实验值；无实验值时采用 KOAWIN 估算值）",
+    },
+    {
+        "endpoint": "log_kaw",
+        "model": "KOAWIN",
+        "description": "空气/水分配系数 logKaw（由 KOAWIN 的 KAW 取 log10）",
+    },
+    {
+        "endpoint": "tpsa_rdkit_a2",
+        "model": "RDKit",
+        "description": "拓扑极性表面积 TPSA（Å²；RDKit 结构计算值）",
+    },
+    {
+        "endpoint": "mr_rdkit_cm3_mol",
+        "model": "RDKit",
+        "description": "Wildman–Crippen 摩尔折射率 MR（cm³/mol；RDKit 结构计算值）",
+    },
+    *FATE_ENDPOINTS[1:],
+]
 
 EPI_WEB_RESULT_SHEETS = [
     "Core_Summary",

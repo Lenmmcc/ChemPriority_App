@@ -16,8 +16,8 @@ if PROJECT_ROOT not in sys.path:
 
 from src.episuite_io import (  # noqa: E402
     DEFAULT_EPI_WEB_API,
-    FATE_ENDPOINTS,
     REQUIRED_COLUMNS,
+    TARGET_INDICATOR_DESCRIPTIONS,
     build_epi_web_result_tables,
     build_input_zip,
     build_result_workbook,
@@ -225,7 +225,7 @@ with right_col:
     )
 
 st.subheader("目标环境归趋指标")
-st.dataframe(pd.DataFrame(FATE_ENDPOINTS), width="stretch")
+st.dataframe(pd.DataFrame(TARGET_INDICATOR_DESCRIPTIONS), width="stretch")
 
 if uploaded_file is not None:
     uploaded_bytes = uploaded_file.getvalue()
