@@ -10,8 +10,8 @@
   不一致；
 - `tpsa_rdkit_a2`、`mr_rdkit_cm3_mol` 位于表尾，与分子性质字段分离。
 
-页面顶部“目标环境归趋指标”中的 `log_koc` 说明也需要明确 selected 值的
-选取规则。
+页面顶部“目标环境归趋指标”还需要补充 logKoa、logKaw、TPSA、MR，并明确
+logKow、logKoa、logKoc 的实验值与估算值使用规则。
 
 ## 对外结果契约
 
@@ -63,17 +63,30 @@ koawin_log_kaw -> log_kaw
 DataFrame 的插入顺序作为页面、CSV 和 Excel 的共同列顺序来源，不增加页面或
 Excel 专属的重命名、删除或重排逻辑。
 
-## logKoc 指标说明
+## 目标环境归趋指标说明
 
-`FATE_ENDPOINTS` 中 `log_koc` 的 description 精确更新为：
+页面说明表新增或更新以下条目：
 
 ```text
+辛醇/水分配系数 logKow（优先采用实验值；无实验值时采用 KOWWIN 估算值）
+辛醇/空气分配系数 logKoa（优先采用实验值；无实验值时采用 KOAWIN 估算值）
+空气/水分配系数 logKaw（由 KOAWIN 的 KAW 取 log10）
+拓扑极性表面积 TPSA（Å²；RDKit 结构计算值）
+Wildman–Crippen 摩尔折射率 MR（cm³/mol；RDKit 结构计算值）
 有机碳归一化吸附系数 logKoc（优先采用实验值；无实验值时采用 KOCWIN 的 MCI 估算值）
 ```
 
-该文字由页面“目标环境归趋指标”表格直接读取，因此只维护一个说明来源。
-本次仅修改说明，不改变现有 logKoc 数据解析、selected/estimated/experimental
-选取或计算逻辑。
+`FATE_ENDPOINTS` 和由其生成的 `ENDPOINT_KEYS` 继续只表示核心环境归趋查询
+契约。新增 logKoa、logKaw、TPSA、MR 不直接加入 `FATE_ENDPOINTS`，避免扩展
+补充导入、结果池和一键批量查询的字段集合。
+
+新增独立的页面说明常量 `TARGET_INDICATOR_DESCRIPTIONS`：复用现有核心指标，
+并在 logKow 后插入 logKoa、logKaw、TPSA、MR。页面“目标环境归趋指标”表格
+改为读取该常量。`FATE_ENDPOINTS` 中 logKow、logKoc 的 description 同步采用
+上述批准文本，因此核心指标和页面说明仍只有一个权威文字来源。
+
+本次仅修改说明，不改变现有 logKow、logKoa、logKoc 数据解析、
+selected/estimated/experimental 选取或计算逻辑。
 
 ## 页面与导出
 
@@ -93,7 +106,8 @@ Excel 专属的重命名、删除或重排逻辑。
   `melting_point_selected` 之间；
 - Excel 表头与 Properties DataFrame 的字段名和顺序一致；
 - 内部 KOAWIN 提取、系数关系校验和 Warnings 保持现有行为；
-- `log_koc` 页面说明与批准文本完全一致；
+- 页面说明表包含 logKow、logKoa、logKaw、TPSA、MR 和 logKoc 的批准文本；
+- `ENDPOINT_KEYS` 不增加 logKoa、logKaw、TPSA、MR；
 - 聚焦 EPI 测试、完整测试套件、模块编译和差异检查全部通过。
 
 ## 非目标
@@ -103,3 +117,4 @@ Excel 专属的重命名、删除或重排逻辑。
 - 不改变 logKoc 结果值选择逻辑；
 - 不动态删除全空列；
 - 不调整其他结果表或桌面安装包。
+- 不把页面说明新增项扩展为核心查询、补充导入或结果池字段。
