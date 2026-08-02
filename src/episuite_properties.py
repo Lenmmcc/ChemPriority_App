@@ -15,7 +15,7 @@ PARTITION_COLUMN_ORDER = (
     "koawin_kaw",
 )
 PUBLIC_EPI_ENRICHMENT_ORDER = (
-    "koawin_log_kaw",
+    "log_kaw",
     "tpsa_rdkit_a2",
     "mr_rdkit_cm3_mol",
 )
@@ -178,7 +178,7 @@ def build_epi_property_enrichment(data: dict, epi_smiles=None, input_smiles=None
         input_smiles=input_smiles,
     )
     public_fields = {
-        "koawin_log_kaw": partition_fields["koawin_log_kaw"],
+        "log_kaw": partition_fields["koawin_log_kaw"],
         **descriptor_fields,
     }
     return (

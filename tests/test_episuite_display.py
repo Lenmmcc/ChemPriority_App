@@ -143,7 +143,7 @@ class EPISuiteDisplayTests(unittest.TestCase):
         exec(compile(isolated_page, page_path, "exec"), namespace)
 
         property_columns = {
-            "koawin_log_kaw": [-2.0],
+            "log_kaw": [-2.0],
             "tpsa_rdkit_a2": [20.23],
             "mr_rdkit_cm3_mol": [12.7598],
         }

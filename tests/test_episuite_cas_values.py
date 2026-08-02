@@ -682,20 +682,32 @@ class EPISuiteCasValueTests(unittest.TestCase):
         tables = episuite_io.build_epi_web_result_tables(raw_df=raw_rows)
         properties = tables["Properties"]
 
-        retained_columns = [
-            "koawin_log_kaw",
+        expected_adjacent_columns = [
+            "log_koa_estimated",
+            "log_koa_experimental",
+            "log_koa_type",
+            "log_koa_units",
+            "log_kaw",
             "tpsa_rdkit_a2",
             "mr_rdkit_cm3_mol",
+            "melting_point_selected",
         ]
         removed_columns = {
+            "log_koa_selected",
             "koawin_log_kow",
             "koawin_kow",
             "koawin_log_koa",
             "koawin_koa",
+            "koawin_log_kaw",
             "koawin_kaw",
         }
-        positions = [properties.columns.get_loc(name) for name in retained_columns]
-        self.assertEqual(positions, list(range(positions[0], positions[0] + 3)))
+        start = properties.columns.get_loc("log_koa_estimated")
+        self.assertEqual(
+            properties.columns[
+                start : start + len(expected_adjacent_columns)
+            ].tolist(),
+            expected_adjacent_columns,
+        )
         self.assertEqual(
             properties.loc[0, "log_kow_estimated"],
             response["logKow"]["estimatedValue"]["value"],
@@ -705,7 +717,7 @@ class EPISuiteCasValueTests(unittest.TestCase):
             response["logKoa"]["estimatedValue"]["value"],
         )
         self.assertAlmostEqual(
-            properties.loc[0, "koawin_log_kaw"],
+            properties.loc[0, "log_kaw"],
             math.log10(response["logKoa"]["estimatedValue"]["model"]["kaw"]),
         )
         self.assertAlmostEqual(properties.loc[0, "tpsa_rdkit_a2"], 20.23)
@@ -841,7 +853,7 @@ class EPISuiteCasValueTests(unittest.TestCase):
         self.assertIn("ECOSAR_Aquatic_Toxicity", sheets)
         self.assertIn("Raw_API_JSON", sheets)
 
-    def test_workbook_properties_sheet_uses_internal_headers_and_numeric_values(self):
+    def test_workbook_properties_sheet_matches_public_schema_and_numeric_values(self):
         response = self._response_with_koawin_model()
         input_df = pd.DataFrame(
             {"compound": ["Ethanol"], "smiles": ["CCO"], "cas": ["64-17-5"]}
@@ -870,15 +882,17 @@ class EPISuiteCasValueTests(unittest.TestCase):
         data = rows[1]
 
         retained_columns = (
-            "koawin_log_kaw",
+            "log_kaw",
             "tpsa_rdkit_a2",
             "mr_rdkit_cm3_mol",
         )
         removed_headers = {
+            "log_koa_selected",
             "koawin_log_kow",
             "koawin_kow",
             "koawin_log_koa",
             "koawin_koa",
+            "koawin_log_kaw",
             "koawin_kaw",
             "logKOW（KOAWIN估算）",
             "KOW（KOAWIN估算）",
@@ -890,6 +904,7 @@ class EPISuiteCasValueTests(unittest.TestCase):
             "MR（cm³/mol，RDKit）",
         }
         properties = tables["Properties"]
+        self.assertEqual(header, list(properties.columns))
         for column in retained_columns:
             self.assertIn(column, header)
             workbook_value = data[header.index(column)]

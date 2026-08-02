@@ -1056,9 +1056,18 @@ def _build_properties_row(base, data):
         "organic": chemical.get("organic"),
         "flags": chemical.get("flags"),
     }
+    for prefix, section in [("log_kow", "logKow"), ("log_koa", "logKoa")]:
+        row.update(_selected_estimated_experimental_columns(prefix, data, section))
+    row.pop("log_koa_selected", None)
+
+    enrichment, warnings = build_epi_property_enrichment(
+        data,
+        epi_smiles=base.get("epi_smiles"),
+        input_smiles=base.get("smiles"),
+    )
+    row.update(enrichment)
+
     for prefix, section in [
-        ("log_kow", "logKow"),
-        ("log_koa", "logKoa"),
         ("melting_point", "meltingPoint"),
         ("boiling_point", "boilingPoint"),
         ("vapor_pressure", "vaporPressure"),
@@ -1080,12 +1089,6 @@ def _build_properties_row(base, data):
             "dermal_lag_time": _value_at(data, "dermalPermeability.lagTime.value"),
         }
     )
-    enrichment, warnings = build_epi_property_enrichment(
-        data,
-        epi_smiles=base.get("epi_smiles"),
-        input_smiles=base.get("smiles"),
-    )
-    row.update(enrichment)
     return row, warnings
 
 

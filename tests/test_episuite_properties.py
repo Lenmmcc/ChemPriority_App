@@ -273,9 +273,9 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
 
         self.assertEqual(
             list(fields),
-            ["koawin_log_kaw", "tpsa_rdkit_a2", "mr_rdkit_cm3_mol"],
+            ["log_kaw", "tpsa_rdkit_a2", "mr_rdkit_cm3_mol"],
         )
-        self.assertEqual(fields["koawin_log_kaw"], -2.0)
+        self.assertEqual(fields["log_kaw"], -2.0)
         self.assertAlmostEqual(fields["tpsa_rdkit_a2"], 20.23)
         self.assertAlmostEqual(fields["mr_rdkit_cm3_mol"], 12.7598)
         for removed in (
@@ -283,6 +283,7 @@ class EPISuitePropertyEnrichmentTests(unittest.TestCase):
             "koawin_kow",
             "koawin_log_koa",
             "koawin_koa",
+            "koawin_log_kaw",
             "koawin_kaw",
         ):
             self.assertNotIn(removed, fields)
